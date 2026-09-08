@@ -23,7 +23,7 @@ export function createApp() {
   app.use("/api/floors", floorRoutes); // MAP-1: floor list + read-only layout
   app.use("/api/registration", registrationRoutes); // ID-1, ID-2, ID-3
   app.use("/api/checkin", checkinRoutes); // INF-3/INF-4 identity + OCC-1..3, OCC-6
-  app.use("/api/reservations", reservationRoutes); // RES-1..RES-5, RES-7
+  app.use("/api/reservations", reservationRoutes); // RES-1..RES-3, RES-5, RES-7
   app.use("/api/resources", resourceRoutes); // MAP-3, MAP-4, MAP-5 (editor writes)
   app.use("/api/admin", adminRoutes); // ADM-1..ADM-5, RPT-1, RES-6
 

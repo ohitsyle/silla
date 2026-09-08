@@ -15,8 +15,16 @@ async function main() {
 
   // Live map updates (spec §12, §17): status changes stream here,
   // kept separate from layout, which is fetched once via REST.
+  // Same rule as the REST app in app.js, and it has to be written the
+  // same way. This was `...filter(Boolean) || "*"`, which never fires:
+  // an empty array is truthy, so an unset CORS_ORIGINS handed Socket.io
+  // `origin: []` — every origin refused. The REST half kept working
+  // because app.js already used the length check, so the symptom was a
+  // live map that silently stopped updating while everything else was
+  // fine. Reflect the request origin only when nothing is configured.
+  const socketOrigins = (process.env.CORS_ORIGINS || "").split(",").filter(Boolean);
   const io = new SocketIOServer(server, {
-    cors: { origin: (process.env.CORS_ORIGINS || "").split(",").filter(Boolean) || "*" },
+    cors: { origin: socketOrigins.length ? socketOrigins : true },
   });
 
   io.on("connection", (socket) => {

@@ -105,6 +105,16 @@ Two consequences worth reading before you start:
 clone. Move them across by hand — a password manager, a USB stick, or
 retyping. Not email, not chat, not a GitHub file.
 
+**Copy `MONGO_URI` across byte for byte — do not tidy it up.** `connectDB`
+calls `mongoose.connect(uri)` with no `dbName`, and the working URI has
+no database in its path, so Mongo falls back to its default and every
+product collection (organizations, users, floors, resources,
+reservations…) actually lives in a database named **`test`**. Adding a
+tidier-looking database name to the URI silently connects you to an
+empty database, and the demo looks wiped rather than misconfigured.
+`vendor/` is unaffected — it passes `VENDOR_DB_NAME` (default
+`silla_vendor`) explicitly, which is why it is a separate database.
+
 ```bash
 # ---- on the new machine ----
 git clone https://github.com/<you>/silla.git
@@ -132,7 +142,31 @@ cd portal && npm run dev     # :5174   (optional)
 `client/.env.example` already carries the live demo organization's id,
 so copying it as-is is correct as long as you are pointing at the same
 cluster. If you ever do start a fresh database, seed it and then put the
-id `npm run seed` prints into `VITE_DEMO_ORG_ID`.
+id `npm run seed` prints into `VITE_DEMO_ORG_ID` — and export
+`TEST_ORG_ID` with the same id, or every test fails against the old
+hardcoded default in `tests/helpers.mjs`.
+
+Three Windows notes, none of them fatal:
+
+- Every npm script here is a plain `node`/`nodemon`/`vite` call, so
+  nothing needs porting. The unix-only syntax is in this README's own
+  examples: use `copy` for `cp` in cmd, and set env vars the PowerShell
+  way (`$env:FOO="bar"; npm test`) rather than the `FOO=bar npm test`
+  form shown below.
+- **Do not copy `node_modules` from the Mac.** esbuild and rollup
+  resolve a per-platform binary, so a transplanted tree fails with
+  "you installed esbuild for another platform". Install fresh. Nothing
+  needs compiling — `bcryptjs` is pure JS, so no Build Tools or
+  node-gyp.
+- `npm install` in `server/` pulls `mongodb-memory-server`, whose
+  postinstall downloads a mongod binary that corporate AV and proxies
+  often block. Nothing in the repo imports it, so it is safe to skip
+  with `$env:MONGOMS_DISABLE_POSTINSTALL=1` before installing. Do not
+  reach for `--ignore-scripts` instead — esbuild's postinstall is
+  required for Vite to run.
+- Clone to a short path like `C:\dev\silla`, and not inside a
+  OneDrive-synced folder — OneDrive breaks Vite and nodemon file
+  watching and intermittently locks files under `node_modules`.
 
 Check it worked by signing in at `http://localhost:5173/login` as
 `admin@demo.test` / `123456`. If the map draws, the new machine is
