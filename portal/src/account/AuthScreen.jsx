@@ -32,20 +32,27 @@ export default function AuthScreen({ mode, navigate, redirectTo }) {
     setBusy(true);
     setError(null);
     try {
-      if (isSignUp) {
-        await signUp({
-          name: form.name.trim(),
-          email: form.email.trim(),
-          password: form.password,
-          organizationName: form.organizationName.trim(),
-        });
-      } else {
-        await signIn(form.email.trim(), form.password);
-      }
+      const account = isSignUp
+        ? await signUp({
+            name: form.name.trim(),
+            email: form.email.trim(),
+            password: form.password,
+            organizationName: form.organizationName.trim(),
+          })
+        : await signIn(form.email.trim(), form.password);
+
       // Someone who came here mid-configuration goes back to it, not to
       // an orders list that is empty precisely because they have not yet
       // saved the thing they were making.
-      navigate(hasPending() ? ROUTES.configure : redirectTo || ROUTES.orders, { replace: true });
+      //
+      // Everyone else lands on the page that is actually theirs. SILLA
+      // staff used to be sent to the BUYER's orders list, which greeted
+      // the person who runs the business with "Nothing here yet —
+      // configure a system and it'll be saved here as a draft" and a
+      // button inviting them to buy their own product. Their work is
+      // the queue.
+      const home = account?.role === "silla" ? ROUTES.queue : ROUTES.orders;
+      navigate(hasPending() ? ROUTES.configure : redirectTo || home, { replace: true });
     } catch (err) {
       // A taken email on sign-up is a recoverable mistake, not a
       // failure — point at the other form rather than just refusing.

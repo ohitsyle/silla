@@ -146,13 +146,22 @@ router.get(
   "/queue/all",
   requireSilla,
   asyncHandler(async (req, res) => {
+    // Drafts are a buyer's private working copy — they are not an order
+    // until submitted, and listing them would put half-finished thinking
+    // in front of the vendor.
+    //
+    // The guard used to be `ALLOWED_TRANSITIONS[status] !== undefined`,
+    // which reads like a validity check and is one — but "draft" IS a
+    // key in that table, so `?status=draft` sailed through it and
+    // returned every buyer's private draft along with their email.
+    // Verified against the running API before this was changed.
+    // Being a known status and being listable are different questions.
+    const LISTABLE = ["submitted", "provisioning", "live", "cancelled"];
+
     const filter = {};
-    if (req.query.status && ALLOWED_TRANSITIONS[req.query.status] !== undefined) {
+    if (req.query.status && LISTABLE.includes(req.query.status)) {
       filter.status = req.query.status;
     } else {
-      // Drafts are a buyer's private working copy — they are not an
-      // order until submitted, and listing them would put half-finished
-      // thinking in front of the vendor.
       filter.status = { $ne: "draft" };
     }
 
