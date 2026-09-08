@@ -1,6 +1,7 @@
-import { forwardRef, useEffect, useId, useState } from "react";
-import { motion } from "framer-motion";
-import { LoaderCircle, TriangleAlert, CircleCheck, Info, Check } from "lucide-react";
+import { forwardRef, useEffect, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { AnimatePresence, motion } from "framer-motion";
+import { LoaderCircle, TriangleAlert, CircleCheck, Info, Check, X, Inbox } from "lucide-react";
 
 /**
  * Portal UI primitives.
@@ -699,6 +700,192 @@ export function Stat({ label, value, sub, tone, onClick }) {
     </Wrapper>
   );
 }
+
+/* ──────────────────────────── Modal ───────────────────────────────── */
+
+/**
+ * A dialog for anything that interrupts.
+ *
+ * A copy of the product's, not an import — the portal must never reach
+ * into client/. Same contract, warmer surface: the storefront's rounder
+ * radii, and a scrim tinted with the ink token rather than flat black,
+ * because hard black over cream reads as another application's chrome
+ * dropping onto the page.
+ *
+ * Rendered through a portal so an ancestor's overflow or transform can
+ * never clip it. Escape closes, the backdrop closes, focus moves in on
+ * open and returns to whatever opened it on close, and the page behind
+ * cannot scroll while it is up.
+ */
+export function Modal({
+  open,
+  onClose,
+  title,
+  subtitle,
+  icon: Icon,
+  children,
+  footer,
+  width = "max-w-lg",
+  dismissible = true,
+}) {
+  const panelRef = useRef(null);
+  const restoreRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+
+    restoreRef.current = document.activeElement;
+
+    const onKey = (e) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      // A destructive confirmation can opt out, so a stray keypress
+      // cannot dismiss the question it is asking.
+      if (dismissible) onClose?.();
+    };
+    document.addEventListener("keydown", onKey, true);
+
+    // Compensate for the scrollbar so the page behind does not jump
+    // sideways the moment the dialog opens.
+    const gap = window.innerWidth - document.documentElement.clientWidth;
+    const prevOverflow = document.body.style.overflow;
+    const prevPad = document.body.style.paddingRight;
+    document.body.style.overflow = "hidden";
+    if (gap > 0) document.body.style.paddingRight = `${gap}px`;
+
+    const frame = requestAnimationFrame(() => {
+      const target =
+        panelRef.current?.querySelector("[data-autofocus]") ||
+        panelRef.current?.querySelector("input, select, textarea, button");
+      target?.focus();
+    });
+
+    return () => {
+      document.removeEventListener("keydown", onKey, true);
+      document.body.style.overflow = prevOverflow;
+      document.body.style.paddingRight = prevPad;
+      cancelAnimationFrame(frame);
+      // Return focus, so a keyboard user is not dumped at the top of
+      // the document.
+      if (restoreRef.current instanceof HTMLElement) restoreRef.current.focus();
+    };
+  }, [open, onClose, dismissible]);
+
+  const reduced = prefersReducedMotion();
+
+  return createPortal(
+    <AnimatePresence>
+      {open && (
+        <div className="fixed inset-0 z-[100] flex items-end justify-center p-0 sm:items-center sm:p-6">
+          <motion.div
+            className="absolute inset-0 backdrop-blur-sm"
+            style={{ background: "rgb(var(--c-line) / 0.45)" }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: DURATION.fast }}
+            onClick={dismissible ? onClose : undefined}
+          />
+          <motion.div
+            ref={panelRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={typeof title === "string" ? title : undefined}
+            className={cx(
+              "relative w-full border border-line/10 bg-bg-card shadow-lg",
+              "max-h-[92vh] overflow-y-auto rounded-t-xl sm:rounded-xl",
+              width
+            )}
+            initial={reduced ? { opacity: 0 } : { opacity: 0, y: 24, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={reduced ? { opacity: 0 } : { opacity: 0, y: 12, scale: 0.99 }}
+            transition={{ duration: DURATION.base, ease: EASE_OUT }}
+          >
+            {(title || (onClose && dismissible)) && (
+              <div className="flex items-start gap-3 p-5 pb-0">
+                {Icon && (
+                  <span
+                    className="mt-0.5 grid h-10 w-10 shrink-0 place-items-center rounded-[12px]"
+                    style={{
+                      background: "rgb(var(--c-accent) / 0.12)",
+                      color: "var(--color-accent)",
+                    }}
+                  >
+                    <Icon size={19} strokeWidth={2.2} />
+                  </span>
+                )}
+                <div className="min-w-0 flex-1">
+                  {title && (
+                    <h2 className="text-lg font-bold leading-tight tracking-tight">{title}</h2>
+                  )}
+                  {subtitle && (
+                    <p className="mt-1 text-sm leading-relaxed text-ink-secondary">{subtitle}</p>
+                  )}
+                </div>
+                {dismissible && (
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    aria-label="Close"
+                    className="-mr-1 -mt-1 grid h-8 w-8 shrink-0 place-items-center rounded-full
+                               text-ink-muted transition-colors duration-fast
+                               hover:bg-line/[0.07] hover:text-ink-primary"
+                  >
+                    <X size={17} />
+                  </button>
+                )}
+              </div>
+            )}
+
+            <div className="p-5">{children}</div>
+
+            {footer && (
+              <div className="flex flex-wrap items-center justify-end gap-3 border-t border-line/10 p-5">
+                {footer}
+              </div>
+            )}
+          </motion.div>
+        </div>
+      )}
+    </AnimatePresence>,
+    document.body
+  );
+}
+
+/* ──────────────────────────── Empty state ─────────────────────────── */
+
+/**
+ * What a list says when it holds nothing.
+ *
+ * An empty region with no explanation reads as a failure to load. This
+ * says which it is, and where there is one, offers the action that
+ * fills it.
+ */
+export function EmptyState({ icon: Icon = Inbox, title, children, action, className }) {
+  return (
+    <div
+      className={cx(
+        "rounded-lg border border-dashed border-line/15 px-6 py-12 text-center",
+        className
+      )}
+    >
+      <span
+        className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-[14px]"
+        style={{ background: "rgb(var(--c-line) / 0.05)", color: "var(--color-ink-muted)" }}
+      >
+        <Icon size={22} />
+      </span>
+      {title && <p className="font-bold tracking-tight text-ink-primary">{title}</p>}
+      {children && (
+        <p className="mx-auto mt-1.5 max-w-sm text-sm leading-relaxed text-ink-secondary">
+          {children}
+        </p>
+      )}
+      {action && <div className="mt-5 flex justify-center">{action}</div>}
+    </div>
+  );
+}
+
 
 /* ──────────────────────────── Structure ───────────────────────────── */
 

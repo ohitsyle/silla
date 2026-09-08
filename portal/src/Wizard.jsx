@@ -4,7 +4,7 @@ import {
   ArrowLeft, ArrowRight, CircleCheck, CreditCard, Eye, EyeOff, RotateCcw, Send, UserPlus,
 } from "lucide-react";
 
-import { Button, Notice, Panel, Segmented, Stepper, panelEnter } from "./components/ui.jsx";
+import { Button, Modal, Notice, Panel, Segmented, Stepper, panelEnter } from "./components/ui.jsx";
 import Preview from "./components/Preview.jsx";
 import { DEFAULT_CONFIG, buildProfile, validate } from "./lib/profile.js";
 import { PLANS, priceFor } from "./lib/plans.js";
@@ -198,6 +198,7 @@ export default function Wizard({ onExit, navigate }) {
   const [annual, setAnnual] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
+  const [confirmReset, setConfirmReset] = useState(false);
   const reduceMotion = useReducedMotion();
 
   /**
@@ -294,9 +295,15 @@ export default function Wizard({ onExit, navigate }) {
     goTo(stepIndex + 1);
   }, [blocked, step.key, goTo, stepIndex, reduceMotion]);
 
+  /**
+   * Destructive with no undo, so it asks first — in a real dialog.
+   *
+   * This was a window.confirm(), which is the one piece of UI we cannot
+   * style, cannot animate, and which renders as an OS alert bearing the
+   * browser's name rather than ours. On a page this deliberately
+   * designed it read as the site breaking.
+   */
   function startOver() {
-    // Destructive with no undo, so it asks first.
-    if (!window.confirm("Start over? Your saved draft will be discarded.")) return;
     try {
       window.localStorage.removeItem(DRAFT_KEY);
     } catch {
@@ -304,6 +311,9 @@ export default function Wizard({ onExit, navigate }) {
       // we cannot remove will simply be overwritten by the next edit.
     }
     setConfig(DEFAULT_CONFIG);
+    setRevealed({});
+    setDownloaded(false);
+    setConfirmReset(false);
     goTo(0);
   }
 
@@ -428,7 +438,13 @@ export default function Wizard({ onExit, navigate }) {
             </button>
           )}
 
-          <Button variant="ghost" size="sm" icon={RotateCcw} onClick={startOver} className="ml-auto sm:ml-0">
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={RotateCcw}
+            onClick={() => setConfirmReset(true)}
+            className="ml-auto sm:ml-0"
+          >
             Start over
           </Button>
         </div>
@@ -758,6 +774,39 @@ export default function Wizard({ onExit, navigate }) {
           </div>
         </div>
       </main>
+
+      {/* Not dismissible by Escape or a backdrop click: this discards
+          work, and the two ways to leave a dialog by accident are
+          exactly the two we do not want here. */}
+      <Modal
+        open={confirmReset}
+        onClose={() => setConfirmReset(false)}
+        dismissible={false}
+        icon={RotateCcw}
+        title="Start over?"
+        subtitle="Your saved draft is discarded and every step goes back to its default. This cannot be undone."
+        width="max-w-md"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setConfirmReset(false)}>
+              Keep my draft
+            </Button>
+            <Button variant="danger" icon={RotateCcw} onClick={startOver} data-autofocus>
+              Discard and start over
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm leading-relaxed text-ink-secondary">
+          You are on step {stepIndex + 1} of {STEPS.length}
+          {config.organizationName ? (
+            <>
+              , configuring <span className="font-semibold text-ink-primary">{config.organizationName}</span>
+            </>
+          ) : null}
+          .
+        </p>
+      </Modal>
     </div>
   );
 }
