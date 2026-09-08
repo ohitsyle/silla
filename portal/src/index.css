@@ -1,0 +1,323 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design tokens for the ORDER PORTAL.
+ *
+ * The portal renders two brands on one screen at the same time: SILLA's
+ * own chrome, and — inside the live preview — the buyer's. So the token
+ * names from the buyer app (client/src/index.css) are declared twice
+ * here, in two scopes:
+ *
+ *   :root            SILLA's brand. The wizard, its panels, its buttons.
+ *                    Fixed; a buyer never changes the vendor's storefront.
+ *
+ *   .silla-preview   The same names again, so any subtree carrying this
+ *                    class re-themes to the buyer's colours WITHOUT
+ *                    touching the portal chrome around it.
+ *
+ * Why a scope rather than setting the variables on <html>, which is what
+ * applyOrgTheme.js does in the buyer app: there, the buyer's brand IS
+ * the whole document. Here it is a picture inside someone else's page.
+ * Painting it on the root would drag the wizard's own buttons and panels
+ * into the buyer's palette, and every preview of a low-contrast brand
+ * would make the portal itself unreadable.
+ *
+ * Each token is declared twice within each scope:
+ *   --c-*      space-separated RGB channels, so Tailwind's alpha
+ *              modifiers work (`bg-state-available/20`)
+ *   --color-*  a ready-to-use colour, for inline styles and SVG
+ *
+ * Re-theming the preview means setting the --c-* channels on the preview
+ * element (inline style, from the wizard's branding state). The --color-*
+ * forms are re-declared inside .silla-preview specifically so they
+ * recompute from those overrides: custom properties are substituted on
+ * the element that declares them, so a --color-* inherited from :root
+ * would arrive already frozen to SILLA's cyan.
+ *
+ * Motion, elevation and radii are declared ONCE, on :root, and are
+ * deliberately absent from the preview scope. A buyer rebrands colour;
+ * they do not get to redefine how fast a menu opens or how a focus ring
+ * reads, because those carry accessibility guarantees.
+ */
+:root {
+  /* SF Pro Rounded on Apple hardware, a friendly fallback elsewhere.
+     Declared here rather than only on the storefront: the configurator
+     is vendor surface too, and it was the one screen still set in the
+     plain system UI font. No webfont — a blocking network request for a
+     face the OS already ships would be a poor trade. */
+  --font-rounded: ui-rounded, "SF Pro Rounded", "Hiragino Maru Gothic ProN",
+    "Nunito", "Quicksand", system-ui, -apple-system, sans-serif;
+
+  /* ---- Surface ----
+     Warm paper, not white. The configurator used to be dark chrome
+     while the storefront in front of it was cream and rounded, so
+     clicking "Build yours" dropped a buyer into what felt like a
+     different company's product. One palette for the whole vendor
+     surface; the BUYER's dark product still renders correctly inside
+     .silla-preview, which overrides every one of these names. */
+  --c-bg-page: 253 250 244;
+  --c-bg-page-end: 246 240 229;
+  --c-bg-card: 255 253 249;
+  --c-bg-panel: 246 240 229;
+
+  /* ---- Line / border (used with alpha modifiers) ----
+     Now a dark ink, since borders sit on light paper. Every
+     `border-line/10` in the app flips from a light hairline on dark to
+     a dark hairline on light with no component edit. */
+  --c-line: 26 22 18;
+
+  /* ---- Ink ---- */
+  --c-ink-primary: 26 22 18;
+  --c-ink-secondary: 92 82 70;
+  --c-ink-muted: 148 136 122;
+
+  /* ---- Accent: SILLA's terracotta. The portal's, not a buyer's. ---- */
+  --c-accent: 224 122 95;
+  --c-accent-ink: 255 253 249;
+
+  /* ---- Resource states (spec §12 — colour AND icon, never colour alone) ---- */
+  --c-state-available: 52 211 153;
+  --c-state-reserved: 251 146 60;
+  --c-state-occupied: 100 116 139;
+  --c-state-unavailable: 248 113 113;
+  --c-state-overstay: 192 132 252;
+
+  /* ---- Derived, ready-to-use forms ---- */
+  --color-bg-page: rgb(var(--c-bg-page));
+  --color-bg-page-end: rgb(var(--c-bg-page-end));
+  --color-bg-card: rgb(var(--c-bg-card));
+  --color-bg-panel: rgb(var(--c-bg-panel));
+  --color-ink-primary: rgb(var(--c-ink-primary));
+  --color-ink-secondary: rgb(var(--c-ink-secondary));
+  --color-ink-muted: rgb(var(--c-ink-muted));
+  --color-accent: rgb(var(--c-accent));
+  --color-accent-ink: rgb(var(--c-accent-ink));
+  --color-state-available: rgb(var(--c-state-available));
+  --color-state-reserved: rgb(var(--c-state-reserved));
+  --color-state-occupied: rgb(var(--c-state-occupied));
+  --color-state-unavailable: rgb(var(--c-state-unavailable));
+  --color-state-overstay: rgb(var(--c-state-overstay));
+
+  /* ---- Map chrome (spec §12's grid, zones and labels) ---- */
+  --color-map-grid: rgb(var(--c-line) / 0.07);
+  --color-map-outline: rgb(var(--c-line) / 0.16);
+  --color-map-piece-fill: rgb(var(--c-line) / 0.05);
+  --color-map-piece-stroke: rgb(var(--c-line) / 0.14);
+  --color-map-zone-fill: rgb(var(--c-line) / 0.035);
+  --color-map-zone-stroke: rgb(var(--c-line) / 0.2);
+
+  /* ------------------------------------------------------------------
+   * Design system — the items spec §20 lists as "still open":
+   * motion-duration tokens, elevation, focus and disabled states.
+   * ------------------------------------------------------------------ */
+
+  /* Motion. One easing for entrances (decelerating, feels physical) and
+     one for state changes. Durations are short on purpose: a buyer is
+     filling in a form, not watching a product tour. */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-instant: 90ms;
+  --dur-fast: 150ms;
+  --dur-base: 240ms;
+  --dur-slow: 380ms;
+
+  /* Elevation. Tinted with the ink rather than pure black: a neutral
+     black shadow on warm paper turns the paper grey underneath it. The
+     top highlight that lit a dark card would be invisible here, so it
+     is a hairline instead. */
+  --shadow-sm: 0 1px 2px rgb(var(--c-line) / 0.08);
+  --shadow-md: 0 8px 24px -10px rgb(var(--c-line) / 0.18), 0 1px 2px rgb(var(--c-line) / 0.06);
+  --shadow-lg: 0 26px 50px -22px rgb(var(--c-line) / 0.3), 0 2px 6px rgb(var(--c-line) / 0.07);
+  --highlight-top: inset 0 0 0 1px rgb(var(--c-line) / 0.05);
+
+  /* Radii — rounder than the product's, to match the storefront. The
+     configurator is still marketing surface; it should feel like the
+     page it was reached from, not like the admin console. */
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-xl: 28px;
+}
+
+/* ---- The buyer's scope ----
+ * Values here are only the fallback shown before the wizard has any
+ * branding to preview; they match the product defaults a buyer who
+ * configures nothing would actually get, so an untouched preview is an
+ * honest one. Override by setting the --c-* channels on the element,
+ * e.g. style={{ "--c-accent": "255 212 28" }}. */
+.silla-preview {
+  --c-bg-page: 10 15 20;
+  --c-bg-page-end: 15 22 30;
+  --c-bg-card: 17 24 32;
+  --c-bg-panel: 23 32 43;
+
+  --c-line: 236 241 246;
+
+  --c-ink-primary: 236 241 246;
+  --c-ink-secondary: 154 168 181;
+  --c-ink-muted: 106 120 133;
+
+  --c-accent: 34 211 238;
+  --c-accent-ink: 4 34 43;
+
+  --c-state-available: 52 211 153;
+  --c-state-reserved: 251 146 60;
+  --c-state-occupied: 100 116 139;
+  --c-state-unavailable: 248 113 113;
+  --c-state-overstay: 192 132 252;
+
+  /* Re-derived from whatever channels won on THIS element. */
+  --color-bg-page: rgb(var(--c-bg-page));
+  --color-bg-page-end: rgb(var(--c-bg-page-end));
+  --color-bg-card: rgb(var(--c-bg-card));
+  --color-bg-panel: rgb(var(--c-bg-panel));
+  --color-ink-primary: rgb(var(--c-ink-primary));
+  --color-ink-secondary: rgb(var(--c-ink-secondary));
+  --color-ink-muted: rgb(var(--c-ink-muted));
+  --color-accent: rgb(var(--c-accent));
+  --color-accent-ink: rgb(var(--c-accent-ink));
+  --color-state-available: rgb(var(--c-state-available));
+  --color-state-reserved: rgb(var(--c-state-reserved));
+  --color-state-occupied: rgb(var(--c-state-occupied));
+  --color-state-unavailable: rgb(var(--c-state-unavailable));
+  --color-state-overstay: rgb(var(--c-state-overstay));
+
+  --color-map-grid: rgb(var(--c-line) / 0.07);
+  --color-map-outline: rgb(var(--c-line) / 0.16);
+  --color-map-piece-fill: rgb(var(--c-line) / 0.05);
+  --color-map-piece-stroke: rgb(var(--c-line) / 0.14);
+  --color-map-zone-fill: rgb(var(--c-line) / 0.035);
+  --color-map-zone-stroke: rgb(var(--c-line) / 0.2);
+}
+
+/* The preview stands in for the buyer app's <body>, so it paints that
+ * gradient itself. Wrapped in :where() to carry zero specificity: a
+ * preview surface that would rather be a flat `bg-bg-card` can just say
+ * so with a utility class and win. */
+:where(.silla-preview) {
+  background: linear-gradient(180deg, var(--color-bg-page), var(--color-bg-page-end));
+  color: var(--color-ink-primary);
+}
+
+body {
+  background: var(--color-bg-page);
+  min-height: 100vh;
+  /* light, not dark: the vendor surface is warm paper now. Left explicit
+     so form controls and scrollbars are drawn light to match. */
+  color-scheme: light;
+  /* Set explicitly: without it, anything outside a page container falls
+     back to the UA's default text colour instead of the theme. */
+  color: var(--color-ink-primary);
+  font-family: var(--font-rounded);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* The buyer's preview is a picture of a DARK product sitting inside a
+   light page. It re-declares the colour tokens already; this restores
+   the two things that live on the document rather than on a token, so
+   a select or a scrollbar inside the preview isn't drawn light. */
+.silla-preview {
+  color-scheme: dark;
+}
+
+/* ---- Focus (spec §20) ----
+ * One visible ring for every interactive element, keyboard-only so a
+ * mouse user never sees it. Applied globally rather than per-component
+ * so a new control cannot forget to be reachable. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* ---- Disabled (spec §20) ---- */
+[disabled],
+[aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
+/* Skeleton shimmer. Nothing in the portal loads slowly enough to need it
+   yet; it is carried in step with the buyer app so a primitive lifted
+   from there animates without hunting for a missing keyframe. */
+@keyframes silla-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* ---- Reduced motion ----
+ * Honour the OS setting. Framer Motion is told separately in
+ * lib/motion.js; this covers CSS transitions and the shimmer. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * MARKETING SCOPE — the storefront, not the workshop.
+ *
+ * A third scope alongside :root (SILLA's wizard chrome) and
+ * .silla-preview (the buyer's brand). The landing page is a warm, light
+ * world; the wizard stays dark because it previews a dark product and
+ * has to keep the preview legible against its own chrome.
+ *
+ * That contrast is deliberate rather than sloppy: the pitch is meant to
+ * feel like an invitation, and stepping into the configurator should
+ * feel like stepping into a tool. Keeping it in its own scope means the
+ * marketing palette can be as warm as it likes without leaking a single
+ * token into the wizard or into a buyer's preview.
+ * ═════════════════════════════════════════════════════════════════ */
+.silla-marketing {
+  /* These now ALIAS the root tokens rather than restating them. The
+     storefront and the configurator are one surface with one palette;
+     duplicating the values here is how they drift apart. --m-accent-deep
+     is the exception: it has no equivalent in the product's token set. */
+  --m-paper: var(--c-bg-page);
+  --m-paper-deep: var(--c-bg-page-end);
+  --m-card: var(--c-bg-card);
+
+  --m-ink: var(--c-ink-primary);
+  --m-ink-soft: var(--c-ink-secondary);
+  --m-ink-faint: var(--c-ink-muted);
+
+  --m-line: var(--c-line);
+
+  --m-accent: var(--c-accent);
+  --m-accent-deep: 192 92 68;
+  --m-accent-ink: var(--c-accent-ink);
+
+  /* The seat-tile motif reuses the product's resource states, so a
+     chair on the landing page means what it means on a real map. */
+  --m-free: var(--c-state-available);
+  --m-held: var(--c-state-reserved);
+  --m-taken: var(--c-state-occupied);
+
+  background: rgb(var(--m-paper));
+  color: rgb(var(--m-ink));
+}
+
+/* Big display type wants tighter tracking and a shorter leading than
+   body copy; at 6rem the default spacing looks like a ransom note.
+   Unscoped: the configurator is the same surface as the storefront and
+   uses the same headline treatment. */
+.display {
+  letter-spacing: -0.035em;
+  line-height: 0.98;
+  font-weight: 800;
+}
+
+::selection {
+  background: rgb(var(--c-accent) / 0.25);
+}

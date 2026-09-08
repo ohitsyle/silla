@@ -1,0 +1,109 @@
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { OrgProvider } from "./lib/OrgContext.jsx";
+import { AuthProvider, useAuth } from "./lib/AuthContext.jsx";
+import StarterPage from "./pages/StarterPage.jsx";
+import MapPage from "./pages/MapPage.jsx";
+import LoginPage from "./pages/LoginPage.jsx";
+import TermsPage from "./pages/TermsPage.jsx";
+import KioskPage from "./pages/KioskPage.jsx";
+import AdminPage from "./pages/AdminPage.jsx";
+import EditorPage from "./pages/EditorPage.jsx";
+import ChangePinPage from "./pages/ChangePinPage.jsx";
+import AppShell from "./components/AppShell.jsx";
+
+// TODO: set from an env var, a subdomain lookup, or a login step —
+// hardcoding it here only as a scaffold starting point.
+const DEMO_ORGANIZATION_ID = import.meta.env.VITE_DEMO_ORG_ID || "";
+
+/**
+ * AUTH-3 — "First-login flag routes to terms; Cannot proceed until
+ * accepted." The gate lives here rather than in each page so a new
+ * authenticated route cannot forget to apply it.
+ */
+/**
+ * Wraps a page in the application shell. Deliberately NOT applied to the
+ * kiosk, login, terms or change-PIN screens: the kiosk is a
+ * single-purpose physical surface, and the gate screens must not offer a
+ * way around themselves.
+ *
+ * `fill` hands the page the entire content area, for the map — which
+ * should BE the screen rather than sit in a column on it.
+ *
+ * The editor deliberately does NOT use it: below its map sit the zone,
+ * label and floor panels, and `fill` means overflow-hidden, so those
+ * became unreachable. A page with content under the fold has to scroll.
+ */
+function Shell({ children, fill = false }) {
+  return <AppShell fill={fill}>{children}</AppShell>;
+}
+
+function RequireAuth({ children }) {
+  const { isAuthenticated, requiresTermsAcceptance, mustChangePin, booting } = useAuth();
+  const location = useLocation();
+
+  if (booting) {
+    return <div className="min-h-screen flex items-center justify-center text-ink-secondary">Loading…</div>;
+  }
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  }
+  // ADM-4 — a provisioned or staff-reset PIN must be replaced before the
+  // account is usable, and that gate comes before the terms gate.
+  if (mustChangePin) {
+    return <Navigate to="/change-pin" replace />;
+  }
+  if (requiresTermsAcceptance) {
+    return <Navigate to="/terms" replace />;
+  }
+  return children;
+}
+
+export default function App() {
+  return (
+    <OrgProvider organizationId={DEMO_ORGANIZATION_ID}>
+      <BrowserRouter>
+        <AuthProvider>
+          <Routes>
+            <Route path="/" element={<Shell><StarterPage /></Shell>} />
+            <Route path="/login" element={<LoginPage />} />
+            {/* The kiosk is an unauthenticated, physically-supervised
+                surface — a person registering does not have an account
+                yet (spec §4, ID-1). */}
+            <Route path="/kiosk" element={<KioskPage />} />
+            <Route path="/terms" element={<TermsPage />} />
+            <Route path="/change-pin" element={<ChangePinPage />} />
+
+            {/* MAP-1 — /map lands on the first floor, /map/:floorId is
+                linkable so a floor can be shared or bookmarked. */}
+            <Route
+              path="/map"
+              element={
+                <RequireAuth>
+                  <Shell fill><MapPage /></Shell>
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/map/:floorId"
+              element={
+                <RequireAuth>
+                  <Shell fill><MapPage /></Shell>
+                </RequireAuth>
+              }
+            />
+
+            {/* ADM-1..ADM-5, RPT-1 — staff console (spec §14, desktop) */}
+            <Route path="/admin" element={<RequireAuth><Shell><AdminPage /></Shell></RequireAuth>} />
+            {/* Sections are addressable: /admin/reports is a link you can send. */}
+            <Route path="/admin/:section" element={<RequireAuth><Shell><AdminPage /></Shell></RequireAuth>} />
+            {/* MAP-3/4/5 — the map editor, same layout model as the map */}
+            <Route path="/editor" element={<RequireAuth><Shell><EditorPage /></Shell></RequireAuth>} />
+            <Route path="/editor/:floorId" element={<RequireAuth><Shell><EditorPage /></Shell></RequireAuth>} />
+
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </AuthProvider>
+      </BrowserRouter>
+    </OrgProvider>
+  );
+}

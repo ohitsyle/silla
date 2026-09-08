@@ -1,0 +1,161 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design tokens (spec §16, §20).
+ *
+ * EVERY colour in the app resolves through one of these variables —
+ * nothing is hardcoded in a component, a Tailwind class, or an SVG
+ * attribute. That is what lets applyOrgTheme.js re-skin the entire
+ * product at runtime from Organization.branding, rather than only
+ * recolouring the accent.
+ *
+ * Each token is declared twice:
+ *   --c-*      space-separated RGB channels, so Tailwind's alpha
+ *              modifiers work (`bg-state-available/20`)
+ *   --color-*  a ready-to-use colour, for inline styles and SVG
+ *
+ * applyOrgTheme sets the --c-* channels; the --color-* forms derive
+ * from them automatically, so there is one source of truth.
+ *
+ * Defaults below are the PRODUCT's palette — cool graphite with a cyan
+ * accent. Deliberately vertical- and institution-neutral: a buyer's
+ * branding overrides all of it (see server/src/scripts/profiles.js for
+ * two worked examples).
+ */
+:root {
+  /* ---- Surface ---- */
+  --c-bg-page: 10 15 20;
+  --c-bg-page-end: 15 22 30;
+  --c-bg-card: 17 24 32;
+  --c-bg-panel: 23 32 43;
+
+  /* ---- Line / border (used with alpha modifiers) ---- */
+  --c-line: 236 241 246;
+
+  /* ---- Ink ---- */
+  --c-ink-primary: 236 241 246;
+  --c-ink-secondary: 154 168 181;
+  --c-ink-muted: 106 120 133;
+
+  /* ---- Accent (the one token every deployment overrides) ---- */
+  --c-accent: 34 211 238;
+  --c-accent-ink: 4 34 43;
+
+  /* ---- Resource states (spec §12 — colour AND icon, never colour alone) ---- */
+  --c-state-available: 52 211 153;
+  --c-state-reserved: 251 146 60;
+  --c-state-occupied: 100 116 139;
+  --c-state-unavailable: 248 113 113;
+  --c-state-overstay: 192 132 252;
+
+  /* ---- Derived, ready-to-use forms ---- */
+  --color-bg-page: rgb(var(--c-bg-page));
+  --color-bg-page-end: rgb(var(--c-bg-page-end));
+  --color-bg-card: rgb(var(--c-bg-card));
+  --color-bg-panel: rgb(var(--c-bg-panel));
+  --color-ink-primary: rgb(var(--c-ink-primary));
+  --color-ink-secondary: rgb(var(--c-ink-secondary));
+  --color-ink-muted: rgb(var(--c-ink-muted));
+  --color-accent: rgb(var(--c-accent));
+  --color-accent-ink: rgb(var(--c-accent-ink));
+  --color-state-available: rgb(var(--c-state-available));
+  --color-state-reserved: rgb(var(--c-state-reserved));
+  --color-state-occupied: rgb(var(--c-state-occupied));
+  --color-state-unavailable: rgb(var(--c-state-unavailable));
+  --color-state-overstay: rgb(var(--c-state-overstay));
+
+  /* ---- Map chrome (spec §12's grid, zones and labels) ---- */
+  --color-map-grid: rgb(var(--c-line) / 0.07);
+  --color-map-outline: rgb(var(--c-line) / 0.16);
+  --color-map-piece-fill: rgb(var(--c-line) / 0.05);
+  --color-map-piece-stroke: rgb(var(--c-line) / 0.14);
+  --color-map-zone-fill: rgb(var(--c-line) / 0.035);
+  --color-map-zone-stroke: rgb(var(--c-line) / 0.2);
+
+  /* ------------------------------------------------------------------
+   * Design system — the items spec §20 lists as "still open":
+   * motion-duration tokens, elevation, focus and disabled states.
+   *
+   * These are intentionally NOT per-organization. A buyer rebrands
+   * colour; they do not get to redefine how fast a menu opens or how a
+   * focus ring reads, because those carry accessibility guarantees.
+   * ------------------------------------------------------------------ */
+
+  /* Motion. One easing for entrances (decelerating, feels physical) and
+     one for state changes. Durations are short on purpose: this is an
+     operational tool people use all day, not a marketing page. */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-instant: 90ms;
+  --dur-fast: 150ms;
+  --dur-base: 240ms;
+  --dur-slow: 380ms;
+
+  /* Elevation. On a dark surface a drop shadow alone reads as mud, so
+     each level pairs a shadow with a top highlight. */
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.28);
+  --shadow-md: 0 4px 16px -4px rgb(0 0 0 / 0.4), 0 1px 2px rgb(0 0 0 / 0.2);
+  --shadow-lg: 0 18px 40px -12px rgb(0 0 0 / 0.55), 0 2px 6px rgb(0 0 0 / 0.25);
+  --highlight-top: inset 0 1px 0 rgb(var(--c-line) / 0.06);
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+}
+
+body {
+  background: linear-gradient(180deg, var(--color-bg-page), var(--color-bg-page-end));
+  background-attachment: fixed;
+  min-height: 100vh;
+  color-scheme: dark;
+  /* Set explicitly: without it, anything outside a page container (the
+     nav wordmark, for one) falls back to the UA's default link/text
+     colour instead of the theme. */
+  color: var(--color-ink-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ---- Focus (spec §20) ----
+ * One visible ring for every interactive element, keyboard-only so a
+ * mouse user never sees it. Applied globally rather than per-component
+ * so a new control cannot forget to be reachable. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* ---- Disabled (spec §20) ---- */
+[disabled],
+[aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
+/* Skeleton shimmer, used by the loading placeholders. */
+@keyframes silla-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* ---- Reduced motion ----
+ * Honour the OS setting. Framer Motion is told separately in
+ * lib/motion.js; this covers CSS transitions and the shimmer. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "silla-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "description": "SILLA \u2014 Space Intelligence & Live Layout Administration. API + scheduled worker.",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "start": "node src/server.js",
+    "seed": "node src/scripts/seed.js",
+    "seed:file": "node src/scripts/seed.js --file",
+    "seed:layout": "node src/scripts/seedLayout.js",
+    "spike:rfid": "node src/scripts/rfidSpike.js",
+    "profile": "node src/scripts/applyProfile.js",
+    "test": "node tests/run.mjs",
+    "test:clean": "node tests/cleanup.mjs",
+    "email:test": "node src/scripts/emailTest.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.5.0",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^10.0.1",
+    "socket.io": "^4.7.5"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "^11.2.0",
+    "nodemon": "^3.1.4"
+  }
+}
