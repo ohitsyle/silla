@@ -1,0 +1,50 @@
+# SILLA product API + Socket.io + the in-process cron worker (INF-5's
+# "worker runs" is satisfied by this unit — startScheduler() is called
+# from src/server.js, so there is no second process to supervise).
+#
+# Install:  sudo cp silla-server.service /etc/systemd/system/
+#           sudo systemctl daemon-reload && sudo systemctl enable --now silla-server
+
+[Unit]
+Description=SILLA product API (Express + Socket.io + scheduler)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=silla
+Group=silla
+WorkingDirectory=/opt/silla/server
+ExecStart=/usr/bin/node src/server.js
+
+# Secrets live OUTSIDE the git checkout so a `git pull` can never
+# clobber them and a stray `git add -A` can never commit them.
+EnvironmentFile=/etc/silla/server.env
+
+# Defaults, in case the env file forgets them. TZ is not optional:
+# operating-hours checks call date.getHours() in process-local time
+# (services/reservations/availability.js), so on a default-UTC box the
+# kiosk refuses every booking during Philippine working hours.
+Environment=NODE_ENV=production
+Environment=TZ=Asia/Manila
+
+Restart=always
+RestartSec=5
+# Don't thrash if it is crash-looping on a bad env file.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=silla-server
+
+# Modest hardening. The process needs outbound network (Atlas, SMTP)
+# and read access to its own checkout; nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/silla
+
+[Install]
+WantedBy=multi-user.target
