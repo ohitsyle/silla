@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import Landing from "./marketing/Landing.jsx";
+import EntryDialog from "./marketing/EntryDialog.jsx";
 import Wizard from "./Wizard.jsx";
 import AuthScreen from "./account/AuthScreen.jsx";
 import Orders from "./account/Orders.jsx";
 import Queue from "./account/Queue.jsx";
 import { AccountProvider, useAccount } from "./lib/AccountContext.jsx";
 import { ROUTES, useHashRoute } from "./lib/useHashRoute.js";
+import { saveIntent } from "./lib/entryIntent.js";
 
 /**
  * The portal's views.
@@ -36,6 +38,17 @@ function Routed() {
   const { isSignedIn, isSilla, booting } = useAccount();
 
   const [wiping, setWiping] = useState(false);
+
+  /**
+   * The doorway (journey step 4). Every "build" CTA on the storefront
+   * opens this instead of jumping straight into the configurator, which
+   * used to drop a stranger onto step 1 of a seven-step form with no
+   * explanation of what it was or how long it would take.
+   *
+   * `intent` carries what they clicked — which plan, which billing
+   * period — so it can be preselected instead of discarded.
+   */
+  const [entry, setEntry] = useState(null);
   const timers = useRef([]);
   useEffect(() => () => timers.current.forEach(clearTimeout), []);
 
@@ -103,13 +116,44 @@ function Routed() {
       case "queue":
         return <Queue id={route.id} navigate={navigate} />;
       default:
-        return <Landing onConfigure={() => transition(ROUTES.configure)} navigate={navigate} />;
+        return (
+          <Landing
+            // The doorway, not the configurator. `intent` is what
+            // they clicked — a plan key and billing period from a
+            // pricing card, or nothing from a generic CTA.
+            onConfigure={(intent) => setEntry(intent || {})}
+            navigate={navigate}
+          />
+        );
     }
   };
 
   return (
     <>
       {view()}
+
+      <EntryDialog
+        open={Boolean(entry)}
+        onClose={() => setEntry(null)}
+        planKey={entry?.plan}
+        annual={entry?.annual !== false}
+        onExplore={() => {
+          // Straight in. Nothing is asked for, which is the whole point
+          // — CLAUDE.md's rule is that the account comes LAST.
+          if (entry?.plan) saveIntent({ plan: entry.plan, annual: entry.annual !== false });
+          setEntry(null);
+          transition(ROUTES.configure);
+        }}
+        onSignIn={() => {
+          // The plan survives the round trip through sign-in, and
+          // AuthScreen's redirectTo brings them back to the wizard
+          // rather than to an orders list that is empty precisely
+          // because they have not configured anything yet.
+          if (entry?.plan) saveIntent({ plan: entry.plan, annual: entry.annual !== false });
+          setEntry(null);
+          navigate(ROUTES.signIn);
+        }}
+      />
 
       <AnimatePresence>
         {wiping && (

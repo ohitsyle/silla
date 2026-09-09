@@ -7,11 +7,12 @@ import {
 import { Button, Modal, Notice, Panel, Segmented, Stepper, panelEnter } from "./components/ui.jsx";
 import Preview from "./components/Preview.jsx";
 import { DEFAULT_CONFIG, buildProfile, validate } from "./lib/profile.js";
-import { PLANS, priceFor } from "./lib/plans.js";
+import { PLANS, formatMoney, priceFor } from "./lib/plans.js";
 import { vendorApi } from "./lib/vendorApi.js";
 import { useAccount } from "./lib/AccountContext.jsx";
 import { ROUTES } from "./lib/useHashRoute.js";
 import { savePending, takePending } from "./lib/pendingConfiguration.js";
+import { peekIntent, takeIntent } from "./lib/entryIntent.js";
 
 import DetailsStep from "./steps/DetailsStep.jsx";
 import TerminologyStep from "./steps/TerminologyStep.jsx";
@@ -194,8 +195,36 @@ export default function Wizard({ onExit, navigate }) {
    */
   const [revealed, setRevealed] = useState({});
   const [downloaded, setDownloaded] = useState(false);
-  const [plan, setPlan] = useState("building");
-  const [annual, setAnnual] = useState(true);
+  /**
+   * The plan, seeded from whatever the buyer clicked on their way in.
+   *
+   * These were `useState("building")` and `useState(true)`, so a buyer
+   * who pressed "Configure this" on the One Room card arrived at step 7
+   * with Whole Building preselected at three times the price. The two
+   * surfaces agreed only by the coincidence of two independent
+   * useState(true) calls, and `quotedAmount` is frozen onto the order as
+   * the record of what this customer was offered.
+   *
+   * Read once, in the initialiser, and cleared by takeIntent — a plan
+   * chosen on the way in must not still be overriding a later, different
+   * configuration.
+   */
+  // peek, not take. takeIntent CLEARS the stored intent, and a state
+  // initialiser runs during render — React 18's StrictMode deliberately
+  // double-invokes it to surface exactly this class of bug. The first
+  // call consumed the intent and the second returned null, so the plan
+  // the buyer clicked was silently discarded and the wizard fell back to
+  // Whole Building at three times the price. Reading is pure; the
+  // clearing is a side effect and belongs in an effect.
+  const [entryIntent] = useState(peekIntent);
+  const [plan, setPlan] = useState(() => entryIntent?.plan || "building");
+  const [annual, setAnnual] = useState(() => entryIntent?.annual !== false);
+
+  // Cleared once, after mount, so a plan chosen on the way in cannot
+  // still be overriding an unrelated configuration later.
+  useEffect(() => {
+    takeIntent();
+  }, []);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [confirmReset, setConfirmReset] = useState(false);
@@ -664,7 +693,6 @@ export default function Wizard({ onExit, navigate }) {
                 <div className="grid gap-2 sm:grid-cols-3">
                   {PLANS.map((p) => {
                     const chosen = p.key === plan;
-                    const amount = annual ? p.annual : p.monthly;
                     return (
                       <button
                         key={p.key}
@@ -678,7 +706,7 @@ export default function Wizard({ onExit, navigate }) {
                       >
                         <span className="block text-sm font-bold">{p.name}</span>
                         <span className="mt-0.5 block text-sm text-ink-secondary">
-                          {amount == null ? "Let's talk" : `$${amount}/month`}
+                          {formatMoney(priceFor(p.key, annual), { period: "month" })}
                         </span>
                       </button>
                     );

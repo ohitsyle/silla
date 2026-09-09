@@ -196,6 +196,31 @@ Flow decisions worth keeping:
   never disabled — it either advances or reveals, scrolling to the first
   `[data-field-error]`. A greyed-out button with no explanation is a
   worse dead end than an error message.
+- **There is a doorway, and it is not a sign-up wall.** Six CTAs on the
+  storefront all called one argument-less handler and dropped a stranger
+  onto step 1 of a seven-step form with nothing explaining what it was.
+  `marketing/EntryDialog.jsx` now opens instead: what is ahead, how long,
+  that nothing is charged, and a choice between exploring (primary,
+  needs nothing) and signing in first. The account is still asked for
+  LAST — that rule is why "explore" is the default action.
+  It also surfaces a saved draft, which was previously invisible from
+  the storefront.
+- **Intent travels with the click** (`lib/entryIntent.js`). Pressing
+  "Configure this" on One Room used to be indistinguishable from
+  pressing it on Whole Building, so the wizard's hardcoded
+  `useState("building")` won and a buyer could place an order quoted at
+  three times the plan they chose — `quotedAmount` is frozen onto the
+  Order as the record of what they were offered.
+  **The initialiser must stay pure.** It was `useState(takeIntent)`, and
+  `takeIntent` clears the stored value: React 18's StrictMode
+  double-invokes state initialisers precisely to surface that, so the
+  first call consumed the intent and the second returned null. It reads
+  with `peekIntent` and clears in an effect.
+- **`formatMoney` in `lib/plans.js` is the only money formatter.**
+  `priceFor` returns MINOR units (cents, what the Order stores) while
+  the pricing cards read `plan.annual` in MAJOR units. Both are correct
+  and they differ by 100x, which is how a $39 plan rendered as
+  "$3900/month".
 - **The intro collapses after step 1.** A three-line welcome that stays
   for all seven steps stops being a welcome and becomes furniture.
 - **One heading per step, in the column your eye is already in.** Each

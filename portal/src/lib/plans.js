@@ -61,6 +61,27 @@ export const PLANS = [
 
 export const PLAN_BY_KEY = Object.fromEntries(PLANS.map((p) => [p.key, p]));
 
+/**
+ * One money formatter, because there were four.
+ *
+ * `priceFor` returns MINOR units (cents) — that is what the Order
+ * stores, and storing money as a float is how you end up with £9.99
+ * becoming £9.989999. Pricing.jsx renders `plan.annual` directly, in
+ * MAJOR units. Both are correct and they differ by 100x, which is
+ * exactly the kind of thing that renders "$3900/month" on a $39 plan.
+ *
+ * Takes minor units, because that is the form that travels — into the
+ * order, and back out of it on the buyer's own orders screen.
+ */
+export const formatMoney = (minorUnits, { period } = {}) => {
+  if (minorUnits == null) return "Priced with you";
+  const major = minorUnits / 100;
+  // No decimals on whole amounts: "$39" reads as a price, "$39.00"
+  // reads as a receipt.
+  const shown = Number.isInteger(major) ? major : major.toFixed(2);
+  return `${CURRENCY}${shown}${period ? `/${period}` : ""}`;
+};
+
 /** Minor units (cents), which is what the order stores. */
 export const priceFor = (key, annual) => {
   const plan = PLAN_BY_KEY[key];

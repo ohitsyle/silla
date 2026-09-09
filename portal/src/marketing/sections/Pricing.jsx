@@ -172,7 +172,13 @@ export default function Pricing({ onConfigure }) {
 
               <button
                 type="button"
-                onClick={onConfigure}
+                // The plan and billing period travel with the click. Every card
+                // used to call the same argument-less handler, so pressing
+                // "Configure this" on One Room landed you at step 7 with Whole
+                // Building preselected at three times the price — and
+                // quotedAmount is frozen onto the order as the record of what
+                // the buyer was shown.
+                onClick={() => onConfigure({ plan: plan.key, annual })}
                 className="mt-8 w-full inline-flex items-center justify-center gap-2 rounded-full py-3.5
                            text-[15px] font-bold transition-transform duration-200 active:scale-[0.97]"
                 style={

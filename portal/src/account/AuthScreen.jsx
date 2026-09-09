@@ -6,6 +6,7 @@ import { Button, Card, Field, Notice } from "../components/ui.jsx";
 import { useAccount } from "../lib/AccountContext.jsx";
 import { ROUTES } from "../lib/useHashRoute.js";
 import { hasPending } from "../lib/pendingConfiguration.js";
+import { peekIntent } from "../lib/entryIntent.js";
 
 /**
  * Sign in and sign up, one screen.
@@ -52,7 +53,14 @@ export default function AuthScreen({ mode, navigate, redirectTo }) {
       // button inviting them to buy their own product. Their work is
       // the queue.
       const home = account?.role === "silla" ? ROUTES.queue : ROUTES.orders;
-      navigate(hasPending() ? ROUTES.configure : redirectTo || home, { replace: true });
+
+      // Someone who came here from the doorway ("sign in first") has not
+      // configured anything yet, so their orders list is empty by
+      // definition — sending them there would answer a question they did
+      // not ask. Both a parked configuration and a parked entry intent
+      // mean "I was on my way to the configurator".
+      const heading = hasPending() || peekIntent() ? ROUTES.configure : redirectTo || home;
+      navigate(heading, { replace: true });
     } catch (err) {
       // A taken email on sign-up is a recoverable mistake, not a
       // failure — point at the other form rather than just refusing.
