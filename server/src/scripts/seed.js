@@ -30,7 +30,9 @@ import Site from "../models/Site.js";
 import Floor from "../models/Floor.js";
 import ResourceType from "../models/ResourceType.js";
 import User from "../models/User.js";
-import { memberIdExample } from "../lib/identity.js";
+import { generateVerificationCode, memberIdExample } from "../lib/identity.js";
+import { sendEmail } from "../services/email/index.js";
+import { founderWelcomeEmail } from "../services/email/templates.js";
 import { normalizeCardUid } from "../services/checkin/rfid.js";
 import { getProfile, PROFILE_KEYS } from "./profiles.js";
 import { loadProfile, registerProfile } from "./importProfile.js";
@@ -122,53 +124,115 @@ async function seed() {
     profile.floors.map((f) => ({ site: site._id, name: f.name, order: f.order, grid: f.grid }))
   );
 
-  await User.create({
-    organization: org._id,
-    role: "superadmin",
-    firstName: "Demo",
-    lastName: "Admin",
-    email: SUPERADMIN_EMAIL,
-    pinHash: await bcrypt.hash(SUPERADMIN_PIN, 10),
-    verified: true,
-    termsAcceptedAt: new Date(),
-  });
+  /*
+   * Who gets an account depends entirely on whether this profile names
+   * an owner, and the difference is a security boundary rather than a
+   * convenience.
+   *
+   * Every organization this script created used to receive the SAME
+   * three hardcoded accounts — admin@demo.test / PIN 123456 among them —
+   * INCLUDING organizations provisioned for paying customers, because
+   * `seed:file` runs this same path. Every buyer therefore shared one
+   * published superadmin credential and could sign into any other
+   * buyer's deployment. Those credentials are printed in the repo's own
+   * README, so it was not even a secret worth guessing.
+   *
+   * With an owner: exactly one account, that person, holding a random
+   * temporary PIN they must change, and no demo scaffolding at all.
+   * Without one: the demo trio, for the two built-in profiles that
+   * legitimately want a walkable demo.
+   */
+  let handoff = null;
 
-  // Staff are email-provisioned with no card and no kiosk tap (spec §6),
-  // and land on the terms gate at first login (AUTH-3).
-  await User.create({
-    organization: org._id,
-    role: "staff",
-    firstName: "Demo",
-    lastName: "Staff",
-    email: STAFF_EMAIL,
-    pinHash: await bcrypt.hash(STAFF_PIN, 10),
-    verified: true,
-    termsAcceptedAt: null,
-  });
+  if (profile.owner) {
+    // Uniform and cryptographic — the same generator AUTH-4 and ADM-4
+    // already use, so there is one notion of a temporary secret here.
+    const temporaryPin = generateVerificationCode();
 
-  // Member IDs are org-configurable (spec §4), so derive one from THIS
-  // profile's pattern rather than hardcoding a library-shaped id — a
-  // literal "2024-000001" would fail the office profile's EMP-#####.
-  await User.create({
-    organization: org._id,
-    role: "member",
-    firstName: "Demo",
-    lastName: "Member",
-    email: MEMBER_EMAIL,
-    memberId: memberIdExample(profile.identity.memberIdFormat),
-    cardUid: normalizeCardUid(MEMBER_CARD),
-    pinHash: await bcrypt.hash(MEMBER_PIN, 10),
-    verified: true,
-    termsAcceptedAt: new Date(),
-  });
+    const founder = await User.create({
+      organization: org._id,
+      role: "superadmin",
+      firstName: profile.owner.firstName,
+      lastName: profile.owner.lastName,
+      email: profile.owner.email.toLowerCase(),
+      pinHash: await bcrypt.hash(temporaryPin, 10),
+      verified: true, // provisioned by us, not self-registered at a kiosk
+      mustChangePin: true, // forced change on first sign-in
+      termsAcceptedAt: null, // AUTH-3 still applies — it is theirs to accept
+    });
+
+    // Fire-and-forget by design (spec §15), which is exactly why the PIN
+    // is printed below as well: if delivery fails silently, the operator
+    // is the only remaining route to the customer, and a founding
+    // superadmin nobody can sign in as is a dead deployment.
+    sendEmail(founderWelcomeEmail({ org, user: founder, temporaryPin }));
+
+    handoff = { email: founder.email, temporaryPin, userId: founder._id.toString() };
+  } else {
+    await User.create({
+      organization: org._id,
+      role: "superadmin",
+      firstName: "Demo",
+      lastName: "Admin",
+      email: SUPERADMIN_EMAIL,
+      pinHash: await bcrypt.hash(SUPERADMIN_PIN, 10),
+      verified: true,
+      termsAcceptedAt: new Date(),
+    });
+
+    // Staff are email-provisioned with no card and no kiosk tap (spec §6),
+    // and land on the terms gate at first login (AUTH-3).
+    await User.create({
+      organization: org._id,
+      role: "staff",
+      firstName: "Demo",
+      lastName: "Staff",
+      email: STAFF_EMAIL,
+      pinHash: await bcrypt.hash(STAFF_PIN, 10),
+      verified: true,
+      termsAcceptedAt: null,
+    });
+
+    // Member IDs are org-configurable (spec §4), so derive one from THIS
+    // profile's pattern rather than hardcoding a library-shaped id — a
+    // literal "2024-000001" would fail the office profile's EMP-#####.
+    await User.create({
+      organization: org._id,
+      role: "member",
+      firstName: "Demo",
+      lastName: "Member",
+      email: MEMBER_EMAIL,
+      memberId: memberIdExample(profile.identity.memberIdFormat),
+      cardUid: normalizeCardUid(MEMBER_CARD),
+      pinHash: await bcrypt.hash(MEMBER_PIN, 10),
+      verified: true,
+      termsAcceptedAt: new Date(),
+    });
+  }
 
   const { summaries } = await seedFloorLayouts(org, key);
 
   console.log(`\nSeed complete — ${profile.label} profile.\n`);
   printLayoutSummary(org, profile, summaries);
-  console.log(`\n  superadmin: ${SUPERADMIN_EMAIL} / PIN ${SUPERADMIN_PIN} (terms already accepted)`);
-  console.log(`  staff:      ${STAFF_EMAIL} / PIN ${STAFF_PIN} (first login → terms gate, AUTH-3)`);
-  console.log(`  member:     ${MEMBER_EMAIL} / PIN ${MEMBER_PIN}, card ${MEMBER_CARD} (tap at /kiosk)`);
+  if (handoff) {
+    // The operator's copy. sendEmail is fire-and-forget, so if delivery
+    // fails there is no other record of this PIN anywhere — it is
+    // bcrypt hashed the moment it is stored. Printing it is what stops
+    // a silent mail failure becoming a deployment nobody can enter.
+    console.log(`\n  FOUNDING SUPERADMIN — hand these over, then delete your copy:`);
+    console.log(`    sign in as: ${handoff.email}`);
+    console.log(`    temporary PIN: ${handoff.temporaryPin}`);
+    console.log(`    (they must change it and accept the terms on first sign-in)`);
+    console.log(`\n  A welcome email with these details was queued to ${handoff.email}.`);
+    console.log(`  Sending is fire-and-forget — confirm it arrived, or relay the PIN yourself.`);
+    console.log(`\n  No demo accounts were created. This deployment has exactly one user.`);
+  } else {
+    console.log(`\n  DEMO ACCOUNTS — this profile named no owner, so the demo trio was planted.`);
+    console.log(`  These credentials are public (they are in the README). Never ship them to a customer.`);
+    console.log(`\n  superadmin: ${SUPERADMIN_EMAIL} / PIN ${SUPERADMIN_PIN} (terms already accepted)`);
+    console.log(`  staff:      ${STAFF_EMAIL} / PIN ${STAFF_PIN} (first login → terms gate, AUTH-3)`);
+    console.log(`  member:     ${MEMBER_EMAIL} / PIN ${MEMBER_PIN}, card ${MEMBER_CARD} (tap at /kiosk)`);
+  }
   console.log(`\n  Set VITE_DEMO_ORG_ID=${org._id.toString()} in client/.env`);
   if (file) {
     console.log(`  Provisioned from ${file}`);

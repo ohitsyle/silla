@@ -1,4 +1,4 @@
-import { Building2, Check, Wand2 } from "lucide-react";
+import { Building2, Check, UserCog, Wand2 } from "lucide-react";
 import { Field, Notice, Panel } from "../components/ui.jsx";
 import { VERTICAL_PRESETS } from "../lib/profile.js";
 
@@ -83,6 +83,52 @@ export default function DetailsStep({ config, update, errors }) {
             the two can never disagree.
           </span>
         </div>
+      </Panel>
+
+      {/*
+        Who the system belongs to.
+        This is not an administrative afterthought — it is the block that
+        decides whether the provisioned deployment gets a real founding
+        superadmin or falls back to the shared demo accounts. Every
+        organization provisioned without it used to receive the same
+        published admin@demo.test / 123456, so any buyer could sign into
+        any other buyer's system.
+      */}
+      <Panel
+        title="Who will run it"
+        icon={UserCog}
+        subtitle="They become the first superadmin, and the only account your deployment starts with."
+      >
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field
+            label="First name"
+            name="ownerFirstName"
+            value={config.owner?.firstName || ""}
+            onChange={(e) => update({ owner: { ...config.owner, firstName: e.target.value } })}
+            placeholder="Ana"
+            error={errorFor(errors, "owner.firstName")}
+          />
+          <Field
+            label="Last name"
+            name="ownerLastName"
+            value={config.owner?.lastName || ""}
+            onChange={(e) => update({ owner: { ...config.owner, lastName: e.target.value } })}
+            placeholder="Reyes"
+            error={errorFor(errors, "owner.lastName")}
+          />
+        </div>
+
+        <Field
+          className="mt-4"
+          label="Email"
+          name="ownerEmail"
+          type="email"
+          value={config.owner?.email || ""}
+          onChange={(e) => update({ owner: { ...config.owner, email: e.target.value } })}
+          placeholder="ana@your-organization.org"
+          error={errorFor(errors, "owner.email")}
+          hint="The sign-in link and a one-time PIN go here the moment the system is built. Nobody at SILLA can see the PIN they choose afterwards."
+        />
       </Panel>
 
       <Panel title="Starting point" icon={Wand2}>

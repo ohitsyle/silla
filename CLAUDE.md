@@ -256,6 +256,36 @@ Three starting presets (library, office, blank), then everything is
 editable. The Review step emits the profile as JSON and offers it as a
 download.
 
+**`owner` is part of the profile contract**, and it is a security
+boundary rather than a nicety. `seed.js` used to plant the SAME three
+hardcoded accounts into every organization it created —
+`admin@demo.test` / `123456`, `staff@demo.test` / `654321`, and
+`member@demo.test` holding card `DEADBEEF` — and `seed:file` runs that
+same path, so every provisioned customer received one published
+superadmin credential and could sign into any other customer's
+deployment. Those credentials are printed in this repo's README.
+
+Now: a profile carrying `owner` (firstName, lastName, email) mints
+exactly ONE account — that person, superadmin, holding a random
+temporary PIN from the same generator AUTH-4 and ADM-4 use, with
+`mustChangePin` set and terms unaccepted — and plants no demo
+scaffolding at all. A profile WITHOUT an owner still gets the demo trio,
+because the two built-in verticals legitimately want a walkable demo;
+`importProfile`'s summary prints `owner  NONE — demo accounts will be
+planted instead` so nobody discovers that after the fact.
+
+The PIN is emailed via `founderWelcomeEmail` AND printed by the seeder.
+Both, deliberately: `sendEmail` is fire-and-forget (spec §15), so a
+silent delivery failure would otherwise leave a deployment nobody can
+enter and no copy of the PIN anywhere — it is bcrypt hashed the moment
+it is stored.
+
+The wizard requires it (Details step, "Who will run it"), `validate()`
+gates on it, and `buildProfile` omits the block entirely unless all
+three fields are filled — a half-filled owner would fail
+`importProfile` and refuse to provision, whereas an absent one is a
+valid demo profile.
+
 **The profile is the whole interface between the two halves.** The
 portal writes the same shape `server/src/scripts/profiles.js` already
 held, so the seeder needed no new creation path:
@@ -318,7 +348,12 @@ Decisions worth keeping:
   (`findOne({ _id, account })`). A `findById` followed by an ownership
   test is one forgotten line from an IDOR.
 - **A buyer's unsubmitted draft never appears in the queue.** It is not
-  an order until they submit it.
+  an order until they submit it. The guard was `ALLOWED_TRANSITIONS[
+  status] !== undefined`, which reads like a validity check and is one —
+  but `draft` IS a key in that table, so `?status=draft` sailed through
+  and returned every buyer's private draft with their email attached.
+  Verified against the running API, then fixed to an explicit allowlist.
+  Being a known status and being listable are different questions.
 - **`profile` is stored as free-form Mixed.** This service must not grow
   a second opinion about the profile's shape — `importProfile.js` is the
   one that matters, and two validators will disagree.

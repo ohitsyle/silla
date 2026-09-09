@@ -340,6 +340,20 @@ export function presetToConfig(presetKey, keep = {}) {
     organizationName: keep.organizationName || "",
     siteName: keep.siteName || preset.siteName,
 
+    // Who will run the deployment. Kept across a preset change for the
+    // same reason the organization name is: it is a fact about the
+    // buyer, and no preset could ever have an opinion about it.
+    //
+    // It becomes the profile's `owner` block, which is what seed.js uses
+    // to mint the founding superadmin. Without it a provisioned system
+    // falls back to the shared demo accounts — the same admin@demo.test
+    // in every customer's deployment.
+    owner: {
+      firstName: keep.owner?.firstName || "",
+      lastName: keep.owner?.lastName || "",
+      email: keep.owner?.email || "",
+    },
+
     colorScheme: preset.colorScheme,
     branding: clone(preset.branding),
 
@@ -425,6 +439,20 @@ export function validate(config) {
 
   if (!text(config?.organizationName)) {
     add("organizationName", "Enter the organization's name — it brands the whole deployment.");
+  }
+
+  // The founding superadmin. Required, because the alternative is not
+  // "no admin" — it is seed.js planting the shared demo accounts, so
+  // every customer provisioned without one ends up holding the same
+  // published admin@demo.test / 123456 credential as every other.
+  const owner = config?.owner || {};
+  if (!text(owner.firstName)) add("owner.firstName", "Enter the first name of whoever will run this system.");
+  if (!text(owner.lastName)) add("owner.lastName", "Enter their last name.");
+  const ownerEmail = text(owner.email);
+  if (!ownerEmail) {
+    add("owner.email", "Enter their email — the founding sign-in details are sent there.");
+  } else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ownerEmail)) {
+    add("owner.email", "That does not look like an email address.");
   }
 
   const terminology = config?.terminology || {};
@@ -746,6 +774,18 @@ export function buildProfile(config) {
   const organizationName = text(config?.organizationName) || "Untitled organization";
   const scheme = colorSchemeByKey(config?.colorScheme);
 
+  const ownerFirst = text(config?.owner?.firstName);
+  const ownerLast = text(config?.owner?.lastName);
+  const ownerEmail = text(config?.owner?.email).toLowerCase();
+  // All three or nothing. importProfile treats a PRESENT owner as a
+  // promise that every field is real and fails the whole file otherwise,
+  // so a half-filled block would refuse to provision — while an absent
+  // one is a perfectly valid demo profile.
+  const ownerBlock =
+    ownerFirst && ownerLast && ownerEmail
+      ? { firstName: ownerFirst, lastName: ownerLast, email: ownerEmail }
+      : null;
+
   const primaryColor = normalizeHex(config?.branding?.primaryColor, scheme.primaryColor);
   const branding = {
     primaryColor,
@@ -816,6 +856,7 @@ export function buildProfile(config) {
     label: organizationName,
     organizationName,
     siteName: text(config?.siteName) || "Main Site",
+    ...(ownerBlock ? { owner: ownerBlock } : {}),
     branding,
     terminology: {
       resourceNoun: text(config?.terminology?.resourceNoun) || DEFAULT_CONFIG.terminology.resourceNoun,

@@ -36,6 +36,7 @@ const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 const ROOT_KEYS = [
   "key", "label", "organizationName", "siteName",
+  "owner",
   "branding", "terminology", "identity", "policy",
   "catalog", "floors", "termsText",
 ];
@@ -142,6 +143,7 @@ export function validateProfile(raw) {
     if (!ROOT_KEYS.includes(key)) warn(key, "is not part of the profile contract and will be ignored");
   }
 
+  profile.owner = readOwner(raw.owner, fail, warn);
   profile.branding = readBranding(raw.branding, fail, warn);
   profile.terminology = readTerminology(raw.terminology, fail);
   profile.identity = readIdentity(raw.identity, fail, warn);
@@ -211,6 +213,47 @@ function readBranding(value, fail, warn) {
     }
   }
   return out;
+}
+
+/**
+ * Who runs this deployment.
+ *
+ * The profile is supposed to be a COMPLETE description of a deployment,
+ * and it was missing the one thing without which the deployment cannot
+ * be used: a person who can sign in. Before this, seed.js minted the
+ * same `admin@demo.test` / PIN 123456 founding superadmin into every
+ * organization it created — including a paying customer's — so every
+ * buyer shared one published credential and could sign into any other
+ * buyer's system.
+ *
+ * Optional, because the two built-in demo profiles legitimately have no
+ * real owner. When it is absent seed.js falls back to demo scaffolding
+ * and says so loudly; when it is present it mints a real superadmin
+ * with a random PIN and plants no demo accounts at all.
+ */
+function readOwner(value, fail, warn) {
+  if (value === undefined || value === null) return null;
+  if (!isPlainObject(value)) {
+    fail("owner", `must be an object with firstName, lastName and email (got ${describe(value)})`);
+    return null;
+  }
+  const out = {};
+  for (const key of ["firstName", "lastName", "email"]) {
+    if (!isFilledString(value[key])) {
+      fail(`owner.${key}`, `a non-empty string is required (got ${describe(value[key])})`);
+    } else {
+      out[key] = value[key].trim();
+    }
+  }
+  if (out.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(out.email)) {
+    fail("owner.email", `must be a valid email address (got ${describe(value.email)})`);
+  }
+  // This address receives the founding PIN. A typo here is a deployment
+  // nobody can get into, so it is worth a word rather than a silent pass.
+  if (out.email && /@(example\.(com|org|net)|test\.silla)$/i.test(out.email)) {
+    warn("owner.email", "is a reserved test domain — the founding PIN will never be delivered");
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 function readTerminology(value, fail) {
@@ -710,6 +753,16 @@ export function formatReport(result) {
     const row = (label, value) => lines.push(`  ${label.padEnd(13)} ${value}`);
     row("profile", `${p.label} (key: ${p.key})`);
     row("organization", `${p.organizationName} — ${p.siteName}`);
+    // The founding superadmin. Printed loudly because the alternative —
+    // no owner — means seed.js falls back to demo scaffolding, and
+    // whoever runs this needs to notice BEFORE it happens rather than
+    // discover a paying customer sharing admin@demo.test afterwards.
+    row(
+      "owner",
+      p.owner
+        ? `${p.owner.firstName} ${p.owner.lastName} <${p.owner.email}> — founding superadmin`
+        : "NONE — demo accounts will be planted instead (admin@demo.test etc.)"
+    );
     row("terminology", `${p.terminology.resourceNoun} / ${p.terminology.memberNoun} / ${p.terminology.facilityLabel}`);
     row("member ID", `${p.identity.memberIdFormat} (e.g. ${memberIdExample(p.identity.memberIdFormat)})`);
     row("check-in", `${p.identity.checkInMethod}, self-service registration ${p.identity.selfServiceRegistration ? "on" : "off"}`);

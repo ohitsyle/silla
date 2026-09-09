@@ -58,7 +58,7 @@ const STEPS = [
     title: "Your system",
     blurb: "SILLA builds it; you name it. This is the name your people will see.",
     Component: DetailsStep,
-    fields: ["preset", "organizationName", "siteName"],
+    fields: ["preset", "organizationName", "siteName", "owner"],
   },
   {
     key: "terminology",

@@ -176,6 +176,47 @@ export function staffOnboardingEmail({ org, user, temporaryPin }) {
   };
 }
 
+/**
+ * The founding superadmin of a newly provisioned deployment.
+ *
+ * Distinct from staffOnboardingEmail because the situations are not the
+ * same. That one says an account "has been created for you", which is
+ * true when a colleague provisions you and nonsense when you are the
+ * person who bought the system. This is the moment a customer's system
+ * becomes theirs, so it says so, and it carries the one thing that was
+ * previously promised and never sent: the credentials to get in.
+ *
+ * The PIN is temporary by construction — the account is created with
+ * mustChangePin, so the first sign-in forces a change and this message
+ * stops being useful the moment it is used.
+ */
+export function founderWelcomeEmail({ org, user, temporaryPin, deploymentUrl }) {
+  return {
+    to: user.email,
+    subject: `${org.name} is ready`,
+    text: [
+      `Hi ${user.firstName},`,
+      "",
+      `${org.name} has been provisioned and is ready to use. You are its`,
+      `superadmin, which means you can add your team, lay out your floors`,
+      `and change any of the settings we configured with you.`,
+      "",
+      deploymentUrl ? `  Sign in at:    ${deploymentUrl}` : null,
+      `  Your email:    ${user.email}`,
+      `  Temporary PIN: ${temporaryPin}`,
+      "",
+      `You'll set your own 6-digit PIN and accept the terms of use the`,
+      `first time you sign in. Nobody at SILLA can see the PIN you choose.`,
+      "",
+      `If you did not expect this email, tell us before signing in.`,
+      "",
+      `— SILLA`,
+    ]
+      .filter((line) => line !== null)
+      .join("\n"),
+  };
+}
+
 /** AUTH-4 — PIN reset code. */
 export function pinResetEmail({ org, user, code, expiryMinutes }) {
   return {
