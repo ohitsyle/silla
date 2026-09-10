@@ -16,7 +16,9 @@ export function createApp() {
   app.use(cors({ origin: allowedOrigins.length ? allowedOrigins : true }));
   app.use(express.json());
 
-  app.get("/api/health", (req, res) => res.json({ ok: true, service: "silla-server" }));
+  app.get("/api/health", (req, res) =>
+    res.json({ ok: true, service: "silla-server", env: process.env.NODE_ENV || "development", tz: Intl.DateTimeFormat().resolvedOptions().timeZone })
+  );
 
   app.use("/api/auth", authRoutes);
   app.use("/api/organizations", organizationRoutes);

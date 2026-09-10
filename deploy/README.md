@@ -54,6 +54,61 @@ must exist before the frontends are built.
 9. `./deploy-static.sh` with the URLs from 7 and 8.
 10. Put the two SPA URLs into `CORS_ORIGINS` on the box and restart.
 
+## Updating a deployment
+
+Coordinates live in `deploy/aws-env.sh` — source it first. It holds no
+secrets; the two that matter are the SSH key at `~/.ssh/silla-deploy.pem`
+and `/etc/silla/*.env` on the box itself.
+
+```bash
+source deploy/aws-env.sh
+```
+
+**Backend — `server/` or `vendor/`:**
+
+```bash
+./deploy/deploy-api.sh              # both
+./deploy/deploy-api.sh server       # one
+./deploy/deploy-api.sh --dry-run    # see what would change
+```
+
+Uploads your working tree (never `.env`), reinstalls only if the
+lockfile moved or `node_modules` is missing, restarts, and then checks
+the health endpoints **from the outside** — a unit can report `active`
+while the app inside it fails every request.
+
+**Frontend — `client/` or `portal/`:**
+
+```bash
+./deploy/deploy-static.sh
+```
+
+Rebuilds with the deployed API URL baked in, uploads to S3 with
+long-lived caching on hashed assets and no-cache on `index.html`, and
+invalidates `/index.html`. It refuses to upload a bundle still
+containing a `localhost` URL.
+
+**Changed an environment variable?** Those live only on the box:
+
+```bash
+ssh -i ~/.ssh/silla-deploy.pem ec2-user@$SILLA_HOST
+sudo nano /etc/silla/server.env
+sudo systemctl restart silla-server
+```
+
+### Two traps this workflow already walked into
+
+**`rsync --delete` will eat `node_modules`.** The upload excludes it, so
+the staged copy has none — and `--delete` on the swap then removes the
+installed dependencies, leaving `Cannot find package 'dotenv'` and a
+service that will not start. The swap excludes it too. Do not remove
+that exclude.
+
+**A failed unit stays failed.** After five rapid failures systemd
+refuses to try again ("Start request repeated too quickly") until you
+run `sudo systemctl reset-failed silla-server`. That backstop is doing
+its job; it is not the deploy being stuck.
+
 ## When something is wrong
 
 ```bash
