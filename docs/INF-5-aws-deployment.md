@@ -4,11 +4,73 @@
 worker running so it is demoable on staging."
 **AC:** Deployed; worker runs; meets the 'demo-able on staging' DoD.
 
-**Date:** 2026-09-09  **Status: PAUSED — assets built and committed, nothing provisioned yet**
+**Date:** 2026-09-10  **Status: DEPLOYED — live and verified end to end**
 
 ---
 
-## Where this stands
+## Live
+
+| | |
+|---|---|
+| Product | https://d3ttts3ghharsa.cloudfront.net |
+| Storefront | https://d3jtrqcm6l2crg.cloudfront.net |
+| API | https://d7w5zy7mzwali.cloudfront.net |
+
+Account 813578204603, region `ap-southeast-1` (Singapore).
+
+| Resource | Id |
+|---|---|
+| EC2 (t3.micro, AL2023, 16 GB gp3) | `i-03965ef2bfef96606` |
+| Elastic IP | `13.251.74.151` |
+| Origin hostname | `ec2-13-251-74-151.ap-southeast-1.compute.amazonaws.com` |
+| Security group | `sg-03be50d24f6d69c1c` |
+| CloudFront — API | `EW97K1LVLRDL9` |
+| CloudFront — client | `ERWHO88XIMD9H` |
+| CloudFront — portal | `E1TF02WVIQ8GQL` |
+| S3 — client | `silla-client-204603` |
+| S3 — portal | `silla-portal-204603` |
+
+**Verified in a browser, not inferred:** signed in as the seeded superadmin
+and the map drew 98 elements with zones, labels and per-seat state, from
+Atlas, with zero console errors. SPA deep links (`/map`, `/admin/reports`,
+`/kiosk`) all return 200, so the 403/404 → `/index.html` rule is working.
+HTTP 301s to HTTPS. The CORS preflight returns 204 and names the real
+client origin. **The Socket.io WebSocket upgrade completes through
+CloudFront**, which was the single riskiest part of this shape. The
+doorway dialog works on the deployed storefront and carries the plan.
+
+`TZ=Asia/Manila` and `NODE_ENV=production` confirmed by reading
+`/proc/<pid>/environ` of the running process — the box clock is UTC but
+the app evaluates operating hours against Manila, which is the trap that
+would otherwise refuse every booking through the working day.
+`[scheduler] started` is in the journal, so INF-5's "worker runs" holds.
+
+### Operating it
+
+    ssh -i <key>.pem ec2-user@13.251.74.151
+    sudo systemctl status silla-server silla-vendor nginx
+    sudo journalctl -u silla-server -n 100 --no-pager
+
+Redeploy the APIs: rsync `server/` and `vendor/` to `/opt/silla/`, then
+`sudo systemctl restart silla-server silla-vendor`.
+Redeploy the frontends: `./deploy/deploy-static.sh` with the bucket and
+distribution ids above.
+
+**Secrets live in `/etc/silla/*.env`, mode 640 root:silla, outside the
+code directory** so a redeploy cannot clobber them. The JWT secrets were
+generated fresh on the box and differ per service; the laptop's dev
+secrets never travelled.
+
+### Deliberately not done
+
+No custom domain, so the URLs are `*.cloudfront.net`. No ALB — one
+instance is the free-tier ceiling and CloudFront terminates TLS anyway.
+Provisioning is still manual. The items in `deploy/PRE-DEPLOY-CHECKS.md`
+under SHOULD FIX remain: the onboarding guards are client-side only, and
+the seeded `admin@demo.test` / `123456` is now a live superadmin on a
+public URL.
+
+## How it got here
 
 **Not deployed.** No AWS resource has been created. Nothing is billing.
 

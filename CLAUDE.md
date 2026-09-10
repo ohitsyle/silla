@@ -64,21 +64,19 @@ All 12 Sprint 0 stories (51 pts) are implemented and verified:
 - **RES-6, NOT-4, NOT-5** — grace change notifies today's reservers;
   closures cancel and email with the staff-entered reason.
 
-**INF-5 (deploy to AWS) is NOT done, and is PAUSED** — record in
-`docs/INF-5-aws-deployment.md`. Nothing is provisioned and nothing is
-billing. What exists is the full set of deployment assets in `deploy/`
-(EC2 bootstrap, two systemd units, nginx with the Socket.io upgrade,
-verified-complete env templates, an S3/CloudFront guide and a
-build-and-ship script), plus a pre-deploy safety audit. Resuming is
-provisioning work, not design work.
+**INF-5 (deploy to AWS) is DONE** — live, and recorded in
+`docs/INF-5-aws-deployment.md` with every resource id and the operating
+notes. Product, storefront and API are on CloudFront over HTTPS, backed
+by one free-tier t3.micro in Singapore running both Node services behind
+nginx, with the two SPAs static in S3.
 
-The blocker is credentials: `aws sts get-caller-identity` returns
-`InvalidClientTokenId`. Two findings from that work matter even if AWS
-never happens: operating hours use `date.getHours()` in process-local
-time, so a UTC box refuses every booking through the Philippine working
-day (`TZ=Asia/Manila` is mandatory); and Vite bakes `VITE_*` at build
-time, so `localhost:4000` is inlined in the current bundles and the
-frontends cannot be built before the API URL exists.
+Verified in a browser rather than inferred: the map draws from Atlas with
+no console errors, SPA deep links resolve, HTTP redirects to HTTPS, the
+CORS preflight names the real origin, and the Socket.io WebSocket upgrade
+completes through CloudFront. `TZ=Asia/Manila` and `NODE_ENV=production`
+were confirmed by reading the running process's own environment — a
+default-UTC box would refuse every booking through the Philippine working
+day.
 
 ### Email — live, over Gmail SMTP
 `server/src/services/email/index.js` picks a transport at import time:

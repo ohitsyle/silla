@@ -10,6 +10,12 @@ Description=SILLA product API (Express + Socket.io + scheduler)
 After=network-online.target
 Wants=network-online.target
 
+# In [Unit], not [Service] — systemd silently ignores these under
+# [Service] ("Unknown key name"), so the crash-loop backstop they exist
+# to provide was never actually in effect.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
 [Service]
 Type=simple
 User=silla
@@ -30,10 +36,6 @@ Environment=TZ=Asia/Manila
 
 Restart=always
 RestartSec=5
-# Don't thrash if it is crash-looping on a bad env file.
-StartLimitIntervalSec=60
-StartLimitBurst=5
-
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=silla-server
