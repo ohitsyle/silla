@@ -109,6 +109,29 @@ internal notice to `SILLA_ORDERS_EMAIL` when an order is submitted.
 Status mails fire only on an actual transition, so re-saving a
 deployment URL does not email somebody twice.
 
+**Every email is HTML now, with a plain-text part rendered from the same
+blocks** (`services/email/layout.js` in each service — a copy, per the
+no-cross-imports rule). Codes are six boxed digits, details are a
+labelled table, and every footer says the message is automated and why
+it was sent. The two copies differ on purpose:
+- `vendor/` is SILLA speaking, so it is SILLA-branded and sent as
+  "SILLA" (`EMAIL_FROM_NAME`).
+- `server/` speaks AS the buyer's organization. The masthead, pills and
+  buttons are painted from `org.branding` and the From name is the
+  organization's — a white-label product that signs its mail "SILLA" is
+  not white-label. Only `founderWelcomeEmail` passes `SILLA_BRAND`,
+  because that one is SILLA handing the deployment over.
+  Branding colours are admin-typed and land in `style=""`, so only plain
+  hex is accepted; text colours are kept only if they reach 4.5:1 on
+  their background. Buttons link to `APP_URL`, else the first
+  `CORS_ORIGINS` entry, else the message has no button.
+
+`npm run email:preview [-- <dir>]` in either service writes every email
+to HTML files with sample data. The server renders each one under BOTH
+vertical profiles — the same regression test as `npm run profile`.
+Everything interpolated goes through `esc()`: names, organization names
+and closure reasons are user-typed.
+
 ### Scheduler
 All jobs are implemented in `workers/scheduler.js` and wired with `io`,
 so a seat the worker releases streams to the map like any other change.
@@ -351,7 +374,7 @@ signing secrets differ.
 
     cd vendor && npm run dev                 # :4100
     npm run seed:staff -- <email> "<name>" <password>
-    VENDOR_STAFF_EMAIL=… VENDOR_STAFF_PASSWORD=… npm test   # 28 checks
+    VENDOR_STAFF_EMAIL=… VENDOR_STAFF_PASSWORD=… npm test   # 74 checks
 
 Decisions worth keeping:
 - **One `Account` model, two roles** (`buyer` / `silla`). One login form,
@@ -391,8 +414,9 @@ Decisions worth keeping:
     /               storefront          #/sign-in · #/sign-up
     #/configure     the wizard          #/orders[/id]   a buyer's orders
                                         #/queue[/id]    SILLA's queue (staff)
+    #/account       profile             #/terms         Terms & Conditions
 
-Hash routing still (`lib/useHashRoute.js`) — five flat views, one id
+Hash routing still (`lib/useHashRoute.js`) — a handful of flat views, one id
 parameter, no nested layouts. If this grows nested routes or route-level
 data loading, swap in a router.
 
@@ -413,6 +437,62 @@ data loading, swap in a router.
   The API refuses them regardless — this is only about not presenting a
   page that was never theirs.
 
+### Buyer accounts — sign-up, verification, profile
+
+Sign-up takes first / middle (optional) / last / suffix (optional),
+email twice, a password of 10+ characters, and agreement to the terms.
+The account is created UNVERIFIED and a 6-digit code is emailed at once.
+
+- **Unverified buyers can explore, configure and save drafts, but not
+  submit.** `POST /orders/:id/submit` answers 403 `EMAIL_UNVERIFIED`;
+  `Orders.jsx` opens the verify dialog on that (and pre-emptively), then
+  submits on success. The gate is on the server — the dialog is a
+  courtesy, not the control.
+- **Codes** (`vendor/src/lib/codes.js`): bcrypt hashed, 10-minute TTL, 5
+  attempts, 60s resend cooldown, one live code per account tagged with
+  its purpose (`signup` / `email-change` / `password-reset`), so a
+  sign-up code cannot confirm an email change.
+- **An email change sends the code to the NEW address** and completes
+  only when it is entered; the OLD address is told afterwards. Password
+  change and reset stamp `passwordChangedAt`, and `middleware/auth.js`
+  refuses any token issued before it (`SESSION_REVOKED`) — that is what
+  "signs out your other devices" means. The stamp is backdated by one
+  second, or the session that made the change revokes itself.
+- **Forgot-password answers identically for known and unknown emails**,
+  and a wrong sign-in never says which half was wrong.
+- **Billing refuses anything that passes a Luhn check.** SILLA never
+  stores card numbers; a 14-digit Philippine TIN is not a card and
+  must still save, which is why the check is Luhn and not "long digit
+  string". Payment methods are an honest "coming soon".
+- `termsAcceptedAt` + `termsVersion` are recorded at sign-up. Keep
+  `TERMS_VERSION` (auth.routes.js) and `TERMS_UPDATED`
+  (`portal/src/account/Terms.jsx`) in step. **The terms text is
+  plain-language operating copy, NOT legal review.**
+- Legacy accounts: `npm run migrate:accounts [-- --apply]` splits names
+  and grandfathers them as verified. It does not invent a terms
+  acceptance they never gave. Already applied to the shared database.
+- Tests cannot read an emailed code, so `tests/helpers.mjs` `plantCode()`
+  writes a KNOWN code's hash straight into the account (`node
+  tests/plant.mjs <email> <purpose>` for browser walks).
+
+Portal lessons from building it:
+- **A code input must hold its value in a ref.** `OtpInput` read the
+  value from props inside its key handler; typing faster than React
+  re-rendered dropped digits, the same trap as the editor's drag
+  rectangle. The live value is in a ref, mirrored to state for render.
+- **The "already signed in" redirect is keyed on ARRIVING at a route,**
+  not on the session changing. Keyed on the session, it fired the moment
+  sign-up succeeded and unmounted the verify dialog that sign-up had
+  just opened.
+- `Modal` autofocus prefers `[data-autofocus]` — without it the code
+  dialog focused its Close button and the first keystroke went nowhere.
+- A dialog keeps its task as its title and lets the success panel carry
+  the outcome; the toast fires after the dialog closes. Title, panel and
+  toast all saying "Password changed" at once read as a stutter.
+- Errors are revealed on submit, never pre-thrown, same as the wizard.
+  Email availability is checked live (debounced) and offers "Sign in
+  instead"; the confirm-email field refuses paste.
+
 Verified end to end in a browser, both directions: configure signed
 out → prompted to sign up → configuration restored → saved as a draft →
 submitted; then staff sign in → see it in the queue → download the
@@ -422,7 +502,7 @@ deployment URL** → set it → live.
 ### Roadmap beyond the configurator
 Today the profile is handed over as a file and provisioned by hand,
 which is the honest shape while there is no billing and no deploy
-target. Still to build: buyer accounts and saved drafts, billing, and
+target. Buyer accounts and saved drafts are done. Still to build: billing, and
 automatic provisioning — that last one depends on INF-5.
 
 ## Running the demo

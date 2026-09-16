@@ -18,7 +18,8 @@
     "profile": "node src/scripts/applyProfile.js",
     "test": "node tests/run.mjs",
     "test:clean": "node tests/cleanup.mjs",
-    "email:test": "node src/scripts/emailTest.js"
+    "email:test": "node src/scripts/emailTest.js",
+    "email:preview": "node src/scripts/emailPreview.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

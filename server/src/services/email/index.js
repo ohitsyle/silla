@@ -67,7 +67,7 @@ function consoleTransport({ to, subject, text }) {
  * rollout, at which point only this function changes.
  */
 let smtp = null;
-async function smtpTransport({ to, subject, text }) {
+async function smtpTransport({ to, subject, text, html, fromName }) {
   if (!smtp) {
     const { createTransport } = await import("nodemailer");
     smtp = createTransport({
@@ -77,11 +77,14 @@ async function smtpTransport({ to, subject, text }) {
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD },
     });
   }
+  // nodemailer quotes the display name itself, so an organization
+  // called `Smith, Jones & "Co"` cannot break the From header.
   await smtp.sendMail({
-    from: process.env.EMAIL_FROM || process.env.SMTP_USER,
+    from: { name: fromName || "", address: process.env.EMAIL_FROM || process.env.SMTP_USER },
     to,
     subject,
     text,
+    html,
   });
 }
 
@@ -90,7 +93,11 @@ async function smtpTransport({ to, subject, text }) {
  * means changing this one function — spec §15 leaves the choice open
  * and §20 lists it as still-open.
  */
-async function httpTransport({ to, subject, text }) {
+async function httpTransport({ to, subject, text, html, fromName }) {
+  const address = process.env.EMAIL_FROM || "no-reply@example.com";
+  // Built by hand here, so the name is reduced to characters that cannot
+  // end the display name or start a second address.
+  const name = String(fromName || "").replace(/[^\p{L}\p{N} .&'-]/gu, "").trim();
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
@@ -98,10 +105,11 @@ async function httpTransport({ to, subject, text }) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      from: process.env.EMAIL_FROM || "no-reply@example.com",
+      from: name ? `"${name}" <${address}>` : address,
       to: [to],
       subject,
       text,
+      html,
     }),
   });
   if (!res.ok) {
@@ -157,10 +165,10 @@ async function drain() {
  */
 const UNDELIVERABLE = /@test\.silla$|@example\.(com|org|net)$/i;
 
-export function sendEmail({ to, subject, text }) {
+export function sendEmail({ to, subject, text, html, fromName }) {
   if (!to) return;
   if (UNDELIVERABLE.test(to)) return;
-  queue.push({ to, subject, text, attempts: 0 });
+  queue.push({ to, subject, text, html, fromName, attempts: 0 });
   // Detached on purpose — drain() swallows its own errors.
   drain();
 }
