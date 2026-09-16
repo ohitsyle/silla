@@ -484,6 +484,19 @@ Portal lessons from building it:
   not on the session changing. Keyed on the session, it fired the moment
   sign-up succeeded and unmounted the verify dialog that sign-up had
   just opened.
+- **The page wipe is driven by the route, not by callers.** The branded
+  terracotta wipe used to be a `transition()` only the doorway and the
+  wizard's exit called, so two page changes wiped and every other one
+  cut. `usePageWipe` in `App.jsx` now trails the hash: the panel closes,
+  the page swaps and scrolls to top under it, the panel lifts. So links,
+  the account menu, post-sign-in redirects and Back/Forward all get it
+  without knowing it exists — render from `shown.page`, never `route`.
+  The sign-in gate's state is part of the page key (signing in at
+  `#/orders` changes the page without moving the hash), except while the
+  session check is pending, so a refresh never wipes. Sign in ↔ sign up
+  is a tab switch and deliberately does not. Early returns in `Routed`
+  would skip the panel mid-animation, which is why the gate screens live
+  inside `view()`.
 - `Modal` autofocus prefers `[data-autofocus]` — without it the code
   dialog focused its Close button and the first keystroke went nowhere.
 - A dialog keeps its task as its title and lets the success panel carry
