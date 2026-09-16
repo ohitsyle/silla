@@ -7,9 +7,12 @@ import Wizard from "./Wizard.jsx";
 import AuthScreen from "./account/AuthScreen.jsx";
 import Orders from "./account/Orders.jsx";
 import Queue from "./account/Queue.jsx";
+import ProfilePage from "./account/ProfilePage.jsx";
+import { TermsPage } from "./account/Terms.jsx";
 import { AccountProvider, useAccount } from "./lib/AccountContext.jsx";
 import { ROUTES, useHashRoute } from "./lib/useHashRoute.js";
 import { saveIntent } from "./lib/entryIntent.js";
+import { ToastProvider } from "./lib/toast.jsx";
 
 /**
  * The portal's views.
@@ -81,13 +84,26 @@ function Routed() {
       signUp: "Create an account · SILLA",
       orders: "Your orders · SILLA",
       queue: "Order queue · SILLA",
+      account: "Your profile · SILLA",
+      terms: "Terms & Conditions · SILLA",
     };
     document.title = titles[route.name] || titles.home;
   }, [route.name]);
 
+  // Arriving at sign-in while already signed in reads as having been
+  // logged out, so go home instead. Deliberately keyed on the ROUTE, not
+  // on isSignedIn: signing UP signs you in while you're still on this
+  // page, and the verification dialog must stay open when that happens.
+  useEffect(() => {
+    if ((route.name === "signIn" || route.name === "signUp") && isSignedIn && !booting) {
+      navigate(ROUTES.home, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [route.name, booting]);
+
   // Wait for the session check before deciding anything — otherwise a
   // refresh on #/orders bounces to sign-in for a frame and back again.
-  const guarded = ["orders", "queue"].includes(route.name);
+  const guarded = ["orders", "queue", "account"].includes(route.name);
   if (booting && guarded) {
     return (
       <div className="silla-marketing grid min-h-screen place-items-center text-ink-muted">Loading…</div>
@@ -115,6 +131,10 @@ function Routed() {
         return <Orders id={route.id} navigate={navigate} />;
       case "queue":
         return <Queue id={route.id} navigate={navigate} />;
+      case "account":
+        return <ProfilePage navigate={navigate} />;
+      case "terms":
+        return <TermsPage navigate={navigate} />;
       default:
         return (
           <Landing
@@ -184,7 +204,9 @@ function Routed() {
 export default function App() {
   return (
     <AccountProvider>
-      <Routed />
+      <ToastProvider>
+        <Routed />
+      </ToastProvider>
     </AccountProvider>
   );
 }

@@ -1,3 +1,4 @@
+import { KNOWN_CODE, plantCode } from "./helpers.mjs";
 /**
  * The commerce path, asserted from the outside.
  *
@@ -39,7 +40,13 @@ const profileFor = (name) => ({
   floors: [{ name: "Level 1", order: 0, grid: { cols: 10, rows: 8 }, resources: [], zones: [], labels: [] }],
 });
 
-export const name = "Accounts & orders";
+export const name = "Orders";
+
+/** The sign-up body the current API expects. */
+const signupBody = (full, email, password) => {
+  const [firstName, ...rest] = full.split(" ");
+  return { firstName, lastName: rest.join(" ") || "Tester", email, confirmEmail: email, password, acceptTerms: true };
+};
 
 export async function run(check) {
   const tag = unique();
@@ -51,19 +58,19 @@ export async function run(check) {
 
   const short = await req("/api/vendor/auth/register", {
     method: "POST",
-    body: JSON.stringify({ name: "Too Short", email: `short-${tag}@test.silla`, password: "abc123" }),
+    body: JSON.stringify(signupBody("Too Short", `short-${tag}@test.silla`, "abc123")),
   });
   check("VEN-1", "A short password is rejected", short.status === 400, short.body?.error);
 
   const badEmail = await req("/api/vendor/auth/register", {
     method: "POST",
-    body: JSON.stringify({ name: "Bad", email: "not-an-email", password }),
+    body: JSON.stringify(signupBody("Bad", "not-an-email", password)),
   });
   check("VEN-1", "An invalid email is rejected", badEmail.status === 400, badEmail.body?.error);
 
   const signup = await req("/api/vendor/auth/register", {
     method: "POST",
-    body: JSON.stringify({ name: "Test Buyer", email: buyerEmail, password, organizationName: "Testing Co" }),
+    body: JSON.stringify({ ...signupBody("Test Buyer", buyerEmail, password), organizationName: "Testing Co" }),
   });
   check("VEN-1", "A buyer can sign up", signup.status === 201 && Boolean(signup.body?.token));
   check("VEN-1", "New accounts are buyers, never SILLA staff", signup.body?.account?.role === "buyer",
@@ -71,7 +78,7 @@ export async function run(check) {
 
   const dupe = await req("/api/vendor/auth/register", {
     method: "POST",
-    body: JSON.stringify({ name: "Again", email: buyerEmail, password }),
+    body: JSON.stringify(signupBody("Again", buyerEmail, password)),
   });
   check("VEN-1", "The same email cannot register twice", dupe.status === 409, dupe.body?.error);
 
@@ -83,7 +90,7 @@ export async function run(check) {
   });
   check("VEN-1", "A wrong password is refused", wrong.status === 401);
   check("VEN-1", "…without revealing whether the account exists",
-    wrong.body?.error === "Invalid email or password.", wrong.body?.error);
+    wrong.body?.error === "That email and password don't match an account.", wrong.body?.error);
 
   /* ── Drafts and submission ── */
 
@@ -118,6 +125,11 @@ export async function run(check) {
   check("VEN-2", "It appears in the buyer's own list",
     (mine.body?.orders || []).some((o) => o.id === orderId));
 
+  // Submitting needs a verified email; that gate has its own tests in
+  // accounts.test.mjs. Here the buyer simply verifies first.
+  await plantCode(buyerEmail, "signup");
+  await req("/api/vendor/auth/me/verify", { method: "POST", headers: B, body: JSON.stringify({ code: KNOWN_CODE }) });
+
   const submitted = await req(`/api/vendor/orders/${orderId}/submit`, { method: "POST", headers: B });
   check("VEN-3", "A draft can be submitted", submitted.body?.order?.status === "submitted", submitted.body?.error);
 
@@ -134,7 +146,7 @@ export async function run(check) {
 
   const other = await req("/api/vendor/auth/register", {
     method: "POST",
-    body: JSON.stringify({ name: "Other Buyer", email: otherEmail, password }),
+    body: JSON.stringify(signupBody("Other Buyer", otherEmail, password)),
   });
   const O = auth(other.body.token);
 

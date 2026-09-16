@@ -4,6 +4,7 @@
  */
 import "dotenv/config";
 import { cleanup } from "./cleanup.mjs";
+import * as accounts from "./accounts.test.mjs";
 import * as orders from "./orders.test.mjs";
 
 const API = process.env.VENDOR_API_URL || "http://localhost:4100";
@@ -25,7 +26,7 @@ try {
   process.exit(1);
 }
 
-for (const suite of [orders]) {
+for (const suite of [accounts, orders]) {
   console.log(`\n${suite.name}`);
   try {
     await suite.run(check);

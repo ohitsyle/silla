@@ -47,16 +47,39 @@ async function request(path, options = {}) {
     const error = new Error(body.error || `Request failed: ${res.status}`);
     error.status = res.status;
     error.body = body;
+    // Field-keyed messages, so a form can put each under its own input
+    // instead of one sentence at the bottom about the whole form.
+    error.fields = body.fields || {};
+    error.code = body.code;
+    if (res.status === 401 && body.code === "SESSION_REVOKED") {
+      // The password was changed elsewhere. Tell the app, which signs out.
+      window.dispatchEvent(new CustomEvent("silla:session-revoked"));
+    }
     throw error;
   }
   return body;
 }
 
+const post = (path, body) => request(path, { method: "POST", body: JSON.stringify(body || {}) });
+const patch = (path, body) => request(path, { method: "PATCH", body: JSON.stringify(body || {}) });
+
 export const vendorApi = {
-  register: (payload) => request("/api/vendor/auth/register", { method: "POST", body: JSON.stringify(payload) }),
-  login: (email, password) =>
-    request("/api/vendor/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+  register: (payload) => post("/api/vendor/auth/register", payload),
+  login: (email, password) => post("/api/vendor/auth/login", { email, password }),
   me: () => request("/api/vendor/auth/me"),
+  emailAvailable: (email) => request(`/api/vendor/auth/email-available?email=${encodeURIComponent(email)}`),
+
+  verifyEmail: (code) => post("/api/vendor/auth/me/verify", { code }),
+  resendVerification: () => post("/api/vendor/auth/me/verify/resend"),
+
+  updateProfile: (fields) => patch("/api/vendor/auth/me", fields),
+  changeEmail: (newEmail, password) => post("/api/vendor/auth/me/email", { newEmail, password }),
+  confirmEmailChange: (code) => post("/api/vendor/auth/me/email/confirm", { code }),
+  changePassword: (currentPassword, newPassword) => post("/api/vendor/auth/me/password", { currentPassword, newPassword }),
+  updateBilling: (billing) => patch("/api/vendor/auth/me/billing", billing),
+
+  forgotPassword: (email) => post("/api/vendor/auth/forgot-password", { email }),
+  resetPassword: (email, code, newPassword) => post("/api/vendor/auth/reset-password", { email, code, newPassword }),
 
   myOrders: () => request("/api/vendor/orders"),
   order: (id) => request(`/api/vendor/orders/${id}`),

@@ -31,15 +31,32 @@ const normalised = email.trim().toLowerCase();
 const passwordHash = await bcrypt.hash(password, 10);
 const existing = await Account.findOne({ email: normalised });
 
+// "Ana Maria Reyes" -> first "Ana Maria", last "Reyes". Staff give one
+// name on the command line; the account stores the parts.
+const words = name.trim().split(/\s+/);
+const lastName = words.length > 1 ? words.pop() : "";
+const firstName = words.join(" ");
+
+// Staff are provisioned by us, from a terminal, with an address we chose.
+// There is nothing for a verification code to prove, and an unverified
+// staff account would be a person who cannot be emailed about the queue.
+const fields = {
+  firstName,
+  lastName,
+  passwordHash,
+  role: "silla",
+  active: true,
+  emailVerified: true,
+  emailVerifiedAt: new Date(),
+  passwordChangedAt: new Date(Date.now() - 1000),
+};
+
 if (existing) {
-  existing.passwordHash = passwordHash;
-  existing.name = name;
-  existing.role = "silla";
-  existing.active = true;
+  existing.set(fields);
   await existing.save();
   console.log(`Updated SILLA staff account: ${normalised}`);
 } else {
-  await Account.create({ email: normalised, name, passwordHash, role: "silla" });
+  await Account.create({ email: normalised, ...fields });
   console.log(`Created SILLA staff account: ${normalised}`);
 }
 

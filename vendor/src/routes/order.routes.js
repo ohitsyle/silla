@@ -125,6 +125,17 @@ router.post(
       return res.status(409).json({ error: `An order that is ${order.status} cannot be submitted.` });
     }
 
+    // Submitting is the commercial commitment, and the email on the
+    // account is where every update about it goes — so it has to be an
+    // address the buyer has proved they own. Exploring, configuring and
+    // saving drafts stay open to unverified accounts; this is the one gate.
+    if (!req.account.emailVerified) {
+      return res.status(403).json({
+        error: "Verify your email address before placing an order.",
+        code: "EMAIL_UNVERIFIED",
+      });
+    }
+
     order.status = "submitted";
     order.history.push({ status: "submitted", by: req.account._id, note: "Submitted by the buyer" });
     await order.save();

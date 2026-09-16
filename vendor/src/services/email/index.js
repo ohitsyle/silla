@@ -31,7 +31,7 @@ function consoleTransport({ to, subject, text }) {
 }
 
 let smtp = null;
-async function smtpTransport({ to, subject, text }) {
+async function smtpTransport({ to, subject, text, html }) {
   if (!smtp) {
     smtp = createTransport({
       host: process.env.SMTP_HOST || "smtp.gmail.com",
@@ -41,10 +41,15 @@ async function smtpTransport({ to, subject, text }) {
     });
   }
   await smtp.sendMail({
-    from: process.env.EMAIL_FROM || process.env.SMTP_USER,
+    // A display name, so the inbox row reads "SILLA" rather than a bare
+    // gmail address — which is what makes a code email look legitimate.
+    from: { name: process.env.EMAIL_FROM_NAME || "SILLA", address: process.env.EMAIL_FROM || process.env.SMTP_USER },
     to,
     subject,
     text,
+    // Both parts, always: clients that refuse HTML, screen readers and
+    // spam filters scoring the text/HTML ratio all read the text part.
+    ...(html ? { html } : {}),
   });
 }
 
@@ -85,10 +90,10 @@ async function drain() {
  */
 const UNDELIVERABLE = /@test\.silla$|@example\.(com|org|net)$/i;
 
-export function sendEmail({ to, subject, text }) {
+export function sendEmail({ to, subject, text, html }) {
   if (!to) return;
   if (UNDELIVERABLE.test(to)) return;
-  queue.push({ to, subject, text, attempts: 0 });
+  queue.push({ to, subject, text, html, attempts: 0 });
   drain();
 }
 

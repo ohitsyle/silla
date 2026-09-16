@@ -12,7 +12,9 @@
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "seed:staff": "node src/scripts/seedStaff.js",
-    "test": "node tests/run.mjs"
+    "test": "node tests/run.mjs",
+    "email:preview": "node src/scripts/emailPreview.js",
+    "migrate:accounts": "node src/scripts/migrateAccounts.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

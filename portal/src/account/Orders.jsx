@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { ArrowRight, ExternalLink, Plus, Send } from "lucide-react";
+import { ArrowRight, ExternalLink, MailWarning, Plus, Send } from "lucide-react";
 
 import { Button, Card, Notice, Skeleton } from "../components/ui.jsx";
 import { vendorApi } from "../lib/vendorApi.js";
+import { useAccount } from "../lib/AccountContext.jsx";
+import { useToast } from "../lib/toast.jsx";
+import { VerifyEmailModal } from "./modals.jsx";
 import { ROUTES } from "../lib/useHashRoute.js";
 import { AccountLayout, BackLink, PLAN_LABEL, StatusBadge, money, when } from "./shared.jsx";
 
@@ -28,6 +31,9 @@ function OrderDetail({ id, navigate }) {
   const [order, setOrder] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const { isVerified } = useAccount();
+  const toast = useToast();
 
   const load = () =>
     vendorApi
@@ -40,14 +46,27 @@ function OrderDetail({ id, navigate }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  const submit = async () => {
+  /**
+   * Placing an order needs a verified email. An unverified buyer gets
+   * the code dialog here — at the moment it matters — and the order is
+   * placed the instant they verify, so they don't have to press Submit a
+   * second time. The server enforces the same rule; a 403 from it (say,
+   * verified in another tab that then changed email) opens the dialog too.
+   */
+  const submit = async ({ skipCheck = false } = {}) => {
+    if (!isVerified && !skipCheck) {
+      setVerifying(true);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       await vendorApi.submitOrder(id);
       await load();
+      toast("Order placed — we've emailed you a receipt");
     } catch (e) {
-      setError(e.message);
+      if (e.code === "EMAIL_UNVERIFIED") setVerifying(true);
+      else setError(e.message);
     } finally {
       setBusy(false);
     }
@@ -110,12 +129,33 @@ function OrderDetail({ id, navigate }) {
               Nothing is sent until you submit. After that we take over and you can't edit it — ask us
               instead.
             </p>
-            <Button variant="primary" icon={Send} loading={busy} onClick={submit}>
+            <Button variant="primary" icon={Send} loading={busy} onClick={() => submit()}>
               Submit to SILLA
             </Button>
           </div>
+          {!isVerified && (
+            <div
+              className="mt-4 flex items-center gap-2.5 rounded-lg px-3.5 py-2.5 text-sm"
+              style={{ background: "rgb(var(--c-state-reserved) / 0.1)" }}
+            >
+              <MailWarning size={16} style={{ color: "rgb(var(--c-state-reserved))" }} />
+              <span className="text-ink-secondary">
+                You'll be asked to verify your email when you submit — it only takes a moment.
+              </span>
+            </div>
+          )}
         </Card>
       )}
+
+      <VerifyEmailModal
+        open={verifying}
+        reason="checkout"
+        onClose={() => setVerifying(false)}
+        onVerified={() => {
+          setVerifying(false);
+          submit({ skipCheck: true });
+        }}
+      />
 
       <Card className="mt-4">
         <h2 className="font-semibold">What you configured</h2>

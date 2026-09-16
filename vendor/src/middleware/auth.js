@@ -20,10 +20,18 @@ export async function requireAccount(req, res, next) {
   }
 
   try {
-    const account = await Account.findById(claims.id).select("email name role active organizationName");
+    const account = await Account.findById(claims.id);
     if (!account || !account.active) {
       return res.status(401).json({ error: "Account is no longer active" });
     }
+
+    // A token minted before the last password change is refused. Without
+    // this, changing a password because you think someone has it would
+    // leave their session working for up to twelve more hours.
+    if (account.passwordChangedAt && claims.iat * 1000 < account.passwordChangedAt.getTime()) {
+      return res.status(401).json({ error: "Your password was changed. Sign in again.", code: "SESSION_REVOKED" });
+    }
+
     req.account = account;
     return next();
   } catch (err) {

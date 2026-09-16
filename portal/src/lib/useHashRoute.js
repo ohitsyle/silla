@@ -21,6 +21,8 @@ export const ROUTES = {
   signUp: "#/sign-up",
   orders: "#/orders",
   queue: "#/queue",
+  account: "#/account",
+  terms: "#/terms",
 };
 
 /** `#/orders/abc123` → { name: "orders", id: "abc123" } */
@@ -35,6 +37,8 @@ export function parseHash(hash) {
     "sign-up": "signUp",
     orders: "orders",
     queue: "queue",
+    account: "account",
+    terms: "terms",
   };
   return { name: known[head] || "home", id };
 }

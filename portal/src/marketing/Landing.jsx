@@ -4,6 +4,7 @@ import { ArrowRight, ArrowUpRight } from "lucide-react";
 
 import Chair, { ChairRow } from "./Chair.jsx";
 import { useAccount } from "../lib/AccountContext.jsx";
+import { AccountMenu } from "../account/kit.jsx";
 import { EASE, prefersReducedMotion, reveal, wordChild, wordsIn } from "./motion.js";
 import HowItWorks from "./sections/HowItWorks.jsx";
 import WhiteLabel from "./sections/WhiteLabel.jsx";
@@ -139,7 +140,7 @@ function HeroPlan() {
 }
 
 function Nav({ onConfigure, navigate }) {
-  const { isSignedIn } = useAccount();
+  const { isSignedIn, booting } = useAccount();
   const [solid, setSolid] = useState(false);
   useEffect(() => {
     const onScroll = () => setSolid(window.scrollY > 24);
@@ -187,17 +188,25 @@ function Nav({ onConfigure, navigate }) {
         </nav>
 
         <div className="ml-auto md:ml-0 flex items-center gap-4">
-          {/* Signed in, this is the way back to what you already have —
-              a storefront that only ever points forward makes a
-              returning customer start over. */}
-          <button
-            type="button"
-            onClick={() => navigate?.(isSignedIn ? "#/orders" : "#/sign-in")}
-            className="hidden sm:inline text-[15px] font-medium transition-opacity hover:opacity-60"
-            style={{ color: "rgb(var(--m-ink-soft))" }}
-          >
-            {isSignedIn ? "Your orders" : "Sign in"}
-          </button>
+          {/* Signed in, the account menu is the way back to what you
+              already have — profile, orders — so a returning customer
+              isn't made to start over. Signed out, one quiet link.
+              Held back until the session check finishes, or a returning
+              customer sees "Sign in" flash before their name appears. */}
+          {booting ? (
+            <span className="hidden h-8 w-20 sm:block" aria-hidden />
+          ) : isSignedIn ? (
+            <AccountMenu navigate={navigate} />
+          ) : (
+            <button
+              type="button"
+              onClick={() => navigate?.("#/sign-in")}
+              className="hidden sm:inline text-[15px] font-medium transition-opacity hover:opacity-60"
+              style={{ color: "rgb(var(--m-ink-soft))" }}
+            >
+              Sign in
+            </button>
+          )}
           <button
             type="button"
             onClick={onConfigure}
@@ -215,6 +224,7 @@ function Nav({ onConfigure, navigate }) {
 }
 
 export default function Landing({ onConfigure, navigate }) {
+  const { isSignedIn } = useAccount();
   return (
     <div className="silla-marketing min-h-screen" id="top">
       <Nav onConfigure={onConfigure} navigate={navigate} />
@@ -321,20 +331,85 @@ export default function Landing({ onConfigure, navigate }) {
         </div>
       </section>
 
-      <footer className="px-6 py-12" style={{ borderTop: "1px solid rgb(var(--m-ink) / 0.08)" }}>
-        <div className="mx-auto max-w-6xl flex flex-wrap items-center gap-4">
-          <span className="font-extrabold text-lg tracking-tight">SILLA</span>
-          <span className="text-sm" style={{ color: "rgb(var(--m-ink-faint))" }}>
-            Space Intelligence &amp; Live Layout Administration
-          </span>
-          <button
-            type="button"
-            onClick={onConfigure}
-            className="ml-auto inline-flex items-center gap-1.5 text-sm font-semibold hover:opacity-60 transition-opacity"
+      <footer className="px-6 pt-14 pb-10" style={{ borderTop: "1px solid rgb(var(--m-ink) / 0.08)" }}>
+        <div className="mx-auto max-w-6xl">
+          <div className="flex flex-wrap items-start gap-x-12 gap-y-8">
+            <div className="mr-auto max-w-xs">
+              <div className="flex items-center gap-2.5 text-lg font-extrabold tracking-tight">
+                <span
+                  className="grid h-7 w-7 place-items-center rounded-[9px] text-xs"
+                  style={{ background: "rgb(var(--m-accent))", color: "rgb(var(--m-accent-ink))" }}
+                >
+                  S
+                </span>
+                SILLA
+              </div>
+              <p className="mt-3 text-sm leading-relaxed" style={{ color: "rgb(var(--m-ink-faint))" }}>
+                Space Intelligence &amp; Live Layout Administration. Reservation and occupancy for the spaces people share.
+              </p>
+            </div>
+
+            {[
+              ["Product", [["How it works", "#how"], ["Make it yours", "#yours"], ["What's inside", "#inside"], ["Pricing", "#pricing"]]],
+              ["Account", isSignedIn
+                ? [["Your profile", "#/account"], ["Your orders", "#/orders"]]
+                : [["Sign in", "#/sign-in"], ["Create an account", "#/sign-up"]]],
+              ["Legal", [["Terms & Conditions", "#/terms"]]],
+            ].map(([heading, links]) => (
+              <nav key={heading} aria-label={heading}>
+                <p className="text-[11px] font-bold uppercase tracking-[0.14em]" style={{ color: "rgb(var(--m-ink-faint))" }}>
+                  {heading}
+                </p>
+                <ul className="mt-3 space-y-2">
+                  {links.map(([label, href]) => (
+                    <li key={label}>
+                      <a
+                        href={href}
+                        onClick={(e) => {
+                          // App routes go through the router; in-page
+                          // anchors keep their smooth scroll.
+                          if (href.startsWith("#/")) {
+                            e.preventDefault();
+                            navigate?.(href);
+                          }
+                        }}
+                        className="text-sm font-medium transition-opacity hover:opacity-60"
+                        style={{ color: "rgb(var(--m-ink-soft))" }}
+                      >
+                        {label}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </nav>
+            ))}
+          </div>
+
+          <div
+            className="mt-12 flex flex-wrap items-center gap-4 pt-6 text-sm"
+            style={{ borderTop: "1px solid rgb(var(--m-ink) / 0.08)", color: "rgb(var(--m-ink-faint))" }}
           >
-            Open the configurator
-            <ArrowUpRight size={15} />
-          </button>
+            <span>&copy; {new Date().getFullYear()} SILLA</span>
+            <a
+              href="#/terms"
+              onClick={(e) => {
+                e.preventDefault();
+                navigate?.("#/terms");
+              }}
+              className="underline underline-offset-4 transition-opacity hover:opacity-60"
+            >
+              Terms &amp; Conditions
+            </a>
+            <button
+              type="button"
+              onClick={onConfigure}
+              className="ml-auto inline-flex items-center gap-1.5 font-semibold transition-opacity hover:opacity-60"
+              style={{ color: "rgb(var(--m-ink))" }}
+            >
+              Open the configurator
+              <ArrowUpRight size={15} />
+            </button>
+          </div>
         </div>
       </footer>
     </div>

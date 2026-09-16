@@ -1,5 +1,5 @@
 import { ArrowLeft } from "lucide-react";
-import { useAccount } from "../lib/AccountContext.jsx";
+import { AccountMenu } from "./kit.jsx";
 import { ROUTES } from "../lib/useHashRoute.js";
 
 /**
@@ -10,11 +10,12 @@ import { ROUTES } from "../lib/useHashRoute.js";
  * sidebar would be furniture around two pages.
  */
 export function AccountLayout({ navigate, title, subtitle, action, children }) {
-  const { account, isSilla, signOut } = useAccount();
-
   return (
     <div className="silla-marketing min-h-screen">
-      <header className="border-b border-line/[0.08]">
+      <header
+        className="sticky top-0 z-40 border-b border-line/[0.08]"
+        style={{ background: "rgb(var(--c-bg-page) / 0.86)", backdropFilter: "saturate(180%) blur(12px)" }}
+      >
         <div className="mx-auto flex h-[72px] max-w-5xl items-center gap-4 px-6">
           <button
             type="button"
@@ -30,35 +31,9 @@ export function AccountLayout({ navigate, title, subtitle, action, children }) {
             SILLA
           </button>
 
-          <nav className="ml-auto flex items-center gap-5 text-[15px] font-medium">
-            <button
-              type="button"
-              onClick={() => navigate(ROUTES.orders)}
-              className="text-ink-secondary transition-opacity hover:opacity-70"
-            >
-              {isSilla ? "My orders" : "Orders"}
-            </button>
-            {isSilla && (
-              <button
-                type="button"
-                onClick={() => navigate(ROUTES.queue)}
-                className="text-ink-secondary transition-opacity hover:opacity-70"
-              >
-                Queue
-              </button>
-            )}
-            <span className="hidden text-sm text-ink-muted sm:inline">{account?.email}</span>
-            <button
-              type="button"
-              onClick={() => {
-                signOut();
-                navigate(ROUTES.home);
-              }}
-              className="text-ink-secondary transition-opacity hover:opacity-70"
-            >
-              Sign out
-            </button>
-          </nav>
+          <div className="ml-auto">
+            <AccountMenu navigate={navigate} />
+          </div>
         </div>
       </header>
 
