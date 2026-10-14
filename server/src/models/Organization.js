@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { ENTITLEMENT_STATUS } from "../lib/plans.js";
 
 /**
  * Organization — the top of the white-label hierarchy (spec §2).
@@ -12,6 +13,43 @@ const organizationSchema = new mongoose.Schema(
     // Written BEFORE reading booking/layout constraints in a transaction. This
     // shared write prevents snapshot-isolation write skew across room and seat.
     spaceRevision: { type: Number, default: 0, select: false },
+
+    /**
+     * The organization's address in the product: <client>/<slug>/map.
+     * One front end serves every organization and the first path segment
+     * says which — see lib/slug.js for the rules. Sparse, so an
+     * organization created before addresses existed still loads until
+     * `npm run migrate:slugs` gives it one.
+     */
+    slug: { type: String, trim: true, lowercase: true, unique: true, sparse: true },
+
+    /**
+     * What this organization's subscription allows. Written ONLY by
+     * SILLA's control plane (vendor/), through the signed internal API;
+     * interpreted ONLY by services/entitlements.js.
+     *
+     * `managed: false` — every organization that predates subscriptions,
+     * and the demo — means every feature and no limits, so nothing that
+     * exists today breaks. `features` and `limits` are keyed by
+     * lib/plans.js; a key they do not mention is allowed.
+     */
+    entitlements: {
+      managed: { type: Boolean, default: false },
+      plan: { type: String, default: null },
+      planName: { type: String, default: null },
+      status: { type: String, enum: ENTITLEMENT_STATUS, default: "active" },
+      features: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
+      limits: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
+      currentPeriodEnd: { type: Date, default: null },
+      graceEndsAt: { type: Date, default: null },
+      // A line from SILLA staff shown to the organization's administrators,
+      // e.g. "Your invoice is overdue — contact billing@…".
+      notice: { type: String, default: null },
+      // Monotonic, set by the control plane. An older push arriving late
+      // is ignored rather than undoing a newer one.
+      version: { type: Number, default: 0 },
+      syncedAt: { type: Date, default: null },
+    },
 
     // ---- Organization identity / branding (spec §16) ----
     //

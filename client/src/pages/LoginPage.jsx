@@ -16,7 +16,7 @@ import { Button, Card, Field, Loading, Notice, PinField } from "../components/ui
  * means distinguishing "wrong PIN" from "locked" from "slow down".
  */
 export default function LoginPage() {
-  const { org } = useOrg();
+  const { org, organizationId } = useOrg();
   const { login, isAuthenticated, requiresTermsAcceptance, mustChangePin, booting } = useAuth();
   const navigate = useNavigate();
 
@@ -25,7 +25,6 @@ export default function LoginPage() {
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const organizationId = import.meta.env.VITE_DEMO_ORG_ID || "";
   const memberNoun = org?.terminology?.memberNoun || "member";
 
   const onSubmit = async (e) => {

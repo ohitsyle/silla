@@ -46,8 +46,7 @@ const STEP = {
 const AUTO_RESET_MS = 12_000;
 
 export default function KioskPage() {
-  const { org } = useOrg();
-  const organizationId = import.meta.env.VITE_DEMO_ORG_ID || "";
+  const { org, organizationId } = useOrg();
 
   const [requirements, setRequirements] = useState(null);
   const [step, setStep] = useState(STEP.TAP);

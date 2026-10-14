@@ -27,7 +27,7 @@ import {
  * touches `status` — see the subscription below.
  */
 export default function MapPage() {
-  const { org, error: orgError } = useOrg();
+  const { org, organizationId, error: orgError } = useOrg();
   const { floorId } = useParams();
   const navigate = useNavigate();
   const [search] = useSearchParams();
@@ -46,7 +46,6 @@ export default function MapPage() {
   const [inspectorDismissed, setInspectorDismissed] = useState(false);
   const layoutRequest = useRef(0);
 
-  const organizationId = import.meta.env.VITE_DEMO_ORG_ID || "";
   // The state colours come from the org's branding (spec §16), not from
   // constants in the renderer — see theme/applyOrgTheme.js.
   const palette = useMemo(() => resolveStatePalette(org), [org]);

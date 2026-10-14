@@ -79,6 +79,14 @@ const accountSchema = new mongoose.Schema(
     role: { type: String, enum: ["buyer", "silla"], default: "buyer", index: true },
 
     /**
+     * What a SILLA staff member may do inside the staff console — see
+     * middleware/staff.js for the table. Null for buyers. A staff account
+     * from before roles existed has none and is treated as an owner, which
+     * is what every one of them effectively was.
+     */
+    staffRole: { type: String, enum: ["owner", "admin", "billing", "support", null], default: null },
+
+    /**
      * An unverified account can sign in, explore and configure. It cannot
      * place an order: an order is a commercial commitment and the email
      * on it is where every update about that commitment goes.

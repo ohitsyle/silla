@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Check, ChevronDown, Eye, EyeOff, LogOut, Receipt, ShieldCheck, UserRound, ListChecks } from "lucide-react";
+import {
+  Check, ChevronDown, CreditCard, Eye, EyeOff, LayoutDashboard, LogOut, MessagesSquare, Receipt, ShieldCheck, UserRound,
+} from "lucide-react";
 
 import { initialsOf, useAccount } from "../lib/AccountContext.jsx";
 import { ROUTES } from "../lib/useHashRoute.js";
@@ -415,7 +417,9 @@ export function AccountMenu({ navigate, tone = "light" }) {
   const items = [
     { icon: UserRound, label: "Profile", to: ROUTES.account },
     { icon: Receipt, label: "My orders", to: ROUTES.orders },
-    isSilla && { icon: ListChecks, label: "Order queue", to: ROUTES.queue },
+    !isSilla && { icon: CreditCard, label: "Billing", to: ROUTES.billing },
+    !isSilla && { icon: MessagesSquare, label: "Messages", to: ROUTES.messages },
+    isSilla && { icon: LayoutDashboard, label: "Staff console", to: ROUTES.staff },
   ].filter(Boolean);
 
   return (

@@ -9,17 +9,29 @@ import checkinRoutes from "./routes/checkin.routes.js";
 import reservationRoutes from "./routes/reservation.routes.js";
 import resourceRoutes from "./routes/resource.routes.js";
 import adminRoutes from "./routes/admin.routes.js";
+import internalRoutes from "./routes/internal.routes.js";
+import { keepRawBody } from "./lib/controlPlane.js";
+import { operationalGuard, respondToEntitlementError } from "./services/entitlements.js";
 
 export function createApp() {
   const app = express();
 
   const allowedOrigins = (process.env.CORS_ORIGINS || "").split(",").filter(Boolean);
   app.use(cors({ origin: allowedOrigins.length ? allowedOrigins : true }));
-  app.use(express.json());
+  // keepRawBody: control-plane signatures cover the exact bytes sent.
+  app.use(express.json({ verify: keepRawBody }));
 
   app.get("/api/health", (req, res) =>
     res.json({ ok: true, service: "silla-server", env: process.env.NODE_ENV || "development", tz: Intl.DateTimeFormat().resolvedOptions().timeZone })
   );
+
+  // A suspended organization is read-only — see services/entitlements.js.
+  // Before every router, so a new write route cannot forget it.
+  app.use(operationalGuard());
+
+  // SILLA's control plane only: signed requests from vendor/, refused at
+  // nginx for the public internet. See lib/controlPlane.js.
+  app.use("/api/internal", internalRoutes);
 
   app.use("/api/auth", authRoutes);
   app.use("/api/organizations", organizationRoutes);
@@ -40,6 +52,9 @@ export function createApp() {
   // floor.routes.js). This turns anything that reaches here into a 500
   // rather than leaking a stack trace to the client.
   app.use((err, req, res, _next) => {
+    // Plan limits, withheld features and suspension carry their own
+    // status and a message written for the person who hit them.
+    if (respondToEntitlementError(err, res)) return;
     console.error("[api]", err);
     res.status(500).json({ error: "Internal server error" });
   });

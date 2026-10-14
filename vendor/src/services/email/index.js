@@ -90,6 +90,9 @@ async function drain() {
  */
 const UNDELIVERABLE = /@test\.silla$|@example\.(com|org|net)$/i;
 
+/** True for the test domains the transport drops — for callers deciding whether to notify a REAL inbox about them. */
+export const isUndeliverable = (email) => UNDELIVERABLE.test(String(email || ""));
+
 export function sendEmail({ to, subject, text, html }) {
   if (!to) return;
   if (UNDELIVERABLE.test(to)) return;

@@ -45,6 +45,8 @@ const fields = {
   lastName,
   passwordHash,
   role: "silla",
+  // The first staff account runs the console; owners invite the rest.
+  staffRole: "owner",
   active: true,
   emailVerified: true,
   emailVerifiedAt: new Date(),

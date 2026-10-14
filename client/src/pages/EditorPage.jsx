@@ -46,7 +46,7 @@ const TOOL = {
 };
 
 export default function EditorPage() {
-  const { org } = useOrg();
+  const { org, organizationId } = useOrg();
   const { user, booting, isAuthenticated } = useAuth();
   const { floorId } = useParams();
   const navigate = useNavigate();
@@ -75,12 +75,12 @@ export default function EditorPage() {
   const isSuperadmin = user?.role === "superadmin";
 
   const loadFloors = useCallback(() => {
-    Promise.all([api.getFloors(import.meta.env.VITE_DEMO_ORG_ID), api.getSpaces(import.meta.env.VITE_DEMO_ORG_ID)]).then(([d, spaces]) => {
+    Promise.all([api.getFloors(organizationId), api.getSpaces(organizationId)]).then(([d, spaces]) => {
       setFloors(d.floors);
       setBuildings(spaces.buildings);
       if (!floorId && d.floors.length) navigate(`/editor/${d.floors[0].id}`, { replace: true });
     }).catch((e) => setError(e.message));
-  }, [floorId, navigate]);
+  }, [floorId, navigate, organizationId]);
   useEffect(loadFloors, [loadFloors]);
 
   const load = useCallback(() => {

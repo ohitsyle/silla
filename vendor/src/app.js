@@ -2,6 +2,14 @@ import express from "express";
 import cors from "cors";
 import authRoutes from "./routes/auth.routes.js";
 import orderRoutes from "./routes/order.routes.js";
+import planRoutes from "./routes/plans.routes.js";
+import billingRoutes from "./routes/billing.routes.js";
+import settingsRoutes from "./routes/settings.routes.js";
+import staffRoutes from "./routes/staff.routes.js";
+import clientRoutes from "./routes/clients.routes.js";
+import conversationRoutes from "./routes/conversations.routes.js";
+import deploymentRoutes from "./routes/deployments.routes.js";
+import auditRoutes from "./routes/audit.routes.js";
 
 /**
  * SILLA's own commerce API — accounts and orders.
@@ -31,6 +39,19 @@ export function createApp() {
 
   app.use("/api/vendor/auth", authRoutes);
   app.use("/api/vendor/orders", orderRoutes);
+
+  // Subscriptions and money.
+  app.use("/api/vendor/plans", planRoutes);
+  app.use("/api/vendor/billing", billingRoutes);
+  app.use("/api/vendor/settings", settingsRoutes);
+
+  // The staff console: who staff are, the clients they serve, what they
+  // say to them, the deployments they run, and the trail they leave.
+  app.use("/api/vendor/staff", staffRoutes);
+  app.use("/api/vendor/clients", clientRoutes);
+  app.use("/api/vendor/conversations", conversationRoutes);
+  app.use("/api/vendor/deployments", deploymentRoutes);
+  app.use("/api/vendor/audit", auditRoutes);
 
   app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 

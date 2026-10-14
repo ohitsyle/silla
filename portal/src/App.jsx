@@ -9,6 +9,11 @@ import Orders from "./account/Orders.jsx";
 import Queue from "./account/Queue.jsx";
 import ProfilePage from "./account/ProfilePage.jsx";
 import { TermsPage } from "./account/Terms.jsx";
+import BillingPage from "./account/BillingPage.jsx";
+import InvoicePage from "./account/InvoicePage.jsx";
+import MessagesPage from "./account/MessagesPage.jsx";
+import StaffConsole from "./staff/StaffConsole.jsx";
+import StaffSignIn from "./staff/StaffSignIn.jsx";
 import { AccountProvider, useAccount } from "./lib/AccountContext.jsx";
 import { ROUTES, useHashRoute } from "./lib/useHashRoute.js";
 import { saveIntent } from "./lib/entryIntent.js";
@@ -47,7 +52,7 @@ import { ToastProvider } from "./lib/toast.jsx";
 /** How long the panel takes to close over the page. The swap happens then. */
 const COVER_MS = 320;
 
-const GUARDED = ["orders", "queue", "account"];
+const GUARDED = ["orders", "queue", "account", "billing", "invoices", "messages", "staff"];
 
 /**
  * What is on screen is not only the address. A signed-out visitor at
@@ -57,7 +62,7 @@ const GUARDED = ["orders", "queue", "account"];
  * checked the gate is "?", and settling it is not navigation: a refresh
  * on #/orders must not wipe on load.
  */
-const pageKey = (p) => `${p.name}/${p.id || ""}/${p.gate}`;
+const pageKey = (p) => `${p.name}/${p.section || ""}/${p.id || ""}/${p.gate}`;
 
 /**
  * Pages that swap WITHOUT a wipe share a group. Sign in and sign up are
@@ -66,7 +71,14 @@ const pageKey = (p) => `${p.name}/${p.id || ""}/${p.gate}`;
  * load. Everything else — including a list and one of its orders — is
  * its own page.
  */
-const group = (p) => (p.name === "signIn" || p.name === "signUp" ? "auth" : pageKey(p));
+const group = (p) => {
+  if (p.name === "signIn" || p.name === "signUp") return "auth";
+  // The staff console is a tool with a fixed sidebar; wiping the whole
+  // screen between its sections would be a page load for a tab click.
+  // Entering or leaving it still wipes.
+  if (p.name === "staff" && p.gate === "in") return "staff";
+  return pageKey(p);
+};
 
 /**
  * Trails `route` behind a wipe: the panel closes, the page swaps under
@@ -156,7 +168,7 @@ function Routed() {
   const [entry, setEntry] = useState(null);
 
   const gate = !GUARDED.includes(route.name) ? "" : booting ? "?" : isSignedIn ? "in" : "out";
-  const shown = usePageWipe({ name: route.name, id: route.id, gate });
+  const shown = usePageWipe({ name: route.name, id: route.id, section: route.section || null, gate });
 
   useEffect(() => {
     const titles = {
@@ -168,6 +180,11 @@ function Routed() {
       queue: "Order queue · SILLA",
       account: "Your profile · SILLA",
       terms: "Terms & Conditions · SILLA",
+      billing: "Billing · SILLA",
+      invoices: "Invoice · SILLA",
+      messages: "Messages · SILLA",
+      staff: "Staff console · SILLA",
+      staffSignIn: "Staff sign in · SILLA",
     };
     document.title = titles[shown.page.name] || titles.home;
   }, [shown.page.name]);
@@ -179,6 +196,10 @@ function Routed() {
   useEffect(() => {
     if ((route.name === "signIn" || route.name === "signUp") && isSignedIn && !booting) {
       navigate(ROUTES.home, { replace: true });
+    }
+    // Staff arriving at their own door while signed in go straight to work.
+    if (route.name === "staffSignIn" && isSignedIn && isSilla && !booting) {
+      navigate(ROUTES.staff, { replace: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route.name, booting]);
@@ -192,6 +213,8 @@ function Routed() {
       return <div className="silla-marketing grid min-h-screen place-items-center text-ink-muted">Loading…</div>;
     }
     if (page.gate === "out") {
+      // Staff have their own door; everyone else gets the storefront's.
+      if (page.name === "staff") return <StaffSignIn navigate={navigate} />;
       // From the page being SHOWN, not location.hash: mid-wipe the hash
       // has already moved on while this is still on screen.
       const here = `${ROUTES[page.name]}${page.id ? `/${page.id}` : ""}`;
@@ -215,6 +238,22 @@ function Routed() {
         return <ProfilePage navigate={navigate} />;
       case "terms":
         return <TermsPage navigate={navigate} />;
+      case "billing":
+        return <BillingPage navigate={navigate} />;
+      case "invoices":
+        return <InvoicePage id={page.id} navigate={navigate} />;
+      case "messages":
+        return <MessagesPage id={page.id} navigate={navigate} />;
+      case "staff":
+        // A buyer who guesses the address is sent to their own orders,
+        // like #/queue; the API refuses them regardless.
+        return isSilla ? (
+          <StaffConsole section={page.section} id={page.id} navigate={navigate} />
+        ) : (
+          <Orders id={null} navigate={navigate} />
+        );
+      case "staffSignIn":
+        return <StaffSignIn navigate={navigate} />;
       default:
         return (
           <Landing

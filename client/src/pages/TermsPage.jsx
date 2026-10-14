@@ -6,6 +6,7 @@ import { api } from "../lib/api.js";
 import { useAuth } from "../lib/AuthContext.jsx";
 import AuthShell from "../components/AuthShell.jsx";
 import { Button, Card, Loading, Notice, Skeleton } from "../components/ui/index.jsx";
+import { useOrg } from "../lib/OrgContext.jsx";
 
 /**
  * TermsPage — AUTH-3 (spec §5: "on first login the user must accept
@@ -29,7 +30,7 @@ export default function TermsPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
 
-  const organizationId = import.meta.env.VITE_DEMO_ORG_ID || "";
+  const { organizationId } = useOrg();
 
   useEffect(() => {
     api.getTerms(organizationId).then(setTerms).catch((err) => setError(err.message));

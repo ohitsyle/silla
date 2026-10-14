@@ -29,7 +29,11 @@ export const writeToken = (token) => {
   }
 };
 
-async function request(path, options = {}) {
+/**
+ * Shared by lib/billingApi.js and lib/staffApi.js so every client sends the
+ * same token and reports errors the same way.
+ */
+export async function request(path, options = {}) {
   const token = readToken();
   const res = await fetch(`${BASE}${path}`, {
     ...options,

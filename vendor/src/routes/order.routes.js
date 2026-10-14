@@ -3,7 +3,8 @@ import mongoose from "mongoose";
 import Order, { ALLOWED_TRANSITIONS } from "../models/Order.js";
 import Account from "../models/Account.js";
 import { requireAccount, requireSilla } from "../middleware/auth.js";
-import { sendEmail } from "../services/email/index.js";
+import { sendEmail, isUndeliverable } from "../services/email/index.js";
+import * as billing from "../services/billing.js";
 import {
   orderCancelledEmail, orderLiveEmail, orderProvisioningEmail,
   orderSubmittedEmail, orderSubmittedInternalEmail,
@@ -140,10 +141,21 @@ router.post(
     order.history.push({ status: "submitted", by: req.account._id, note: "Submitted by the buyer" });
     await order.save();
 
+    // The subscription (and its first invoice) exists from the moment of
+    // commitment. A billing failure must not un-submit the order — staff
+    // can issue the invoice by hand — so it is logged, not thrown.
+    try {
+      await billing.onOrderSubmitted(order);
+    } catch (err) {
+      console.error("[vendor:billing] onOrderSubmitted failed for", order._id.toString(), err);
+    }
+
     // Both directions: the buyer gets a receipt, and we get told rather
-    // than finding out when somebody refreshes the queue.
+    // than finding out when somebody refreshes the queue. Not for test
+    // buyers: the @test.silla guard in the transport checks only the
+    // RECIPIENT, and this one goes to a real inbox.
     sendEmail(orderSubmittedEmail({ account: req.account, order }));
-    if (process.env.SILLA_ORDERS_EMAIL) {
+    if (process.env.SILLA_ORDERS_EMAIL && !isUndeliverable(req.account.email)) {
       sendEmail(orderSubmittedInternalEmail({ account: req.account, order, to: process.env.SILLA_ORDERS_EMAIL }));
     }
 
@@ -241,6 +253,14 @@ router.patch(
     }
 
     await order.save();
+
+    if (status === "cancelled" && previous !== "cancelled") {
+      try {
+        await billing.onOrderCancelled(order, { by: req.account, reason: String(note || "") });
+      } catch (err) {
+        console.error("[vendor:billing] onOrderCancelled failed for", order._id.toString(), err);
+      }
+    }
 
     // Only on an actual change of state — re-saving a URL should not
     // email somebody again.

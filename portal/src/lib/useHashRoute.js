@@ -23,14 +23,27 @@ export const ROUTES = {
   queue: "#/queue",
   account: "#/account",
   terms: "#/terms",
+  billing: "#/billing", // a buyer's plan, subscription and invoices
+  invoices: "#/invoices", // #/invoices/<id> — one invoice, printable
+  messages: "#/messages", // #/messages[/<conversationId>]
+  staff: "#/staff", // #/staff/<section>[/<id>] — the staff console
+  staffSignIn: "#/staff/sign-in",
 };
+
+/** `#/staff/clients/abc` → { name: "staff", section: "clients", id: "abc" } */
+function parseStaff(rest) {
+  const [section = "", id = null] = rest;
+  if (section === "sign-in") return { name: "staffSignIn", id: null, section: null };
+  return { name: "staff", section: section || "dashboard", id };
+}
 
 /** `#/orders/abc123` → { name: "orders", id: "abc123" } */
 export function parseHash(hash) {
   const clean = String(hash || "").replace(/^#\/?/, "");
   if (!clean) return { name: "home", id: null };
 
-  const [head, id = null] = clean.split("/");
+  const [head, id = null, ...rest] = clean.split("/");
+  if (head === "staff") return parseStaff([id, ...rest].filter((part) => part !== null));
   const known = {
     configure: "configure",
     "sign-in": "signIn",
@@ -39,6 +52,9 @@ export function parseHash(hash) {
     queue: "queue",
     account: "account",
     terms: "terms",
+    billing: "billing",
+    invoices: "invoices",
+    messages: "messages",
   };
   return { name: known[head] || "home", id };
 }
