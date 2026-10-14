@@ -17,6 +17,10 @@ const resourceSchema = new mongoose.Schema(
     floor: { type: mongoose.Schema.Types.ObjectId, ref: "Floor", required: true, index: true },
     resourceType: { type: mongoose.Schema.Types.ObjectId, ref: "ResourceType", required: true },
     zone: { type: mongoose.Schema.Types.ObjectId, ref: "Zone", default: null },
+    // Room booking targets use the existing reservation/check-in lifecycle but
+    // never appear as furniture or contribute an extra seat to capacity totals.
+    kind: { type: String, enum: ["piece", "room"], default: "piece" },
+    room: { type: mongoose.Schema.Types.ObjectId, ref: "Room", default: null },
 
     position: {
       col: { type: Number, required: true },

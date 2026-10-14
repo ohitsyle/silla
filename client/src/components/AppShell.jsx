@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  ContactRound, LayoutDashboard, LogIn, LogOut, Map as MapIcon, Menu, PencilRuler,
+  ContactRound, LayoutDashboard, LogIn, LogOut, Map as MapIcon, Menu, PencilRuler, Wrench,
 } from "lucide-react";
 import { useAuth } from "../lib/AuthContext.jsx";
 import { sectionsFor } from "../lib/adminSections.js";
@@ -39,6 +39,7 @@ const LINKS = [
   { to: "/map", label: "Map", icon: MapIcon, roles: ["member", "staff", "superadmin"] },
   { to: "/admin", label: "Console", icon: LayoutDashboard, roles: ["staff", "superadmin"] },
   { to: "/editor", label: "Editor", icon: PencilRuler, roles: ["superadmin"] },
+  { to: "/editor", label: "Space controls", icon: Wrench, roles: ["staff"] },
   { to: "/kiosk", label: "Kiosk", icon: ContactRound, roles: ["member", "staff", "superadmin"], public: true },
 ];
 

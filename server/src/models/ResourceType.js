@@ -19,6 +19,7 @@ const resourceTypeSchema = new mongoose.Schema(
       index: true,
     },
     key: { type: String, required: true }, // "long_table", "hot_desk", ...
+    internal: { type: Boolean, default: false },
     label: { type: String, required: true }, // display name, e.g. "Long Table"
     footprint: {
       w: { type: Number, required: true },

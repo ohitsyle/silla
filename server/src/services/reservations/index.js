@@ -1,38 +1,15 @@
 /**
- * The reservation engine (spec §9–§11).
- *
- * RES-2 is the story everything else rests on: "Server-side atomic
- * claim; Overlapping-time reservations rejected."
- *
- * ---------------------------------------------------------------------
- * Why the claim is written the way it is
- * ---------------------------------------------------------------------
- * A read-then-write inside a transaction is NOT sufficient here. Mongo
- * transactions give snapshot isolation, which does not prevent write
- * skew: two concurrent claims can each read "no conflict" from their own
- * snapshot and both insert. The seats look free to both, and both win.
- *
- * A partial unique index on (resource, unitLabel) for live statuses
- * would prevent that, but it also forbids booking the same seat for two
- * NON-overlapping windows — which the spec explicitly allows ("prevents
- * overlapping-time double-booking", not "one booking per seat, ever").
- *
- * So the claim uses optimistic insert with a deterministic tie-break:
- *
- *   1. validate the request (policy, closures, hours, one-active)
- *   2. insert the reservation
- *   3. re-query for overlapping live reservations on the same unit
- *   4. if any conflict has a LOWER _id than ours, we lost — delete ours
- *      and report the conflict
- *
- * ObjectIds are monotonic within a process and comparable across them,
- * so every racing claimant independently computes the same winner: the
- * lowest _id. Losers always roll themselves back, so exactly one
- * reservation survives no matter how many raced. This is verifiable —
- * see the concurrency test in scripts/reservationRace.js.
- * ---------------------------------------------------------------------
+ * RES-2: claims commit inside a transaction after an actual shared write to the
+ * organization's spaceRevision. Read-then-write transactions ALONE permit write
+ * skew. The revision write creates a conflict that Mongo retries with a fresh
+ * snapshot, covering room-versus-seat races and one-reservation-per-member races.
+ * The previous lowest-ObjectId insert tie-break only compared identical units;
+ * a room and its children have different target ids and need one shared guard.
+ * No email or socket event escapes until the transaction commits.
  */
-import { randomInt } from "node:crypto";
+import ResourceType from "../../models/ResourceType.js";
+import Room from "../../models/Room.js";
+import { withSpaceTransaction, roomForResource, roomContents } from "../spaces.js";
 import Reservation from "../../models/Reservation.js";
 import Resource from "../../models/Resource.js";
 import Floor from "../../models/Floor.js";
@@ -46,7 +23,6 @@ import {
   assertWithinMaxStay,
   assertWithinOperatingHours,
   findClosureConflict,
-  findConflicts,
   findMemberLiveReservation,
   LIVE_STATUSES,
 } from "./availability.js";
@@ -102,13 +78,14 @@ export async function syncUnitStatus(resourceId, unitLabel, { io } = {}) {
     unit.overstay = Boolean(active?.overstay);
   }
 
-  await resource.save();
+  const fresh = await Resource.findOneAndUpdate({ _id: resource._id }, { $set: { "units.$[unit].status": unit.status, "units.$[unit].overstay": unit.overstay } }, { arrayFilters: [{ "unit.label": unitLabel }], new: true });
 
   const floor = await Floor.findById(resource.floor).select("_id");
-  emitUnitStatus(io, {
-    floorId: floor?._id?.toString(),
+  const room = resource.kind === "room" ? await Room.findById(resource.room) : null;
+  for (const floorId of room ? room.levels.map((l) => String(l.floor)) : [floor?._id?.toString()]) emitUnitStatus(io, {
+    floorId,
     resourceId: resource._id.toString(),
-    units: resource.units.map((u) => ({
+    units: fresh.units.map((u) => ({
       status: u.status,
       serviceStatus: u.serviceStatus,
       overstay: u.overstay,
@@ -121,140 +98,107 @@ export async function syncUnitStatus(resourceId, unitLabel, { io } = {}) {
 /**
  * RES-1 / RES-2 / RES-3 / RES-5 / RES-7 — claim a unit for a window.
  */
-export async function claimReservation({
-  organizationId,
-  memberId,
-  resourceId,
-  unitLabel,
-  startTime,
-  endTime,
-  io = null,
-}) {
+async function availableTarget({ organizationId, resourceId, unitLabel, start, end, maxStayStart = start, org, session = null, excludeId = null }) {
+    const closed = assertOrganizationBookable(org);
+    if (closed) throw new ReservationError(closed, 409, "ORG_CLOSED");
+    const tooLong = assertWithinMaxStay(org, maxStayStart, end);
+    if (tooLong) throw new ReservationError(tooLong, 400, "MAX_STAY");
+    const outside = assertWithinOperatingHours(org, start, end);
+    if (outside) throw new ReservationError(outside, 400, "OPERATING_HOURS");
+    const resource = await Resource.findOne({ _id: resourceId, organization: organizationId }).session(session);
+    if (!resource) throw new ReservationError("Resource not found", 404);
+    const unit = resource.units.find((u) => u.label === String(unitLabel));
+    if (!unit) throw new ReservationError("That unit does not exist.", 404);
+    const type = await ResourceType.findById(resource.resourceType).session(session);
+    if (!type?.reservable) throw new ReservationError("That item is not bookable.", 409);
+    if (unit.serviceStatus === "out_of_service") throw new ReservationError("That resource is out of service.", 409, "OUT_OF_SERVICE");
+    if (unit.status === "unavailable") throw new ReservationError("That resource is unavailable.", 409, "UNAVAILABLE");
+    const room = await roomForResource(resource, session);
+    if (resource.kind === "room" && !room) throw new ReservationError("Room not found", 404);
+    let conflictQuery = { resource: resource._id, unitLabel: String(unitLabel) };
+    if (room) {
+      const target = await Resource.findById(room.resource).session(session);
+      if (target?.units[0]?.status === "unavailable") throw new ReservationError("That room is currently unavailable.", 409, "ROOM_CLOSED");
+      if (resource.kind === "room") {
+        if (room.bookingMode === "individual") throw new ReservationError("This room is booked by individual resource.", 409, "ROOM_MODE");
+        const children = await roomContents(room, session);
+        conflictQuery = { resource: { $in: [room.resource, ...children.map((c) => c._id)] } };
+      } else {
+        if (room.bookingMode === "whole") throw new ReservationError("Reserve this room as a whole instead.", 409, "ROOM_MODE");
+        conflictQuery = { $or: [{ resource: resource._id, unitLabel: String(unitLabel) }, { resource: room.resource }] };
+      }
+    }
+    const floor = await Floor.findById(resource.floor).session(session);
+    const closure = await findClosureConflict({ organizationId, siteId: floor?.site, startTime: start, endTime: end }, session);
+    if (closure) throw new ReservationError("That period is closed: " + closure.reason, 409, "CLOSURE");
+    const conflict = await Reservation.exists({
+      ...conflictQuery, ...(excludeId ? { _id: { $ne: excludeId } } : {}), status: { $in: LIVE_STATUSES },
+      $and: [{ $or: [{ startTime: { $lt: end }, endTime: { $gt: start } }, ...(start <= new Date() ? [{ status: "active" }] : [])] }],
+    }).session(session);
+    if (conflict) throw new ReservationError(room ? "The room or a resource inside is already booked for part of that window." : "That resource is already booked for part of that window.", 409, "CONFLICT");
+    const resourceLabel = resource.kind === "room" ? room.name : (type.label + " · " + unitLabel);
+    return resourceLabel;
+}
+
+// OCC-1: early arrival cannot occupy a room while another level/seat is in use.
+export async function assertActivationAvailable(reservation, org, now, session) {
+  return availableTarget({ organizationId: reservation.organization, resourceId: reservation.resource, unitLabel: reservation.unitLabel,
+    start: now < reservation.startTime ? now : reservation.startTime, maxStayStart: reservation.startTime, end: reservation.endTime, org, session, excludeId: reservation._id });
+}
+
+export async function reservationAvailability({ organizationId, resourceId, unitLabel, startTime, endTime }) {
+  const start = new Date(startTime), end = new Date(endTime);
+  if (!startTime || !endTime || Number.isNaN(+start) || Number.isNaN(+end)) return { bookable: false, error: "Choose valid start and end times." };
   const org = await Organization.findById(organizationId);
   if (!org) throw new ReservationError("Organization not found", 404);
+  try { await availableTarget({ organizationId, resourceId, unitLabel, start, end, org }); return { bookable: true }; }
+  catch (e) { if (e instanceof ReservationError) return { bookable: false, error: e.message, code: e.code }; throw e; }
+}
 
-  const closed = assertOrganizationBookable(org);
-  if (closed) throw new ReservationError(closed, 409, "ORG_CLOSED");
-
+export async function claimReservation({
+  organizationId, memberId, resourceId, unitLabel, startTime, endTime,
+  io = null, activate = false, notify = true,
+}) {
   const start = new Date(startTime);
   const end = new Date(endTime);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
-    throw new ReservationError("startTime and endTime must be valid dates");
-  }
-
-  const tooLong = assertWithinMaxStay(org, start, end);
-  if (tooLong) throw new ReservationError(tooLong, 400, "MAX_STAY");
-
-  const outsideHours = assertWithinOperatingHours(org, start, end);
-  if (outsideHours) throw new ReservationError(outsideHours, 400, "OPERATING_HOURS");
-
-  const resource = await Resource.findById(resourceId);
-  if (!resource) throw new ReservationError("Resource not found", 404);
-
-  const unit = resource.units.find((u) => u.label === String(unitLabel));
-  if (!unit) throw new ReservationError(`No unit "${unitLabel}" on that resource`, 404);
-  if (unit.serviceStatus === "out_of_service") {
-    throw new ReservationError("That resource is out of service.", 409, "OUT_OF_SERVICE");
-  }
-  if (unit.status === "unavailable") {
-    throw new ReservationError("That resource is unavailable.", 409, "UNAVAILABLE");
-  }
-
-  const floor = await Floor.findById(resource.floor).select("site");
-  const closure = await findClosureConflict({
-    organizationId,
-    siteId: floor?.site,
-    startTime: start,
-    endTime: end,
+  if (!startTime || !endTime || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) throw new ReservationError("Choose valid start and end times.");
+  let resourceLabel;
+  const reservation = await withSpaceTransaction(organizationId, async (session, org) => {
+    const member = await User.findOne({ _id: memberId, organization: organizationId, active: true }).session(session);
+    if (!member) throw new ReservationError("Account not found", 404);
+    resourceLabel = await availableTarget({ organizationId, resourceId, unitLabel, start, end, org, session });
+    if (await findMemberLiveReservation(memberId, session)) throw new ReservationError("You already have an active reservation. Check out or cancel it first.", 409, "ALREADY_HOLDING");
+    const [created] = await Reservation.create([{
+      organization: organizationId, member: memberId, resource: resourceId, targetLabel: resourceLabel, unitLabel: String(unitLabel),
+      startTime: start, endTime: end, status: activate ? "active" : "held", checkedInAt: activate ? start : null,
+      checkInMethod: org.identity?.checkInMethod === "qr" ? "qr" : "rfid",
+    }], { session });
+    return created;
   });
-  if (closure) {
-    throw new ReservationError(
-      `That period is closed: ${closure.reason}`,
-      409,
-      "CLOSURE"
-    );
-  }
-
-  // RES-3 — one live reservation per member, self-only.
-  const existing = await findMemberLiveReservation(memberId);
-  if (existing) {
-    throw new ReservationError(
-      "You already have an active reservation. Check out or cancel it first.",
-      409,
-      "ALREADY_HOLDING"
-    );
-  }
-
-  // Cheap pre-check so the common case fails fast with a clear message.
-  const preConflicts = await findConflicts({
-    resource: resourceId,
-    unitLabel: String(unitLabel),
-    startTime: start,
-    endTime: end,
-  });
-  if (preConflicts.length) {
-    throw new ReservationError("That resource is already booked for part of that window.", 409, "CONFLICT");
-  }
-
-  // ---- The atomic claim (see the header comment) ----
-  const reservation = await Reservation.create({
-    organization: organizationId,
-    member: memberId,
-    resource: resourceId,
-    unitLabel: String(unitLabel),
-    startTime: start,
-    endTime: end,
-    status: "held",
-    checkInMethod: org.identity?.checkInMethod === "qr" ? "qr" : "rfid",
-  });
-
-  const racers = await findConflicts({
-    resource: resourceId,
-    unitLabel: String(unitLabel),
-    startTime: start,
-    endTime: end,
-    excludeId: reservation._id,
-  });
-
-  const lostTo = racers.find((r) => r._id.toString() < reservation._id.toString());
-  if (lostTo) {
-    // Someone with a lower _id claimed the same window concurrently.
-    // Every loser reaches this branch and removes itself, so exactly one
-    // reservation survives.
-    await Reservation.deleteOne({ _id: reservation._id });
-    throw new ReservationError("That resource was just taken. Please pick another.", 409, "RACE_LOST");
-  }
-
   await syncUnitStatus(resourceId, String(unitLabel), { io });
-
-  // NOT-2 — confirmation email, async so a mail failure can never roll
-  // back a good reservation (spec §15).
-  const member = await User.findById(memberId);
-  if (member) {
-    sendEmail(
-      reservationConfirmedEmail({
-        org,
-        user: member,
-        reservation,
-        resourceLabel: `${unitLabel}`,
-      })
-    );
+  if (notify) {
+    const [org, member] = await Promise.all([Organization.findById(organizationId), User.findById(memberId)]);
+    if (member) sendEmail(reservationConfirmedEmail({ org, user: member, reservation, resourceLabel }));
   }
-
   return reservation;
 }
 
 /** Member- or staff-initiated cancellation. */
-export async function cancelReservation({ reservationId, reason = null, io = null }) {
-  const reservation = await Reservation.findById(reservationId);
-  if (!reservation) throw new ReservationError("Reservation not found", 404);
-  if (!LIVE_STATUSES.includes(reservation.status)) {
-    throw new ReservationError(`That reservation is already ${reservation.status}.`, 409);
-  }
-
-  reservation.status = "cancelled";
-  reservation.cancelReason = reason;
-  await reservation.save();
+export async function cancelReservation({ reservationId, organizationId, reason = null, io = null }) {
+  const filter = { _id: reservationId, ...(organizationId ? { organization: organizationId } : {}) };
+  const found = await Reservation.findOne(filter).select("organization");
+  if (!found) throw new ReservationError("Reservation not found", 404);
+  const reservation = await withSpaceTransaction(found.organization, async (session) => {
+    const current = await Reservation.findOne(filter).session(session);
+    if (!current) throw new ReservationError("Reservation not found", 404);
+    if (!LIVE_STATUSES.includes(current.status)) {
+      throw new ReservationError(`That reservation is already ${current.status}.`, 409);
+    }
+    current.status = "cancelled";
+    current.cancelReason = reason;
+    await current.save({ session });
+    return current;
+  });
 
   await syncUnitStatus(reservation.resource, reservation.unitLabel, { io });
   return reservation;

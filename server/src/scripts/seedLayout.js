@@ -19,6 +19,8 @@ import "dotenv/config";
 import mongoose from "mongoose";
 import { connectDB } from "../config/db.js";
 import Organization from "../models/Organization.js";
+import Building from "../models/Building.js";
+import Room from "../models/Room.js";
 import Site from "../models/Site.js";
 import Floor from "../models/Floor.js";
 import ResourceType from "../models/ResourceType.js";
@@ -33,12 +35,13 @@ import { detectProfile, getProfile } from "./profiles.js";
  * applyProfile.js can reuse it instead of duplicating placement logic.
  */
 export async function seedFloorLayouts(org, profileKey = null) {
+  if (await Room.exists({ organization: org._id })) throw new Error("This organization has configured rooms. Edit its maps in the application; replacing the seed layout would invalidate those boundaries.");
   const site = await Site.findOne({ organization: org._id }).sort({ createdAt: 1 });
   if (!site) {
     throw new Error(`No site found for organization "${org.name}". Run \`npm run seed\` first.`);
   }
 
-  const types = await ResourceType.find({ organization: org._id });
+  const types = await ResourceType.find({ organization: org._id, internal: { $ne: true } });
   if (!types.length) {
     throw new Error(`No resource catalog found for "${org.name}". Run \`npm run seed\` first.`);
   }
@@ -64,6 +67,7 @@ export async function seedFloorLayouts(org, profileKey = null) {
     if (!floor) {
       floor = await Floor.create({
         site: site._id,
+        building: (await Building.findOne({ site: site._id }))?._id || null,
         name: definition.name,
         order: definition.order,
         grid: definition.grid,

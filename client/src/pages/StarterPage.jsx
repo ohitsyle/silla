@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { api } from "../lib/api.js";
 import SpaceMap from "../components/SpaceMap.jsx";
+import { effectiveStatus } from "../lib/rooms.js";
 import { resolveStatePalette } from "../theme/applyOrgTheme.js";
 import { useOrg } from "../lib/OrgContext.jsx";
 import { useAuth } from "../lib/AuthContext.jsx";
@@ -48,10 +49,12 @@ function useAvailability(organizationId) {
         const breakdown = {};
         let total = 0;
         for (const layout of layouts) {
-          for (const units of Object.values(layout.status || {})) {
+          for (const resource of layout.layout.resources) {
+            const units = layout.status[resource.id] || [];
             for (const unit of units) {
               total += 1;
-              const key = unit.serviceStatus === "out_of_service" ? "out_of_service" : unit.status;
+              const shown = effectiveStatus(resource, unit, layout.layout.rooms || [], layout.status);
+              const key = shown.serviceStatus === "out_of_service" ? "out_of_service" : shown.status;
               breakdown[key] = (breakdown[key] || 0) + 1;
             }
           }

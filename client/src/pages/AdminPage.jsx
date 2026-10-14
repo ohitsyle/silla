@@ -389,7 +389,7 @@ function Resources() {
       </div>
 
       <p className="text-xs text-ink-muted">
-        Grouped by zone — membership is derived from position, never tagged by hand. Click a
+        Grouped by room and zone — membership follows the map. Click a
         {" "}
         {"unit"} to change its availability.
       </p>

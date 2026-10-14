@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
-import { Ban, CircleCheck, Layers, MousePointerClick, Plus, Tag, Trash2, Wrench } from "lucide-react";
+import { Ban, Building2, CircleCheck, DoorOpen, Layers, MousePointerClick, Plus, Tag, Trash2, Wrench } from "lucide-react";
 import { api } from "../lib/api.js";
 import { useOrg } from "../lib/OrgContext.jsx";
 import { useAuth } from "../lib/AuthContext.jsx";
+import { useFloorSocket } from "../lib/useFloorSocket.js";
 import { resolveStatePalette } from "../theme/applyOrgTheme.js";
 import SpaceMap from "../components/SpaceMap.jsx";
+import RoomManager, { RoomDialog, BuildingDialog } from "../components/RoomManager.jsx";
 import GridSketch from "../components/GridSketch.jsx";
 import {
   Badge, Button, Card, EmptyState, Field, Loading, Modal, Notice, Page, PageHeader, Panel,
-  Segmented, Skeleton, Spinner,
+  Segmented, Select, Skeleton, Spinner,
 } from "../components/ui/index.jsx";
 
 /**
@@ -38,6 +40,7 @@ const TOOL = {
   AVAILABILITY: "availability",
   PLACE: "place",
   REMOVE: "remove",
+  ROOM: "room",
   ZONE: "zone",
   LABEL: "label",
 };
@@ -49,7 +52,13 @@ export default function EditorPage() {
   const navigate = useNavigate();
 
   const [floors, setFloors] = useState([]);
+  const [buildings, setBuildings] = useState([]);
+  const [buildingOverride, setBuildingOverride] = useState(null);
+  const [buildingDialog, setBuildingDialog] = useState(null);
+  const [roomDraft, setRoomDraft] = useState(null);
+  const [drawingRoom, setDrawingRoom] = useState(null);
   const [data, setData] = useState(null);
+  const layoutRequest = useRef(0);
   const [tool, setTool] = useState(TOOL.AVAILABILITY);
   const [typeKey, setTypeKey] = useState(null);
   const [error, setError] = useState(null);
@@ -66,30 +75,51 @@ export default function EditorPage() {
   const isSuperadmin = user?.role === "superadmin";
 
   const loadFloors = useCallback(() => {
-    api.getFloors(import.meta.env.VITE_DEMO_ORG_ID).then((d) => {
+    Promise.all([api.getFloors(import.meta.env.VITE_DEMO_ORG_ID), api.getSpaces(import.meta.env.VITE_DEMO_ORG_ID)]).then(([d, spaces]) => {
       setFloors(d.floors);
+      setBuildings(spaces.buildings);
       if (!floorId && d.floors.length) navigate(`/editor/${d.floors[0].id}`, { replace: true });
-    });
+    }).catch((e) => setError(e.message));
   }, [floorId, navigate]);
   useEffect(loadFloors, [loadFloors]);
 
   const load = useCallback(() => {
     if (!floorId) return;
+    const request = ++layoutRequest.current;
     api
       .getFloorLayout(floorId)
       .then((d) => {
+        if (request !== layoutRequest.current) return;
         setData(d);
+        setError(null);
         setTypeKey((current) => current || d.resourceTypes[0]?.key || null);
       })
-      .catch((e) => setError(e.message));
+      .catch((e) => { if (request === layoutRequest.current) setError(e.message); });
   }, [floorId]);
-  useEffect(load, [load]);
+  useEffect(() => { setSelectedUnit(null); load(); return () => { layoutRequest.current++; }; }, [load]);
+  const applyStatus = useCallback((resourceId, units) => {
+    setData((current) => current ? { ...current, status: { ...current.status, [resourceId]: units } } : current);
+  }, []);
+  useFloorSocket(floorId, applyStatus);
+  useEffect(() => {
+    if (!drawingRoom || data?.floor.id !== floorId) return undefined;
+    const frame = requestAnimationFrame(() => document.getElementById("editor-canvas")?.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }));
+    return () => cancelAnimationFrame(frame);
+  }, [drawingRoom, data?.floor.id, floorId]);
 
   // Staff never get the structural tools, so make sure the selected one
   // is legal for this role.
   useEffect(() => {
     if (!isSuperadmin && tool !== TOOL.AVAILABILITY) setTool(TOOL.AVAILABILITY);
   }, [isSuperadmin, tool]);
+
+  const currentBuilding = buildings.find((b) => b.id === buildingOverride) || buildings.find((b) => b.floors.some((f) => f.id === floorId));
+  const visibleData = data?.floor.id === floorId && currentBuilding?.floors.some((f) => f.id === floorId) ? data : null;
+  const drawRoom = (room, id) => {
+    setDrawingRoom(room); setTool(TOOL.ROOM); setSelectedUnit(null);
+    if (id && id !== floorId) navigate(`/editor/${id}`);
+  };
+  const reloadSpaces = () => { loadFloors(); load(); };
 
   if (booting) return <Loading className="min-h-screen" />;
   if (!isAuthenticated) return <Navigate to="/login" replace />;
@@ -138,14 +168,18 @@ export default function EditorPage() {
   const onRegionSelect = (rect) => {
     if (!isSuperadmin) return;
     if (tool === TOOL.ZONE) setPendingZone(rect);
+    if (tool === TOOL.ROOM) {
+      if (!currentBuilding || currentBuilding.unassigned) { setError("Set up a building before drawing rooms."); return; }
+      const levels = [...(drawingRoom?.levels || []).filter((l) => l.floorId !== floorId), { floorId, name: drawingRoom?.levels.find((l) => l.floorId === floorId)?.name || "", bounds: rect }];
+      setRoomDraft({ ...drawingRoom, buildingId: currentBuilding.id, levels });
+      setDrawingRoom(null);
+    }
   };
 
   const onCellClick = (col, row) => {
     if (!isSuperadmin) return;
     if (tool === TOOL.PLACE) {
       act(() => api.placeResource({ floorId, resourceTypeKey: typeKey, col, row }));
-    } else if (tool === TOOL.ZONE) {
-      setZoneDraft((z) => ({ ...z, col, row }));
     } else if (tool === TOOL.LABEL) {
       setLabelDraft((l) => ({ ...l, col, row }));
     }
@@ -160,6 +194,7 @@ export default function EditorPage() {
       ? [
           { value: TOOL.PLACE, label: `Place ${resourceNoun}`, icon: MousePointerClick, title: "MAP-3" },
           { value: TOOL.REMOVE, label: "Remove", icon: Trash2, title: "MAP-3" },
+          { value: TOOL.ROOM, label: "Room", icon: DoorOpen, title: "Room boundary and booking rules" },
           { value: TOOL.ZONE, label: "Zone", icon: Layers, title: "MAP-4" },
           { value: TOOL.LABEL, label: "Label", icon: Tag, title: "MAP-5" },
         ]
@@ -169,13 +204,13 @@ export default function EditorPage() {
   return (
     <Page>
       <PageHeader
-        title="Map editor"
+        title={isSuperadmin ? "Map editor" : "Space controls"}
         subtitle={
-          data
+          visibleData
             ? `${data.floor.site.name} · ${data.floor.name} · ${data.floor.grid.cols}×${data.floor.grid.rows}`
-            : "Loading…"
+            : currentBuilding?.floors.length === 0 ? `${currentBuilding.name} · No floors yet` : "Loading…"
         }
-        action={<Button onClick={() => navigate(`/map/${floorId}`)}>View as member</Button>}
+        action={<Button disabled={!visibleData} onClick={() => navigate(`/map/${floorId}`)}>View as member</Button>}
       />
 
       {!isSuperadmin && (
@@ -185,18 +220,13 @@ export default function EditorPage() {
         </Notice>
       )}
 
-      <div className="flex items-center gap-2 mb-4 flex-wrap">
-        <Layers size={16} className="text-ink-muted" />
-        <Segmented
-          className="editorfloors"
-          value={floorId}
-          onChange={(id) => {
-            setSelectedUnit(null);
-            navigate(`/editor/${id}`);
-          }}
-          options={floors.map((f) => ({ value: f.id, label: f.name }))}
-        />
+      <div className="mb-4 flex flex-wrap items-end gap-3 rounded-lg border border-line/10 bg-bg-card/50 p-3">
+        <Select label="Building" value={currentBuilding?.id || ""} onChange={(e) => { const b = buildings.find((v) => v.id === e.target.value); setBuildingOverride(b.id); setDrawingRoom(null); if (b.floors[0]) { setSelectedUnit(null); navigate(`/editor/${b.floors[0].id}`); } }} className="min-w-44">{buildings.map((b) => <option key={b.id} value={b.id}>{b.name}{b.unassigned ? " · needs setup" : ""}</option>)}</Select>
+        <Select label="Floor" value={currentBuilding?.floors.some((f) => f.id === floorId) ? floorId : ""} onChange={(e) => { setSelectedUnit(null); navigate(`/editor/${e.target.value}`); }} className="min-w-40"><option value="" disabled>Select floor</option>{(currentBuilding?.floors || []).map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}</Select>
+        {isSuperadmin && <><Button icon={Plus} size="sm" onClick={() => setBuildingDialog({ create: true, siteId: currentBuilding?.siteId || data?.floor.site.id })}>Add building</Button>
+          {currentBuilding && <Button size="sm" icon={Building2} onClick={() => setBuildingDialog({ building: currentBuilding, siteId: currentBuilding.siteId })}>{currentBuilding.unassigned ? "Set up building" : "Rename building"}</Button>}</>}
       </div>
+      {tool === TOOL.ROOM && <Notice className="mb-3">{drawingRoom ? `Draw a level for “${drawingRoom.name || "this room"}” on the selected floor.` : "Drag a room boundary, then choose whether it is booked as a whole, individually, or either."}</Notice>}
 
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <Segmented className="editortools" value={tool} onChange={setTool} options={tools} />
@@ -261,8 +291,8 @@ export default function EditorPage() {
         </Notice>
       )}
 
-      <Card padded={false} className="overflow-hidden">
-        {data ? (
+      <Card id="editor-canvas" padded={false} className="overflow-hidden">
+        {visibleData ? (
           <SpaceMap
             floor={data.floor}
             layout={data.layout}
@@ -274,13 +304,14 @@ export default function EditorPage() {
             selectedUnit={selectedUnit}
             onSelectUnit={onSelectUnit}
             onCellClick={onCellClick}
-            regionMode={isSuperadmin && tool === TOOL.ZONE}
+            management
+            regionMode={isSuperadmin && (tool === TOOL.ZONE || tool === TOOL.ROOM)}
             onRegionSelect={onRegionSelect}
             editing={isSuperadmin && tool !== TOOL.REMOVE && tool !== TOOL.AVAILABILITY}
           />
         ) : (
           <div className="h-[46vh] p-4">
-            <Skeleton className="w-full h-full" rounded="rounded-md" />
+            {currentBuilding && !currentBuilding.floors.length ? <EmptyState icon={Layers} title="Add this building's first floor" body="Use Add floor below to create a grid, then draw its rooms." /> : <Skeleton className="w-full h-full" rounded="rounded-md" />}
           </div>
         )}
       </Card>
@@ -289,6 +320,7 @@ export default function EditorPage() {
         {tool === TOOL.AVAILABILITY && `Click any ${resourceNoun} to change its availability.`}
         {tool === TOOL.PLACE && "Click an empty cell to place the selected piece."}
         {tool === TOOL.REMOVE && "Click a piece to remove it."}
+        {tool === TOOL.ROOM && "Drag a box to define the room. Use Configure to add its other levels."}
         {tool === TOOL.ZONE && "Drag a box on the map, then name it."}
         {tool === TOOL.LABEL && "Click the map to set the position, then submit above."}
       </p>
@@ -304,7 +336,11 @@ export default function EditorPage() {
         />
       )}
 
-      {data && (
+      {visibleData && <RoomManager rooms={data.layout.rooms || []} floor={data.floor} building={currentBuilding} floors={floors} status={data.status} isSuperadmin={isSuperadmin} onSaved={reloadSpaces} onDraw={drawRoom} onError={setError} />}
+      {roomDraft && <RoomDialog draft={roomDraft} floors={currentBuilding?.floors || floors} onClose={() => setRoomDraft(null)} onSaved={reloadSpaces} onDraw={drawRoom} />}
+      {buildingDialog && <BuildingDialog building={buildingDialog.building} siteId={buildingDialog.siteId} onClose={() => setBuildingDialog(null)} onSaved={(result) => { setBuildingOverride(result?.building?.id || null); reloadSpaces(); }} />}
+
+      {visibleData && (
         <div className="grid sm:grid-cols-2 gap-4 mt-4">
           <ListPanel
             title={`Zones (${data.layout.zones.length})`}
@@ -331,12 +367,15 @@ export default function EditorPage() {
 
       {isSuperadmin && (
         <FloorManager
-          floors={floors}
-          current={data?.floor}
+          floors={currentBuilding?.floors || floors}
+          buildings={buildings.filter((b) => !b.unassigned && b.siteId === currentBuilding?.siteId)}
+          building={currentBuilding}
+          current={visibleData?.floor}
           busy={busy}
-          onChanged={() => {
+          onChanged={(created) => {
             loadFloors();
-            load();
+            if (created?.floor?.id) navigate(`/editor/${created.floor.id}`);
+            else load();
           }}
           onError={setError}
           onNotice={setNotice}
@@ -463,27 +502,31 @@ function AvailabilityPanel({ unit, resourceNoun, busy, onClose, onSet }) {
 
 /* ───────────────────── floors (superadmin only) ───────────────────── */
 
-function FloorManager({ floors, current, busy, onChanged, onError, onNotice, onDeleted }) {
+function FloorManager({ floors, buildings, building, current, busy, onChanged, onError, onNotice, onDeleted }) {
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState({ name: "", cols: 20, rows: 12 });
   const [resize, setResize] = useState(null);
+  const [running, setRunning] = useState(false);
+  const [deleting, setDeleting] = useState(null);
+  const isBusy = busy || running;
 
   useEffect(() => {
-    if (current) setResize({ name: current.name, cols: current.grid.cols, rows: current.grid.rows });
-  }, [current?.id, current?.grid?.cols, current?.grid?.rows, current?.name]);
+    if (current) setResize({ name: current.name, cols: current.grid.cols, rows: current.grid.rows, buildingId: current.building?.id || "" });
+  }, [current?.id, current?.grid?.cols, current?.grid?.rows, current?.name, current?.building?.id]);
 
   const run = async (fn, message) => {
     onError(null);
     onNotice(null);
+    setRunning(true);
     try {
-      await fn();
+      const result = await fn();
       onNotice(message);
-      onChanged();
+      onChanged(result);
       return true;
     } catch (e) {
       onError(e.message);
       return false;
-    }
+    } finally { setRunning(false); }
   };
 
   return (
@@ -492,7 +535,7 @@ function FloorManager({ floors, current, busy, onChanged, onError, onNotice, onD
       title="Floors"
       icon={Layers}
       action={
-        <Button size="sm" icon={Plus} onClick={() => setAdding(true)}>
+        <Button size="sm" icon={Plus} disabled={isBusy} onClick={() => setAdding(true)}>
           Add floor
         </Button>
       }
@@ -505,7 +548,7 @@ function FloorManager({ floors, current, busy, onChanged, onError, onNotice, onD
       */}
       <Modal
         open={adding}
-        onClose={() => setAdding(false)}
+        onClose={isBusy ? undefined : () => setAdding(false)}
         title="Add a floor"
         subtitle="Give it a name and a grid size. Both can be changed later."
         icon={Layers}
@@ -514,7 +557,7 @@ function FloorManager({ floors, current, busy, onChanged, onError, onNotice, onD
           onSubmit={async (e) => {
             e.preventDefault();
             const ok = await run(
-              () => api.createFloor({ name: draft.name, grid: { cols: draft.cols, rows: draft.rows } }),
+              () => api.createFloor({ name: draft.name, ...(building && !building.unassigned ? { buildingId: building.id } : {}), grid: { cols: draft.cols, rows: draft.rows } }),
               `Added "${draft.name}".`
             );
             if (ok) {
@@ -535,7 +578,7 @@ function FloorManager({ floors, current, busy, onChanged, onError, onNotice, onD
               The fields stay, below, for whoever does know the figure —
               the drag sets them and they set the drag. */}
           <div className="mt-4">
-            <span className="text-sm font-medium text-ink-secondary">Room size</span>
+            <span className="text-sm font-medium text-ink-secondary">Floor size</span>
             <div className="mt-1.5">
               <GridSketch
                 cols={draft.cols}
@@ -564,9 +607,9 @@ function FloorManager({ floors, current, busy, onChanged, onError, onNotice, onD
             />
           </div>
           <div className="mt-5 flex justify-end gap-3">
-            <Button onClick={() => setAdding(false)}>Cancel</Button>
-            <Button type="submit" variant="primary" disabled={!draft.name.trim() || busy}>
-              Create floor
+            <Button disabled={isBusy} onClick={() => setAdding(false)}>Cancel</Button>
+            <Button type="submit" variant="primary" disabled={!draft.name.trim() || isBusy}>
+              {running ? "Creating…" : "Create floor"}
             </Button>
           </div>
         </form>
@@ -582,6 +625,7 @@ function FloorManager({ floors, current, busy, onChanged, onError, onNotice, onD
               () =>
                 api.updateFloor(current.id, {
                   name: resize.name,
+                  ...(resize.buildingId ? { buildingId: resize.buildingId } : {}),
                   grid: { cols: resize.cols, rows: resize.rows },
                 }),
               "Floor updated."
@@ -594,6 +638,7 @@ function FloorManager({ floors, current, busy, onChanged, onError, onNotice, onD
             onChange={(e) => setResize((r) => ({ ...r, name: e.target.value }))}
             className="w-48"
           />
+          {buildings.length > 1 && <Select label="Building" value={resize.buildingId} onChange={(e) => setResize((r) => ({ ...r, buildingId: e.target.value }))}>{buildings.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}</Select>}
           <Field
             label="Columns"
             type="number"
@@ -632,20 +677,21 @@ function FloorManager({ floors, current, busy, onChanged, onError, onNotice, onD
               size="sm"
               variant="ghost"
               className="border border-line/10"
-              disabled={busy || floors.length <= 1}
-              title={floors.length <= 1 ? "A site must keep at least one floor" : "Delete this floor"}
-              onClick={async () => {
-                const ok = await run(() => api.deleteFloor(f.id), `Deleted "${f.name}".`);
-                if (ok) onDeleted(f.id);
-              }}
+              disabled={isBusy}
+              title="Delete this floor"
+              onClick={() => setDeleting(f)}
             >
               Delete
             </Button>
           </li>
         ))}
       </ul>
+      <Modal open={Boolean(deleting)} onClose={isBusy ? undefined : () => setDeleting(null)} title="Remove floor" subtitle={deleting?.name} icon={Trash2}>
+        <p className="text-sm leading-relaxed text-ink-secondary">Only an empty floor can be removed. Move or remove its rooms and furniture first. Booking history is kept.</p>
+        <div className="mt-5 flex justify-end gap-2"><Button disabled={isBusy} onClick={() => setDeleting(null)}>Keep floor</Button><Button variant="danger" disabled={isBusy} onClick={async () => { const id = deleting.id; const ok = await run(() => api.deleteFloor(id), `Removed "${deleting.name}".`); if (ok) { setDeleting(null); onDeleted(id); } }}>{running ? "Removing…" : "Remove floor"}</Button></div>
+      </Modal>
       <p className="mt-3 text-xs text-ink-muted">
-        Shrinking a room is refused while anything would fall outside the new bounds, and a floor with
+        Shrinking a floor is refused while anything would fall outside the new bounds, and a floor with
         placed items or live reservations can't be deleted.
       </p>
     </Panel>

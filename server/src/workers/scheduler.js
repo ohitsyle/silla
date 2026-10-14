@@ -34,10 +34,11 @@ let ioRef = null;
 export function startScheduler(io = null) {
   ioRef = io;
 
-  cron.schedule("* * * * *", async () => {
+  const task = cron.schedule("* * * * *", async () => {
     try {
       await purgeAbandonedRegistrations();
       await releaseExpiredGraceHolds();
+      await refreshDueHolds();
       await releaseOverstayedSessions();
       await releaseAtClosingTime();
       await sendStartingSoonReminders();
@@ -48,6 +49,26 @@ export function startScheduler(io = null) {
     }
   });
   console.log("[scheduler] started");
+  return task;
+}
+
+/** MAP-2: future holds become reserved when their start time arrives. */
+export async function refreshDueHolds({ io = ioRef } = {}) {
+  const now = new Date();
+  const holds = await Reservation.find({ status: "held", startTime: { $lte: now }, endTime: { $gt: now } }).select("resource unitLabel");
+  let refreshed = 0;
+  const visited = new Set();
+  for (const hold of holds) {
+    const key = `${hold.resource}:${hold.unitLabel}`;
+    if (visited.has(key)) continue;
+    visited.add(key);
+    const resource = await Resource.findById(hold.resource).select("units");
+    const unit = resource?.units.find((u) => u.label === hold.unitLabel);
+    if (unit?.status !== "available" || unit.serviceStatus === "out_of_service") continue;
+    await syncUnitStatus(hold.resource, hold.unitLabel, { io });
+    refreshed++;
+  }
+  return refreshed;
 }
 
 /** Loads the org for a reservation, cached per tick to avoid refetching. */
@@ -94,7 +115,7 @@ export async function releaseExpiredGraceHolds() {
   for (const reservation of candidates) {
     const org = await loadOrg(reservation.organization);
     const grace = org?.policy?.gracePeriodMinutes ?? 10;
-    if (now - reservation.startTime < grace * 60_000) continue;
+    if (now < reservation.endTime && now - reservation.startTime < grace * 60_000) continue;
 
     reservation.status = "expired";
     await reservation.save();
@@ -108,7 +129,7 @@ export async function releaseExpiredGraceHolds() {
           org,
           user: member,
           reservation,
-          resourceLabel: reservation.unitLabel,
+          resourceLabel: reservation.targetLabel || reservation.unitLabel,
         })
       );
     }
@@ -146,7 +167,7 @@ export async function releaseOverstayedSessions() {
     const member = await User.findById(reservation.member);
     if (member && org) {
       sendEmail(
-        maxStayReleasedEmail({ org, user: member, reservation, resourceLabel: reservation.unitLabel })
+        maxStayReleasedEmail({ org, user: member, reservation, resourceLabel: reservation.targetLabel || reservation.unitLabel })
       );
     }
   }
@@ -214,7 +235,7 @@ export async function sendStartingSoonReminders() {
     const member = await User.findById(reservation.member);
     if (member && org) {
       sendEmail(
-        startingSoonEmail({ org, user: member, reservation, resourceLabel: reservation.unitLabel })
+        startingSoonEmail({ org, user: member, reservation, resourceLabel: reservation.targetLabel || reservation.unitLabel })
       );
     }
     reservation.remindedAt = now;
@@ -269,7 +290,7 @@ export async function applyScheduledClosures() {
             org,
             user: member,
             reservation,
-            resourceLabel: reservation.unitLabel,
+            resourceLabel: reservation.targetLabel || reservation.unitLabel,
             closure,
           })
         );

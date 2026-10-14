@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import authRoutes from "./routes/auth.routes.js";
 import organizationRoutes from "./routes/organization.routes.js";
+import spaceRoutes from "./routes/space.routes.js";
 import floorRoutes from "./routes/floor.routes.js";
 import registrationRoutes from "./routes/registration.routes.js";
 import checkinRoutes from "./routes/checkin.routes.js";
@@ -22,6 +23,7 @@ export function createApp() {
 
   app.use("/api/auth", authRoutes);
   app.use("/api/organizations", organizationRoutes);
+  app.use("/api/spaces", spaceRoutes);
   app.use("/api/floors", floorRoutes); // MAP-1: floor list + read-only layout
   app.use("/api/registration", registrationRoutes); // ID-1, ID-2, ID-3
   app.use("/api/checkin", checkinRoutes); // INF-3/INF-4 identity + OCC-1..3, OCC-6

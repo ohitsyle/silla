@@ -95,6 +95,8 @@ export default function ReservePanel({
   const [pin, setPin] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [availability, setAvailability] = useState(null);
+  const [checking, setChecking] = useState(false);
 
   useEffect(() => {
     setError(null);
@@ -151,7 +153,21 @@ export default function ReservePanel({
     [start, duration]
   );
 
-  const isFree = selectedUnit?.status?.status === "available";
+  useEffect(() => {
+    if (!selectedUnit || myReservation) return;
+    let current = true;
+    setChecking(true); setAvailability(null);
+    const timer = setTimeout(() => {
+      if (Number.isNaN(+new Date(start)) || Number.isNaN(+endTime)) { setChecking(false); return; }
+      api.reservationAvailability(selectedUnit.resourceId, selectedUnit.unitLabel, new Date(start).toISOString(), endTime.toISOString())
+        .then((result) => { if (current) setAvailability(result); })
+        .catch((e) => { if (current) setAvailability({ bookable: false, error: e.message }); })
+        .finally(() => { if (current) setChecking(false); });
+    }, 250);
+    return () => { current = false; clearTimeout(timer); };
+  }, [selectedUnit?.resourceId, selectedUnit?.unitLabel, start, +endTime, Boolean(myReservation)]);
+
+  const isFree = selectedUnit?.status?.status !== "unavailable";
   const outOfService = selectedUnit?.status?.serviceStatus === "out_of_service";
 
 
@@ -195,7 +211,7 @@ export default function ReservePanel({
         <Header embedded={embedded} title="Your reservation" onClose={onClose} />
         <div className="text-sm text-ink-secondary space-y-1">
           <div className="text-ink-primary font-medium">
-            {myReservation.resourceLabel || resourceNoun} · {resourceNoun} {myReservation.unitLabel}
+            {myReservation.roomId ? myReservation.resourceLabel : `${myReservation.resourceLabel || resourceNoun} · ${resourceNoun} ${myReservation.unitLabel}`}
           </div>
           <div className="flex items-center gap-1.5">
             <Clock size={14} />
@@ -229,7 +245,7 @@ export default function ReservePanel({
       <Shell embedded={embedded}>
         <Header
           embedded={embedded}
-          title={`${selectedUnit.type.label} · ${resourceNoun} ${selectedUnit.unitLabel}`}
+          title={selectedUnit.kind === "room" ? selectedUnit.type.label : `${selectedUnit.type.label} · ${resourceNoun} ${selectedUnit.unitLabel}`}
           onClose={onClose}
         />
         <div className="text-sm text-ink-secondary">
@@ -246,8 +262,8 @@ export default function ReservePanel({
     <Shell embedded={embedded}>
       <Header
         embedded={embedded}
-        title={`${selectedUnit.type.label} · ${resourceNoun} ${selectedUnit.unitLabel}`}
-        subtitle={`Cell (${selectedUnit.position.col}, ${selectedUnit.position.row})`}
+        title={selectedUnit.kind === "room" ? selectedUnit.type.label : `${selectedUnit.type.label} · ${resourceNoun} ${selectedUnit.unitLabel}`}
+        subtitle={selectedUnit.kind === "room" ? `Includes all ${selectedUnit.levels?.length || 1} room level(s)` : `Cell (${selectedUnit.position.col}, ${selectedUnit.position.row})`}
         onClose={onClose}
       />
 
@@ -286,6 +302,9 @@ export default function ReservePanel({
 
         <PinField label="Confirm with your 6-digit PIN" name="reserve-pin" value={pin} onChange={setPin} />
 
+        {checking && <p className="text-xs text-ink-muted" role="status">Checking this time…</p>}
+        {availability?.bookable === false && <Alert>{availability.error}</Alert>}
+        {availability?.bookable && <p className="text-xs text-state-available" role="status">Available for this time</p>}
         {error && <Alert>{error}</Alert>}
 
         <Button
@@ -294,10 +313,10 @@ export default function ReservePanel({
           size="lg"
           icon={CircleCheck}
           loading={busy}
-          disabled={pin.length !== 6 || maxDuration <= 0}
+          disabled={pin.length !== 6 || maxDuration <= 0 || checking || !availability?.bookable}
           className="w-full"
         >
-          Reserve this {resourceNoun}
+          Reserve this {selectedUnit.kind === "room" ? "room" : resourceNoun}
         </Button>
       </form>
     </Shell>

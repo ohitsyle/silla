@@ -26,6 +26,7 @@ import path from "node:path";
 import bcrypt from "bcryptjs";
 import { connectDB } from "../config/db.js";
 import Organization from "../models/Organization.js";
+import Building from "../models/Building.js";
 import Site from "../models/Site.js";
 import Floor from "../models/Floor.js";
 import ResourceType from "../models/ResourceType.js";
@@ -114,6 +115,7 @@ async function seed() {
   });
 
   const site = await Site.create({ organization: org._id, name: profile.siteName });
+  const building = await Building.create({ organization: org._id, site: site._id, name: profile.buildingName || "Main Building" });
 
   // The vendor-configured catalog for this vertical (CAT-1, spec §8).
   await ResourceType.insertMany(profile.catalog.map((type) => ({ organization: org._id, ...type })));
@@ -121,7 +123,7 @@ async function seed() {
   // Floors, so the map's floor switcher (MAP-1) has something to switch
   // between.
   await Floor.insertMany(
-    profile.floors.map((f) => ({ site: site._id, name: f.name, order: f.order, grid: f.grid }))
+    profile.floors.map((f) => ({ site: site._id, building: building._id, name: f.name, order: f.order, grid: f.grid }))
   );
 
   /*

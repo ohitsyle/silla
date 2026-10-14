@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Layers, RefreshCw } from "lucide-react";
 import { api } from "../lib/api.js";
 import { useOrg } from "../lib/OrgContext.jsx";
 import { resolveStatePalette } from "../theme/applyOrgTheme.js";
 import { useFloorSocket } from "../lib/useFloorSocket.js";
+import SpaceNavigator from "../components/SpaceNavigator.jsx";
+import { ROOM_MODES, roomUnit, effectiveStatus } from "../lib/rooms.js";
 import ReservePanel from "../components/ReservePanel.jsx";
 import Inspector from "../components/Inspector.jsx";
 import SpaceMap, { OVERSTAY_META, SERVICE_META, STATUS_META, STATUS_ORDER } from "../components/SpaceMap.jsx";
 import {
-  Button, Card, Notice, Page, PageHeader, Segmented, Skeleton, StatusDot, pageEnter,
+  Badge, Button, Card, Notice, Page, PageHeader, Segmented, Select, Skeleton, StatusDot, pageEnter,
 } from "../components/ui/index.jsx";
 
 /**
@@ -28,6 +30,9 @@ export default function MapPage() {
   const { org, error: orgError } = useOrg();
   const { floorId } = useParams();
   const navigate = useNavigate();
+  const [search] = useSearchParams();
+  const roomId = search.get("room");
+  const [buildings, setBuildings] = useState([]);
 
   const [floors, setFloors] = useState([]);
   const [layoutData, setLayoutData] = useState(null);
@@ -38,6 +43,8 @@ export default function MapPage() {
   const [error, setError] = useState(null);
   const [myReservation, setMyReservation] = useState(null);
   const [live, setLive] = useState(false);
+  const [inspectorDismissed, setInspectorDismissed] = useState(false);
+  const layoutRequest = useRef(0);
 
   const organizationId = import.meta.env.VITE_DEMO_ORG_ID || "";
   // The state colours come from the org's branding (spec §16), not from
@@ -53,9 +60,9 @@ export default function MapPage() {
       setLoading(false);
       return;
     }
-    api
-      .getFloors(organizationId)
-      .then((data) => {
+    Promise.all([api.getFloors(organizationId), api.getSpaces(organizationId)])
+      .then(([data, spaces]) => {
+        setBuildings(spaces.buildings);
         setFloors(data.floors);
         if (!data.floors.length) {
           // Same rule as StarterPage's error: whoever reads this is a
@@ -77,17 +84,20 @@ export default function MapPage() {
   // ---- Layout + initial status snapshot for the selected floor ----
   const loadLayout = useCallback((id, { silent = false } = {}) => {
     if (!id) return;
+    const request = ++layoutRequest.current;
     if (silent) setRefreshing(true);
-    else setLoading(true);
+    else { setLoading(true); setLayoutData(null); setStatus({}); }
     api
       .getFloorLayout(id)
       .then((data) => {
+        if (request !== layoutRequest.current) return;
         setLayoutData(data);
         setStatus(data.status);
         setError(null);
       })
-      .catch((err) => setError(err.message))
+      .catch((err) => { if (request === layoutRequest.current) setError(err.message); })
       .finally(() => {
+        if (request !== layoutRequest.current) return;
         setLoading(false);
         setRefreshing(false);
       });
@@ -95,7 +105,9 @@ export default function MapPage() {
 
   useEffect(() => {
     setSelectedUnit(null);
+    setLive(false);
     loadLayout(floorId);
+    return () => { layoutRequest.current++; };
   }, [floorId, loadLayout]);
 
   // ---- MAP-2: live status over Socket.io (spec §12, §17) ----
@@ -119,8 +131,9 @@ export default function MapPage() {
     let total = 0;
     let overstays = 0;
     let outOfService = 0;
-    for (const units of Object.values(status)) {
-      for (const unit of units) {
+    for (const resource of layoutData?.layout.resources || []) {
+      for (const original of status[resource.id] || []) {
+        const unit = effectiveStatus(resource, original, layoutData?.layout.rooms || [], status);
         total += 1;
         if (counts[unit.status] !== undefined) counts[unit.status] += 1;
         if (unit.overstay) overstays += 1;
@@ -128,7 +141,12 @@ export default function MapPage() {
       }
     }
     return { counts, total, overstays, outOfService };
-  }, [status]);
+  }, [status, layoutData]);
+
+  const currentBuilding = buildings.find((b) => b.floors.some((f) => f.id === floorId));
+  const focusedRoom = layoutData && layoutData.floor.id === floorId ? layoutData.layout.rooms?.find((r) => r.id === roomId) : null;
+  const openFloor = (id) => { setSelectedUnit(null); navigate(`/map/${id}`); };
+  const openRoom = (room, id = floorId) => { setSelectedUnit(null); setInspectorDismissed(false); navigate(`/map/${id}?room=${room.id}`); };
 
   if (orgError) {
     return (
@@ -146,6 +164,7 @@ export default function MapPage() {
     // grows the page — selecting a seat cannot move the map, which was
     // the whole complaint about the old stacked version.
     <div className="flex h-full min-h-0">
+      <SpaceNavigator buildings={buildings} floorId={floorId} roomId={roomId} onFloor={openFloor} onRoom={openRoom} />
       <div className="flex min-w-0 flex-1 flex-col">
         {/* Toolbar — one row, fixed height, never scrolls away. */}
         <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-line/10 px-4 py-3">
@@ -158,15 +177,12 @@ export default function MapPage() {
             </p>
           </div>
 
-          {floors.length > 1 && (
-            <Segmented
-              size="sm"
-              className="floors"
-              value={floorId}
-              onChange={(id) => navigate(`/map/${id}`)}
-              options={floors.map((f) => ({ value: f.id, label: f.name }))}
-            />
-          )}
+          <div className="flex flex-wrap gap-2 lg:hidden">
+            <Select label="Building" value={currentBuilding?.id || ""} onChange={(e) => { const first = buildings.find((b) => b.id === e.target.value)?.floors[0]; if (first) openFloor(first.id); }} >{buildings.filter((b) => b.floors.length).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}</Select>
+            <Select label="Floor" value={floorId || ""} onChange={(e) => openFloor(e.target.value)} >{(currentBuilding?.floors || []).map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}</Select>
+          </div>
+          {focusedRoom && <Button size="sm" onClick={() => openFloor(floorId)}>All rooms</Button>}
+          {inspectorDismissed && (focusedRoom || myReservation) && <Button size="sm" onClick={() => setInspectorDismissed(false)}>{focusedRoom ? "Room details" : "Your reservation"}</Button>}
 
           <div className="ml-auto flex items-center gap-3">
             {live && (
@@ -184,7 +200,13 @@ export default function MapPage() {
             <Button
               size="sm"
               icon={RefreshCw}
-              onClick={() => loadLayout(floorId, { silent: true })}
+              onClick={() => {
+                loadLayout(floorId, { silent: true });
+                Promise.all([api.getFloors(organizationId), api.getSpaces(organizationId)]).then(([data, spaces]) => {
+                  setFloors(data.floors); setBuildings(spaces.buildings);
+                  if (data.floors.length && !data.floors.some((f) => f.id === floorId)) navigate(`/map/${data.floors[0].id}`, { replace: true });
+                }).catch((err) => setError(err.message));
+              }}
               disabled={!floorId || refreshing}
               className={refreshing ? "[&>svg]:animate-spin" : undefined}
             >
@@ -199,6 +221,14 @@ export default function MapPage() {
           </div>
         )}
 
+        <div className="flex shrink-0 items-center gap-1.5 border-b border-line/5 px-4 py-2 text-xs text-ink-muted" aria-label="Current map location">
+          <span>{currentBuilding?.name || layoutData?.floor.site.name}</span><span>›</span>
+          <button className="hover:text-accent" onClick={() => openFloor(floorId)}>{layoutData?.floor.name}</button>
+          {focusedRoom && <><span>›</span><span className="font-medium text-ink-primary">{focusedRoom.name}</span></>}
+        </div>
+        {!focusedRoom && Boolean(layoutData?.layout.rooms?.length) && <div className="flex shrink-0 gap-2 overflow-x-auto px-4 py-2 lg:hidden">
+          {layoutData.layout.rooms.map((r) => <Button key={r.id} size="sm" onClick={() => openRoom(r)}>{r.name}</Button>)}
+        </div>}
         {/* The map — everything that is left. */}
         <div className="min-h-0 flex-1 p-3">
           {loading && !layoutData ? (
@@ -213,7 +243,9 @@ export default function MapPage() {
               resourceNoun={resourceNoun}
               showOverstay={layoutData.viewerIsStaff}
               selectedUnit={selectedUnit}
-              onSelectUnit={setSelectedUnit}
+              onSelectUnit={(unit) => { setSelectedUnit(unit); setInspectorDismissed(false); }}
+              onSelectRoom={openRoom}
+              focusedRoomId={focusedRoom?.id}
               palette={palette}
             />
           ) : (
@@ -242,7 +274,7 @@ export default function MapPage() {
                 <StatusDot tone="overstay" label={OVERSTAY_META.label} count={summary.overstays} />
               )}
               <span className="ml-auto hidden text-xs text-ink-muted lg:block">
-                Drag to pan · scroll to zoom · click an available {resourceNoun} to reserve it
+                Drag to pan · scroll to zoom · select a room or resource to choose a time
               </span>
             </>
           ) : (
@@ -257,16 +289,24 @@ export default function MapPage() {
 
       {/* ---- RES-1 / RES-3 — reserve, or manage the one you hold ---- */}
       <Inspector
-        open={Boolean(selectedUnit) || Boolean(myReservation)}
-        onClose={() => setSelectedUnit(null)}
-        title={selectedUnit ? `${selectedUnit.type?.label || resourceNoun} · ${selectedUnit.unitLabel}` : "Your reservation"}
+        open={!inspectorDismissed && (Boolean(selectedUnit) || Boolean(myReservation) || Boolean(focusedRoom))}
+        onClose={() => { setSelectedUnit(null); setInspectorDismissed(true); }}
+        title={selectedUnit ? selectedUnit.kind === "room" ? selectedUnit.type.label : `${selectedUnit.type?.label || resourceNoun} · ${selectedUnit.unitLabel}` : focusedRoom?.name || "Your reservation"}
         subtitle={
           selectedUnit
-            ? `Cell (${selectedUnit.position?.col}, ${selectedUnit.position?.row})`
+            ? selectedUnit.kind === "room" ? `Includes all ${selectedUnit.levels.length} room level(s)` : `Cell (${selectedUnit.position?.col}, ${selectedUnit.position?.row})`
             : undefined
         }
       >
-        <ReservePanel
+        {focusedRoom && !selectedUnit && <div className="mb-5 space-y-4">
+          <Badge>{ROOM_MODES[focusedRoom.bookingMode]?.label}</Badge>
+          <p className="text-sm leading-relaxed text-ink-secondary">{ROOM_MODES[focusedRoom.bookingMode]?.description}</p>
+          {focusedRoom.levels.length > 1 && <div><p className="mb-2 text-xs text-ink-muted">Room levels · one shared booking</p><Segmented value={floorId} onChange={(id) => openRoom(focusedRoom, id)} options={focusedRoom.levels.map((l) => ({ value: l.floorId, label: l.name || floors.find((f) => f.id === l.floorId)?.name || "Level" }))} /></div>}
+          {focusedRoom.bookingMode !== "individual" && !myReservation && <Button variant="primary" className="w-full" onClick={() => setSelectedUnit(roomUnit(focusedRoom, status))}>Reserve whole room</Button>}
+          {focusedRoom.bookingMode !== "whole" && <p className="text-xs text-ink-muted">Select a resource on the map to reserve it individually.</p>}
+          {focusedRoom.bookingMode === "whole" && <p className="text-xs text-ink-muted">Every level, seat and item inside is included. Individual bookings are disabled.</p>}
+        </div>}
+        {(selectedUnit || myReservation) && <ReservePanel
           embedded
           selectedUnit={selectedUnit}
           resourceNoun={resourceNoun}
@@ -274,6 +314,7 @@ export default function MapPage() {
           myReservation={myReservation}
           onClose={() => setSelectedUnit(null)}
           onReserved={() => {
+            setInspectorDismissed(false);
             setSelectedUnit(null);
             loadMine();
             loadLayout(floorId, { silent: true });
@@ -282,7 +323,7 @@ export default function MapPage() {
             loadMine();
             loadLayout(floorId, { silent: true });
           }}
-        />
+        />}
       </Inspector>
     </div>
   );

@@ -17,6 +17,7 @@ const reservationSchema = new mongoose.Schema(
     organization: { type: mongoose.Schema.Types.ObjectId, ref: "Organization", required: true, index: true },
     member: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
     resource: { type: mongoose.Schema.Types.ObjectId, ref: "Resource", required: true },
+    targetLabel: { type: String, default: "" }, // historical name survives room/item removal
     unitLabel: { type: String, required: true }, // matches Resource.units[].label
 
     startTime: { type: Date, required: true },

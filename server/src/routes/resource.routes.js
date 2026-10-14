@@ -6,6 +6,8 @@ import Floor from "../models/Floor.js";
 import Zone from "../models/Zone.js";
 import Label from "../models/Label.js";
 import Reservation from "../models/Reservation.js";
+import Room from "../models/Room.js";
+import { withSpaceTransaction, intersects, contains } from "../services/spaces.js";
 import Site from "../models/Site.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { LIVE_STATUSES } from "../services/reservations/availability.js";
@@ -64,14 +66,14 @@ async function floorInOrg(floorId, organizationId) {
  * than polygon intersection. It runs on the server because the client's
  * copy of the layout can be stale.
  */
-async function findOverlap({ floorId, col, row, w, h, excludeResourceId = null }) {
-  const filter = { floor: floorId };
+async function findOverlap({ floorId, col, row, w, h, excludeResourceId = null }, session) {
+  const filter = { floor: floorId, kind: { $ne: "room" } };
   if (excludeResourceId) filter._id = { $ne: excludeResourceId };
 
-  const existing = await Resource.find(filter);
+  const existing = await Resource.find(filter).session(session);
   const types = await ResourceType.find({
     _id: { $in: [...new Set(existing.map((r) => r.resourceType.toString()))] },
-  });
+  }).session(session);
   const typeById = new Map(types.map((t) => [t._id.toString(), t]));
 
   const wanted = new Set();
@@ -99,94 +101,42 @@ async function findOverlap({ floorId, col, row, w, h, excludeResourceId = null }
  * Body: { floorId, resourceTypeKey, col, row }
  * MAP-3 — place a catalog piece on an empty cell.
  */
-router.post(
-  "/",
-  asyncHandler(async (req, res) => {
-    const { floorId, resourceTypeKey, col, row } = req.body || {};
-    if (!floorId || !mongoose.isValidObjectId(floorId)) {
-      return res.status(400).json({ error: "A valid floorId is required" });
-    }
-    if (!Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0) {
-      return res.status(400).json({ error: "col and row must be non-negative integers (spec §12: integer cells only)" });
-    }
-
-    const floor = await floorInOrg(floorId, req.user.organizationId);
-    if (!floor) return res.status(404).json({ error: "Floor not found" });
-
-    const type = await ResourceType.findOne({
-      organization: req.user.organizationId,
-      key: resourceTypeKey,
-    });
-    if (!type) return res.status(404).json({ error: `No catalog type "${resourceTypeKey}" for this organization` });
-
+router.post("/", asyncHandler(async (req, res) => {
+  const { floorId, resourceTypeKey, col, row } = req.body || {};
+  if (!mongoose.isValidObjectId(floorId) || !Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0) return res.status(400).json({ error: "Choose a floor and an integer grid position." });
+  const resource = await withSpaceTransaction(req.user.organizationId, async (session) => {
+    const floor = await Floor.findById(floorId).session(session);
+    const site = floor && await Site.findOne({ _id: floor.site, organization: req.user.organizationId }).session(session);
+    if (!site) throw Object.assign(new Error("Floor not found"), { status: 404 });
+    const type = await ResourceType.findOne({ organization: req.user.organizationId, key: resourceTypeKey, internal: { $ne: true } }).session(session);
+    if (!type) throw Object.assign(new Error("Catalog type not found"), { status: 404 });
     const { w, h } = type.footprint;
-    if (col + w > floor.grid.cols || row + h > floor.grid.rows) {
-      return res.status(400).json({
-        error: `A ${w}x${h} piece at (${col},${row}) falls outside the ${floor.grid.cols}x${floor.grid.rows} grid.`,
-      });
+    if (col + w > floor.grid.cols || row + h > floor.grid.rows) throw Object.assign(new Error("That item extends beyond the floor."), { status: 400 });
+    if (await findOverlap({ floorId, col, row, w, h }, session)) throw Object.assign(new Error("That item overlaps an existing piece."), { status: 409 });
+    const rooms = await Room.find({ organization: req.user.organizationId, "levels.floor": floorId }).session(session);
+    for (const room of rooms) {
+      const level = room.levels.find((l) => String(l.floor) === String(floorId));
+      if (intersects(level.bounds, { col, row, w, h }) && !contains(level.bounds, { col, row, w, h })) throw Object.assign(new Error("Place the entire item inside or outside the room boundary."), { status: 409 });
+      if (contains(level.bounds, { col, row, w, h }) && await Reservation.exists({ resource: room.resource, status: { $in: LIVE_STATUSES } }).session(session)) throw Object.assign(new Error("This room has a live reservation. Cancel it before changing its contents."), { status: 409 });
     }
-
-    const clash = await findOverlap({ floorId, col, row, w, h });
-    if (clash) {
-      return res.status(409).json({
-        error: `That would overlap a ${clash.type?.label || "piece"} at (${clash.resource.position.col},${clash.resource.position.row}).`,
-      });
-    }
-
-    const resource = await Resource.create({
-      organization: req.user.organizationId,
-      floor: floorId,
-      resourceType: type._id,
-      zone: null, // derived from position (spec §12)
-      position: { col, row },
-      units: Array.from({ length: type.seatCount }, (_, i) => ({
-        label: String(i + 1),
-        status: "available",
-        serviceStatus: "working",
-        overstay: false,
-      })),
-    });
-
-    res.status(201).json({
-      resource: {
-        id: resource._id.toString(),
-        resourceType: type._id.toString(),
-        position: resource.position,
-        units: resource.units.map((u) => ({ label: u.label })),
-      },
-    });
-  })
-);
-
-/**
- * DELETE /api/resources/:id
- * MAP-3 — "click-then-delete". Refuses while the piece is holding live
- * reservations: silently deleting a booked seat would strand whoever
- * booked it with no record and no notification.
- */
-router.delete(
-  "/:id",
-  asyncHandler(async (req, res) => {
-    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid resource id" });
-
-    const resource = await Resource.findOne({ _id: req.params.id, organization: req.user.organizationId });
-    if (!resource) return res.status(404).json({ error: "Resource not found" });
-
-    const live = await Reservation.countDocuments({
-      resource: resource._id,
-      status: { $in: LIVE_STATUSES },
-    });
-    if (live > 0) {
-      return res.status(409).json({
-        error: `That resource has ${live} active or upcoming reservation(s). Cancel them first.`,
-        liveReservations: live,
-      });
-    }
-
-    await Resource.deleteOne({ _id: resource._id });
-    res.json({ ok: true });
-  })
-);
+    const [r] = await Resource.create([{ organization: req.user.organizationId, floor: floorId, resourceType: type._id, position: { col, row }, units: Array.from({ length: type.seatCount }, (_, i) => ({ label: String(i + 1) })) }], { session });
+    return r;
+  });
+  res.status(201).json({ resource: { id: String(resource._id), resourceType: String(resource.resourceType), position: resource.position, units: resource.units.map((u) => ({ label: u.label })) } });
+}));
+router.delete("/:id", asyncHandler(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid resource id" });
+  await withSpaceTransaction(req.user.organizationId, async (session) => {
+    const r = await Resource.findOne({ _id: req.params.id, organization: req.user.organizationId, kind: { $ne: "room" } }).session(session);
+    if (!r) throw Object.assign(new Error("Resource not found"), { status: 404 });
+    const type = await ResourceType.findById(r.resourceType).session(session);
+    const rooms = await Room.find({ organization: req.user.organizationId, "levels.floor": r.floor }).session(session);
+    const related = rooms.filter((room) => room.levels.some((l) => String(l.floor) === String(r.floor) && contains(l.bounds, { ...r.position.toObject(), ...type.footprint.toObject() })));
+    if (await Reservation.exists({ resource: { $in: [r._id, ...related.map((room) => room.resource)] }, status: { $in: LIVE_STATUSES } }).session(session)) throw Object.assign(new Error("This item or its room has an active or upcoming reservation. Cancel it first."), { status: 409 });
+    await r.deleteOne({ session });
+  });
+  res.json({ ok: true });
+}));
 
 /* ══════════════════ MAP-4 — Zones ══════════════════ */
 
@@ -295,4 +245,5 @@ router.delete(
   })
 );
 
+router.use((err, req, res, next) => err.status ? res.status(err.status).json({ error: err.message }) : next(err));
 export default router;

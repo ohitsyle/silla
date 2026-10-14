@@ -1,3 +1,4 @@
+import { effectiveStatus, roomUnit } from "../lib/rooms.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Ban, Check, Clock, Maximize, TriangleAlert, User, Wrench, ZoomIn, ZoomOut } from "lucide-react";
@@ -170,6 +171,9 @@ export default function SpaceMap({
   showOverstay = false,
   selectedUnit = null,
   onSelectUnit,
+  onSelectRoom,
+  focusedRoomId = null,
+  management = false,
   palette = DEFAULT_PALETTE,
   highlight = [],
   onCellClick,
@@ -196,14 +200,15 @@ export default function SpaceMap({
 
   const grid = floor?.grid || { cols: 0, rows: 0 };
 
+  const rooms = layout?.rooms || [];
+  const focusedLevel = rooms.find((r) => r.id === focusedRoomId)?.levels.find((l) => l.floorId === floor?.id);
+
   const baseView = useMemo(
-    () => ({
-      x: -PAD * CELL,
-      y: -PAD * CELL,
-      w: (grid.cols + PAD * 2) * CELL,
-      h: (grid.rows + PAD * 2) * CELL,
-    }),
-    [grid.cols, grid.rows]
+    () => focusedLevel ? ({
+      x: (focusedLevel.bounds.col - PAD) * CELL, y: (focusedLevel.bounds.row - PAD) * CELL,
+      w: (focusedLevel.bounds.w + PAD * 2) * CELL, h: (focusedLevel.bounds.h + PAD * 2) * CELL,
+    }) : ({ x: -PAD * CELL, y: -PAD * CELL, w: (grid.cols + PAD * 2) * CELL, h: (grid.rows + PAD * 2) * CELL }),
+    [grid.cols, grid.rows, floor?.id, focusedRoomId, focusedLevel?.bounds.col, focusedLevel?.bounds.row, focusedLevel?.bounds.w, focusedLevel?.bounds.h]
   );
 
   const [view, setView] = useState(baseView);
@@ -565,9 +570,32 @@ export default function SpaceMap({
           ))}
         </g>
 
+        {/* Rooms have their own booking identity; their shapes are per floor. */}
+        <g>
+          {rooms.filter((r) => !focusedRoomId || r.id === focusedRoomId).map((room) => {
+            const level = room.levels.find((l) => l.floorId === floor.id);
+            if (!level) return null;
+            const { col, row, w, h } = level.bounds;
+            const state = status[room.resourceId]?.[0]?.status || "available";
+            const tone = palette[state] || palette.available;
+            const select = () => {
+              if (editing || regionMode || wasDrag()) return;
+              if (onSelectRoom) onSelectRoom(room);
+              else if (!management && room.bookingMode !== "individual") onSelectUnit?.(roomUnit(room, status));
+            };
+            return <g key={room.id} role="button" tabIndex={editing || regionMode ? -1 : 0}
+              aria-label={`${room.name}, ${room.bookingMode === "individual" ? "individual resources" : "room booking"}, ${state}`}
+              onClick={select} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(); } }}>
+              <title>{room.name} · {room.levels.length} level{room.levels.length > 1 ? "s" : ""} · {state}</title>
+              <rect x={col * CELL + 1} y={row * CELL + 1} width={w * CELL - 2} height={h * CELL - 2} rx="8"
+                fill={tone.color} fillOpacity={0.07} stroke={tone.color} strokeOpacity={0.7} strokeWidth="2" />
+              <text x={col * CELL + 10} y={row * CELL + 17} fontSize="11" fontWeight="600" style={{ fill: "var(--color-ink-primary)" }}>{room.name.slice(0, Math.max(8, w * 6))}</text>
+            </g>;
+          })}
+        </g>
         {/* ---- Layer: resources (spec §12) ---- */}
         <g>
-          {layout.resources.map((resource, pieceIndex) => {
+          {layout.resources.filter((r) => !focusedRoomId || r.roomId === focusedRoomId).map((resource, pieceIndex) => {
             const type = typeById.get(resource.resourceType);
             if (!type) return null; // catalog/layout mismatch — skip rather than crash
 
@@ -596,7 +624,7 @@ export default function SpaceMap({
                 />
 
                 {resource.units.map((unit, unitIndex) => {
-                  const unitStatus = unitStatuses[unitIndex];
+                  const unitStatus = management ? unitStatuses[unitIndex] : effectiveStatus(resource, unitStatuses[unitIndex], rooms, status);
                   const appearance = resolveUnitAppearance(unitStatus, palette);
                   const overstayed = showOverstay && unitStatus?.overstay;
                   const r = rects[unitIndex];
@@ -626,6 +654,7 @@ export default function SpaceMap({
                       aria-label={description}
                       onClick={(e) => {
                         if (wasDrag()) return;
+                        if (unitStatus?.roomBlocked && !management) { onSelectRoom?.(rooms.find((r) => r.id === resource.roomId)); return; }
                         onSelectUnit?.({
                           resourceId: resource.id,
                           unitIndex,
@@ -640,6 +669,7 @@ export default function SpaceMap({
                       onKeyDown={(e) => {
                         if (e.key !== "Enter" && e.key !== " ") return;
                         e.preventDefault();
+                        if (unitStatus?.roomBlocked && !management) { onSelectRoom?.(rooms.find((r) => r.id === resource.roomId)); return; }
                         onSelectUnit?.({
                           resourceId: resource.id,
                           unitIndex,

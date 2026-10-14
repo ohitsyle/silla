@@ -9,6 +9,9 @@ import mongoose from "mongoose";
 const organizationSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
+    // Written BEFORE reading booking/layout constraints in a transaction. This
+    // shared write prevents snapshot-isolation write skew across room and seat.
+    spaceRevision: { type: Number, default: 0, select: false },
 
     // ---- Organization identity / branding (spec §16) ----
     //

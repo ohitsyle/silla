@@ -27,9 +27,18 @@ export async function run(check) {
 
   const floor = await firstFloor();
   const layout = await layoutOf(floor.id);
-  const piece = layout.layout.resources[0];
-  const serviceable = layout.layout.resources.find((r) =>
+  // Availability changes require a resource without live/upcoming bookings.
+  // The reservation suite intentionally leaves holds until runner cleanup.
+  const candidates = [];
+  for (const resource of layout.layout.resources) {
+    if (layout.status[resource.id]?.[0]?.status !== "available") continue;
+    const schedule = await req(`/api/admin/resources/${resource.id}/history`, { headers: S });
+    if (!schedule.body.schedule?.length) candidates.push(resource);
+  }
+  const piece = candidates[0];
+  const serviceable = candidates.find((r) =>
     layout.resourceTypes.find((t) => t.id === r.resourceType)?.hasServiceStatus);
+  if (!piece || !serviceable) throw new Error("The permission checks need one unbooked resource and one unbooked machine.");
 
   /* ── Staff: may run the space ── */
   const setUnavailable = await req(`/api/admin/resources/${piece.id}/units/${piece.units[0].label}`,

@@ -15,6 +15,7 @@ const floorSchema = new mongoose.Schema(
       index: true,
     },
     name: { type: String, required: true, trim: true }, // "Ground Floor", "2F", ...
+    building: { type: mongoose.Schema.Types.ObjectId, ref: "Building", default: null, index: true },
     order: { type: Number, default: 0 }, // display order in the floor switcher
     grid: {
       cols: { type: Number, required: true, default: 20 },

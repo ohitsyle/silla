@@ -2,6 +2,7 @@ import { Router } from "express";
 import mongoose from "mongoose";
 import Organization from "../models/Organization.js";
 import Resource from "../models/Resource.js";
+import Room from "../models/Room.js";
 import ResourceType from "../models/ResourceType.js";
 import { resolveCheckIn, supportedMethods } from "../services/checkin/index.js";
 import { OUTCOME } from "../services/checkin/outcomes.js";
@@ -185,12 +186,15 @@ router.post(
 
 /** Adds the human-readable piece name so the kiosk can say where to sit. */
 async function describeResource(resourceId, unitLabel) {
-  const resource = await Resource.findById(resourceId).select("resourceType position floor");
+  const resource = await Resource.findById(resourceId).select("resourceType position floor kind room");
   if (!resource) return { unitLabel };
+  const room = resource.kind === "room" ? await Room.findById(resource.room) : null;
   const type = await ResourceType.findById(resource.resourceType).select("label");
   return {
     unitLabel,
-    resourceLabel: type?.label || null,
+    resourceLabel: room?.name || type?.label || null,
+    kind: room ? "room" : "piece",
+    roomLevels: room?.levels.length || 0,
     position: resource.position,
     floorId: resource.floor.toString(),
   };

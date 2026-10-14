@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import Reservation from "../models/Reservation.js";
 import Resource from "../models/Resource.js";
+import Room from "../models/Room.js";
 import ResourceType from "../models/ResourceType.js";
 import User from "../models/User.js";
 import { requireAuth } from "../middleware/auth.js";
@@ -10,8 +11,10 @@ import {
   ReservationError,
   cancelReservation,
   claimReservation,
+  reservationAvailability,
 } from "../services/reservations/index.js";
 import { LIVE_STATUSES } from "../services/reservations/availability.js";
+import { SpaceError } from "../services/spaces.js";
 
 const router = Router();
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -65,6 +68,13 @@ router.post(
   })
 );
 
+// Same rules as the committed claim, without exposing another member's details.
+router.get("/availability", requireAuth, asyncHandler(async (req, res) => {
+  const { resourceId, unitLabel, startTime, endTime } = req.query;
+  if (typeof resourceId !== "string" || !mongoose.isValidObjectId(resourceId) || typeof unitLabel !== "string") return res.status(400).json({ error: "Choose a valid resource and unit." });
+  res.json(await reservationAvailability({ organizationId: req.user.organizationId, resourceId, unitLabel, startTime, endTime }));
+}));
+
 /**
  * GET /api/reservations/mine
  * The caller's live reservation plus recent history (spec §9, RES-3).
@@ -105,7 +115,7 @@ router.delete(
       return res.status(403).json({ error: "You can only cancel your own reservation." });
     }
 
-    await cancelReservation({ reservationId: reservation._id, io: req.app.get("io") });
+    await cancelReservation({ reservationId: reservation._id, organizationId: req.user.organizationId, io: req.app.get("io") });
     res.json({ ok: true });
   })
 );
@@ -115,6 +125,7 @@ function shape(reservation) {
     id: reservation._id.toString(),
     resourceId: reservation.resource.toString(),
     unitLabel: reservation.unitLabel,
+    resourceLabel: reservation.targetLabel,
     startTime: reservation.startTime,
     endTime: reservation.endTime,
     status: reservation.status,
@@ -127,19 +138,22 @@ function shape(reservation) {
 /** Enriches a live reservation with enough map context to render it. */
 async function withResource(reservation) {
   const base = shape(reservation);
-  const resource = await Resource.findById(reservation.resource).select("resourceType position floor");
+  const resource = await Resource.findById(reservation.resource).select("resourceType position floor kind room");
   if (!resource) return base;
+  const room = resource.kind === "room" ? await Room.findById(resource.room) : null;
   const type = await ResourceType.findById(resource.resourceType).select("label key");
   return {
     ...base,
     floorId: resource.floor.toString(),
     position: resource.position,
-    resourceLabel: type?.label || null,
+    resourceLabel: room?.name || type?.label || null,
+    roomId: room ? String(room._id) : null,
+    roomLevels: room?.levels.map((l) => ({ floorId: String(l.floor), name: l.name })) || [],
   };
 }
 
 router.use((err, req, res, next) => {
-  if (err instanceof ReservationError) {
+  if (err instanceof ReservationError || err instanceof SpaceError) {
     return res.status(err.status || 400).json({ error: err.message, code: err.code });
   }
   return next(err);

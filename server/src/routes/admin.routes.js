@@ -6,6 +6,8 @@ import Site from "../models/Site.js";
 import Floor from "../models/Floor.js";
 import Resource from "../models/Resource.js";
 import ResourceType from "../models/ResourceType.js";
+import Room from "../models/Room.js";
+import { applyRoomStates, roomContents, roomForResource, withSpaceTransaction, SpaceError } from "../services/spaces.js";
 import Zone from "../models/Zone.js";
 import User from "../models/User.js";
 import Reservation from "../models/Reservation.js";
@@ -48,15 +50,16 @@ router.get(
       ? { floor: req.query.floorId }
       : { floor: { $in: floors.map((f) => f._id) } };
 
-    const resources = await Resource.find({ organization: orgId, ...scope });
+    const resources = await Resource.find({ organization: orgId, kind: { $ne: "room" }, ...scope });
 
+    await applyRoomStates(resources);
     let total = 0;
     const counts = { available: 0, reserved: 0, occupied: 0, unavailable: 0 };
     let outOfService = 0;
     const overstays = [];
 
     for (const resource of resources) {
-      for (const unit of resource.units) {
+      for (const unit of resource.viewUnits || resource.units) {
         total += 1;
         if (counts[unit.status] !== undefined) counts[unit.status] += 1;
         if (unit.serviceStatus === "out_of_service") outOfService += 1;
@@ -103,7 +106,7 @@ router.get(
   "/resources",
   asyncHandler(async (req, res) => {
     const orgId = req.user.organizationId;
-    const filter = { organization: orgId };
+    const filter = { organization: orgId, kind: { $ne: "room" } };
     if (req.query.floorId && mongoose.isValidObjectId(req.query.floorId)) filter.floor = req.query.floorId;
 
     const [resources, types, zones] = await Promise.all([
@@ -111,6 +114,7 @@ router.get(
       ResourceType.find({ organization: orgId }),
       Zone.find(filter.floor ? { floor: filter.floor } : { organization: orgId }),
     ]);
+    await applyRoomStates(resources);
     const typeById = new Map(types.map((t) => [t._id.toString(), t]));
 
     const inZone = (zone, resource, type) => {
@@ -128,9 +132,9 @@ router.get(
     for (const resource of resources) {
       const type = typeById.get(resource.resourceType.toString());
       const zone = zones.find((z) => inZone(z, resource, type));
-      const key = zone ? zone._id.toString() : "__unzoned";
+      const key = resource.roomId || (zone ? zone._id.toString() : "__unzoned");
       if (!grouped.has(key)) {
-        grouped.set(key, { zoneId: zone?._id?.toString() || null, zoneName: zone?.name || "Unzoned", resources: [] });
+        grouped.set(key, { zoneId: resource.roomId || zone?._id?.toString() || null, zoneName: resource.roomName || zone?.name || "Unzoned", resources: [] });
       }
       grouped.get(key).resources.push({
         id: resource._id.toString(),
@@ -138,7 +142,7 @@ router.get(
         typeKey: type?.key || null,
         hasServiceStatus: Boolean(type?.hasServiceStatus),
         position: resource.position,
-        units: resource.units.map((u) => ({
+        units: (resource.viewUnits || resource.units).map((u) => ({
           label: u.label,
           status: u.status,
           serviceStatus: u.serviceStatus,
@@ -160,10 +164,15 @@ router.get(
   asyncHandler(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid resource id" });
 
-    const upcoming = await Reservation.find({ resource: req.params.id, status: { $in: LIVE_STATUSES } })
+    const resource = await Resource.findOne({ _id: req.params.id, organization: req.user.organizationId });
+    if (!resource) return res.status(404).json({ error: "Resource not found" });
+    const room = resource.kind === "room" ? await Room.findById(resource.room) : null;
+    const children = room ? await roomContents(room) : [];
+    const target = { organization: req.user.organizationId, resource: { $in: [resource._id, ...children.map((r) => r._id)] } };
+    const upcoming = await Reservation.find({ ...target, status: { $in: LIVE_STATUSES } })
       .sort({ startTime: 1 })
       .populate("member", "firstName lastName memberId email");
-    const past = await Reservation.find({ resource: req.params.id, status: { $nin: LIVE_STATUSES } })
+    const past = await Reservation.find({ ...target, status: { $nin: LIVE_STATUSES } })
       .sort({ startTime: -1 })
       .limit(50)
       .populate("member", "firstName lastName memberId email");
@@ -171,6 +180,7 @@ router.get(
     const shape = (r) => ({
       id: r._id.toString(),
       unitLabel: r.unitLabel,
+      resourceLabel: r.targetLabel || r.unitLabel,
       startTime: r.startTime,
       endTime: r.endTime,
       status: r.status,
@@ -193,38 +203,36 @@ router.patch(
   "/resources/:id/units/:label",
   asyncHandler(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid resource id" });
-    const resource = await Resource.findOne({ _id: req.params.id, organization: req.user.organizationId });
-    if (!resource) return res.status(404).json({ error: "Resource not found" });
-
-    const unit = resource.units.find((u) => u.label === req.params.label);
-    if (!unit) return res.status(404).json({ error: "Unit not found" });
-
     const { status, serviceStatus } = req.body || {};
-
-    if (serviceStatus) {
-      const type = await ResourceType.findById(resource.resourceType);
-      if (!type?.hasServiceStatus) {
-        return res.status(400).json({ error: "That resource type doesn't carry a service status." });
-      }
-      if (!["working", "out_of_service"].includes(serviceStatus)) {
-        return res.status(400).json({ error: "serviceStatus must be working or out_of_service" });
-      }
-      unit.serviceStatus = serviceStatus;
+    if (status && !["available", "unavailable"].includes(status)) {
+      return res.status(400).json({ error: "Only 'available' and 'unavailable' can be set directly; occupied and reserved are derived from reservations." });
     }
-
-    if (status) {
-      // Staff may only toggle between available and unavailable —
-      // occupied/reserved are derived from reservations, and letting an
-      // admin set them by hand would desync the map from the bookings.
-      if (!["available", "unavailable"].includes(status)) {
-        return res.status(400).json({
-          error: "Only 'available' and 'unavailable' can be set directly; occupied and reserved are derived from reservations.",
-        });
-      }
-      unit.status = status;
+    if (serviceStatus && !["working", "out_of_service"].includes(serviceStatus)) {
+      return res.status(400).json({ error: "serviceStatus must be working or out_of_service" });
     }
-
-    await resource.save();
+    const resource = await withSpaceTransaction(req.user.organizationId, async (session) => {
+      const current = await Resource.findOne({ _id: req.params.id, organization: req.user.organizationId }).session(session);
+      if (!current) throw new SpaceError("Resource not found", 404);
+      if (current.kind === "room") throw new SpaceError("Change room availability using the room controls.");
+      const unit = current.units.find((u) => u.label === req.params.label);
+      if (!unit) throw new SpaceError("Unit not found", 404);
+      if (serviceStatus) {
+        const type = await ResourceType.findById(current.resourceType).session(session);
+        if (!type?.hasServiceStatus) throw new SpaceError("That resource type doesn't carry a service status.");
+      }
+      if (status === "unavailable" || serviceStatus === "out_of_service") {
+        const room = await roomForResource(current, session);
+        const conflicts = [{ resource: current._id, unitLabel: unit.label }, ...(room ? [{ resource: room.resource }] : [])];
+        if (await Reservation.exists({ organization: req.user.organizationId, $or: conflicts, status: { $in: LIVE_STATUSES } }).session(session)) {
+          throw new SpaceError("Cancel the active or upcoming reservation before taking this resource out of service.", 409);
+        }
+      }
+      if (serviceStatus) unit.serviceStatus = serviceStatus;
+      if (status) unit.status = status;
+      await current.save({ session });
+      return current;
+    });
+    const unit = resource.units.find((u) => u.label === req.params.label);
     await syncUnitStatus(resource._id, unit.label, { io: req.app.get("io") });
 
     const fresh = await Resource.findById(resource._id);
@@ -239,6 +247,7 @@ router.delete(
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid reservation id" });
     await cancelReservation({
       reservationId: req.params.id,
+      organizationId: req.user.organizationId,
       reason: req.body?.reason || "Cancelled by staff",
       io: req.app.get("io"),
     });
@@ -680,7 +689,7 @@ router.get(
     }
 
     const peak = byHour.reduce((best, count, hour) => (count > best.count ? { hour, count } : best), { hour: null, count: 0 });
-    const totalUnits = (await Resource.find({ organization: req.user.organizationId })).reduce(
+    const totalUnits = (await Resource.find({ organization: req.user.organizationId, kind: { $ne: "room" } })).reduce(
       (sum, r) => sum + r.units.length,
       0
     );
@@ -739,7 +748,7 @@ router.get(
 );
 
 router.use((err, req, res, next) => {
-  if (err instanceof ValidationError || err instanceof ReservationError) {
+  if (err instanceof ValidationError || err instanceof ReservationError || err instanceof SpaceError) {
     return res.status(err.status || 400).json({ error: err.message, code: err.code });
   }
   return next(err);

@@ -37,12 +37,16 @@ All 12 Sprint 0 stories (51 pts) are implemented and verified:
 ## Sprints 2 & 3 complete — everything except INF-5
 
 **Sprint 2 — Reservation engine & physical loop (76 pts):**
-- **RES-1..RES-3, RES-5, RES-7** — `services/reservations/`. RES-2's atomic
-  claim uses optimistic insert with a lowest-`_id` tie-break, NOT a
-  read-then-write in a transaction: Mongo's snapshot isolation does not
-  prevent write skew, so two racers would both see "free" and both win.
-  Read the header comment before touching it. Verified with 8 concurrent
-  claims for one seat — exactly one survives.
+- **RES-1..RES-3, RES-5, RES-7** — `services/reservations/`. RES-2 now
+  commits claims inside a transaction after an actual shared write to
+  `Organization.spaceRevision`. Transactions alone still permit write
+  skew; the shared write creates a conflict and a retry against a fresh
+  snapshot. The old lowest-`_id` tie-break only compared identical units,
+  so it could not protect a room booking racing a seat booking inside it.
+  Structural map writes and availability changes share the same guard.
+  Read the header comment before touching it. Eight racing room/seat
+  claims produce exactly one winner; a member racing two resources also
+  gets only one reservation.
 - **OCC-1..OCC-6** — `services/reservations/occupancy.js`. This sits
   DOWNSTREAM of the check-in interface on purpose: `services/checkin/`
   answers "who is this?" and stops. Do not move reservation logic into
@@ -551,6 +555,31 @@ live is a decent beat in itself). Set them back afterwards, or run
 5. `npm run profile office` — the whole product becomes a workplace
    (teal, "desks", ENGINEERING/SALES zones, EMP- ids) with no code
    change. Switch back with `npm run profile library`.
+
+## Spatial hierarchy — buildings, floors and rooms
+
+The map now navigates site → building → floor → room → resource. Rooms can
+have rectangular levels on several floors in one building, with booking mode
+`individual`, `whole` or `either`. A whole-room reservation conflicts with all
+contents on all levels; an individual reservation conflicts with its unit and
+whole-room reservations. Buildings and floors are navigation containers.
+
+Superadmins create buildings/floors and draw room boundaries in **Editor**.
+Staff reach the same map through **Space controls**, with availability and
+schedule controls only. Room schedules include individual resources, and
+closing or changing a booked room/resource requires cancelling bookings first.
+Room occupancy uses the existing reservation/check-in/worker lifecycle through
+one internal target, excluded from furniture and physical-unit counts.
+
+Existing floors remain readable under an unassigned building. **Set up building**
+adopts them explicitly while preserving IDs and layout. No read reseeds or
+migrates live data. See `docs/spatial-map.md` for the workflow and constraints.
+
+`npm run test:spaces` runs 41 named spatial checks in a temporary replica set;
+`npm run test:isolated` runs the existing 117 checks in another temporary
+database, including literal-code checks with console email. Neither reads live
+credentials or touches Atlas. `test:spaces -- --serve` keeps disposable fixture
+data on :4010 for the :5175 browser preview documented there.
 
 ## Role model (spec §14)
 Who may do what to the map — enforced on the server, mirrored in the UI:

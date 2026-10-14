@@ -17,8 +17,9 @@
  */
 import Reservation from "../../models/Reservation.js";
 import Resource from "../../models/Resource.js";
+import { withSpaceTransaction } from "../spaces.js";
 import Organization from "../../models/Organization.js";
-import { ReservationError, syncUnitStatus } from "./index.js";
+import { ReservationError, syncUnitStatus, claimReservation, assertActivationAvailable } from "./index.js";
 import { assertWithinOperatingHours, LIVE_STATUSES } from "./availability.js";
 
 /**
@@ -72,48 +73,24 @@ export async function getMemberSession(memberId) {
  * within grace → occupied; Handled per resource."
  */
 export async function checkIn({ organizationId, memberId, io = null }) {
-  const org = await Organization.findById(organizationId);
-  if (!org) throw new ReservationError("Organization not found", 404);
-
-  const held = await Reservation.findOne({ member: memberId, status: "held" }).sort({ startTime: 1 });
-  if (!held) throw new ReservationError("No reservation to check in to.", 404, "NO_RESERVATION");
-
-  const now = new Date();
-  const graceMinutes = org.policy?.gracePeriodMinutes ?? 10;
-  const graceEnds = new Date(held.startTime.getTime() + graceMinutes * 60_000);
-
-  if (now < held.startTime) {
-    // Arriving early is fine, but only just — otherwise someone could
-    // occupy a seat hours before their window.
-    const earlyWindowMs = 15 * 60_000;
-    if (held.startTime - now > earlyWindowMs) {
-      throw new ReservationError(
-        `That reservation starts at ${held.startTime.toLocaleTimeString()}. You can check in from 15 minutes before.`,
-        409,
-        "TOO_EARLY"
-      );
+  const outcome = await withSpaceTransaction(organizationId, async (session, org) => {
+    const held = await Reservation.findOne({ organization: organizationId, member: memberId, status: "held" }).sort({ startTime: 1 }).session(session);
+    if (!held) throw new ReservationError("No reservation to check in to.", 404, "NO_RESERVATION");
+    const now = new Date();
+    const graceMinutes = org.policy?.gracePeriodMinutes ?? 10;
+    if (now < held.startTime && held.startTime - now > 15 * 60000) throw new ReservationError("You can check in from 15 minutes before the reservation starts.", 409, "TOO_EARLY");
+    if (now > new Date(+held.startTime + graceMinutes * 60000) || now >= held.endTime) {
+      held.status = "expired"; await held.save({ session });
+      return { reservation: held, expired: true, graceMinutes };
     }
-  }
-
-  if (now > graceEnds) {
-    // The worker normally releases these; if a tap gets here first,
-    // resolve it the same way rather than letting them check in late.
-    held.status = "expired";
-    await held.save();
-    await syncUnitStatus(held.resource, held.unitLabel, { io });
-    throw new ReservationError(
-      `That reservation expired — the ${graceMinutes}-minute grace period has passed.`,
-      409,
-      "GRACE_EXPIRED"
-    );
-  }
-
-  held.status = "active";
-  held.checkedInAt = now;
-  await held.save();
-
-  await syncUnitStatus(held.resource, held.unitLabel, { io });
-  return held;
+    await assertActivationAvailable(held, org, now, session);
+    held.status = "active"; held.checkedInAt = now;
+    await held.save({ session });
+    return { reservation: held };
+  });
+  await syncUnitStatus(outcome.reservation.resource, outcome.reservation.unitLabel, { io });
+  if (outcome.expired) throw new ReservationError("That reservation expired — the " + outcome.graceMinutes + "-minute grace period has passed.", 409, "GRACE_EXPIRED");
+  return outcome.reservation;
 }
 
 /**
@@ -187,34 +164,6 @@ export async function assignWalkIn({ organizationId, memberId, resourceId, unitL
     if (closesAt > now && closesAt < end) end = closesAt;
   }
 
-  // Same optimistic-claim tie-break as a booked reservation — a walk-in
-  // and a remote booking can race for the same seat.
-  const created = await Reservation.create({
-    organization: organizationId,
-    member: memberId,
-    resource: resourceId,
-    unitLabel: String(unitLabel),
-    startTime: now,
-    endTime: end,
-    status: "active",
-    checkedInAt: now,
-    checkInMethod: org.identity?.checkInMethod === "qr" ? "qr" : "rfid",
-  });
-
-  const racers = await Reservation.find({
-    resource: resourceId,
-    unitLabel: String(unitLabel),
-    status: { $in: LIVE_STATUSES },
-    _id: { $ne: created._id },
-    startTime: { $lt: end },
-    endTime: { $gt: now },
-  });
-  const lostTo = racers.find((r) => r._id.toString() < created._id.toString());
-  if (lostTo) {
-    await Reservation.deleteOne({ _id: created._id });
-    throw new ReservationError("That resource was just taken. Please pick another.", 409, "RACE_LOST");
-  }
-
-  await syncUnitStatus(resourceId, String(unitLabel), { io });
-  return created;
+  // Walk-ins share the same committed room/unit claim path as online bookings.
+  return claimReservation({ organizationId, memberId, resourceId, unitLabel, startTime: now, endTime: end, activate: true, notify: false, io });
 }

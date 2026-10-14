@@ -625,7 +625,7 @@ function WalkInStep({ organizationId, credential, member, maxStayHours, resource
           {member?.firstName ? `Hi ${member.firstName} — pick a ${resourceNoun}` : `Pick a ${resourceNoun}`}
         </div>
         <p className="text-sm text-ink-secondary mt-1">
-          You have no reservation, so choose any open {resourceNoun} and it's yours for up to {maxStayHours ?? 4} hours.
+          Choose an open {resourceNoun} or a bookable room for up to {maxStayHours ?? 4} hours. A whole-room booking includes every level and its contents.
         </p>
       </div>
 
@@ -661,7 +661,7 @@ function WalkInStep({ organizationId, credential, member, maxStayHours, resource
         )}
       </div>
       <p className="mt-3 text-xs text-ink-muted">
-        Tap a green {resourceNoun} to take it. Drag to pan, pinch to zoom.
+        Tap a green {resourceNoun}, or a room's name to take the whole room. Drag to pan, pinch to zoom.
       </p>
     </motion.div>
   );
@@ -677,7 +677,7 @@ function ResultStep({ result, memberNoun, resourceNoun, onReset }) {
       tone: "available",
       title: result?.member?.firstName ? `You're checked in, ${result.member.firstName}.` : "You're checked in.",
       body: result?.reservation
-        ? `${result.reservation.resourceLabel || resourceNoun} · ${resourceNoun} ${result.reservation.unitLabel}` +
+        ? result.reservation.kind === "room" ? `${result.reservation.resourceLabel} · all ${result.reservation.roomLevels} room level(s)` : `${result.reservation.resourceLabel || resourceNoun} · ${resourceNoun} ${result.reservation.unitLabel}` +
           (result.reservation.position ? ` at (${result.reservation.position.col}, ${result.reservation.position.row})` : "")
         : null,
       foot: result?.reservation?.endTime

@@ -18,6 +18,7 @@
 import "dotenv/config";
 import mongoose from "mongoose";
 import { connectDB } from "../config/db.js";
+import Room from "../models/Room.js";
 import Organization from "../models/Organization.js";
 import Site from "../models/Site.js";
 import ResourceType from "../models/ResourceType.js";
@@ -42,6 +43,7 @@ function mergeDefined(base = {}, patch = {}) {
 }
 
 export async function applyProfile(org, profileKey) {
+  if (await Room.exists({ organization: org._id })) throw new Error("This organization has configured rooms. A demo profile switch would replace its maps; use organization settings and the editor instead.");
   const profile = getProfile(profileKey);
 
   // ---- Organization config (spec §16) ----

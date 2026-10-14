@@ -1,6 +1,9 @@
 import { Router } from "express";
 import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
+import Building from "../models/Building.js";
+import Room from "../models/Room.js";
+import { shapeRoom, contains, pieceBounds, withSpaceTransaction } from "../services/spaces.js";
 import Site from "../models/Site.js";
 import Floor from "../models/Floor.js";
 import Resource from "../models/Resource.js";
@@ -8,6 +11,7 @@ import ResourceType from "../models/ResourceType.js";
 import Zone from "../models/Zone.js";
 import Label from "../models/Label.js";
 import Reservation from "../models/Reservation.js";
+import User from "../models/User.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { LIVE_STATUSES } from "../services/reservations/availability.js";
 
@@ -23,17 +27,18 @@ const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, ne
 /**
  * Staff-only fields (overstay, spec §10/§14) are included when the
  * caller presents a staff token and omitted otherwise. This is not
- * requireAuth: the map itself is readable without a session for now,
- * matching /api/organizations/:id/config, because no member login
- * screen exists yet (AUTH-1 has a route, no client). Swap this for
- * requireAuth once the member session lands.
+ * requireAuth: the map itself is readable for the kiosk and home preview.
+ * Staff-only details still require an active account in this organization.
  */
-function readRole(req) {
+async function readRole(req, organizationId) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
   if (!token) return null;
   try {
-    return jwt.verify(token, process.env.JWT_SECRET).role;
+    const claims = jwt.verify(token, process.env.JWT_SECRET);
+    if (String(claims.organizationId) !== String(organizationId)) return null;
+    const account = await User.findOne({ _id: claims.id, organization: organizationId, active: true }).select("role");
+    return account?.role || null;
   } catch {
     return null;
   }
@@ -60,7 +65,7 @@ router.get("/", asyncHandler(async (req, res) => {
 
   const siteNames = new Map(sites.map((s) => [s._id.toString(), s.name]));
   const floors = await Floor.find({ site: { $in: sites.map((s) => s._id) } })
-    .select("name order grid site")
+    .select("name order grid site building")
     .sort({ order: 1, name: 1 });
 
   res.json({
@@ -69,6 +74,7 @@ router.get("/", asyncHandler(async (req, res) => {
       name: f.name,
       order: f.order,
       grid: f.grid,
+      buildingId: f.building ? String(f.building) : null,
       site: { id: f.site.toString(), name: siteNames.get(f.site.toString()) || null },
     })),
   });
@@ -98,7 +104,7 @@ router.get("/:id/layout", asyncHandler(async (req, res) => {
     return res.status(400).json({ error: "Invalid floor id" });
   }
 
-  const floor = await Floor.findById(id).select("name order grid site");
+  const floor = await Floor.findById(id).select("name order grid site building");
   if (!floor) return res.status(404).json({ error: "Floor not found" });
 
   // Resource carries `organization` directly, but zones/labels/catalog
@@ -107,19 +113,22 @@ router.get("/:id/layout", asyncHandler(async (req, res) => {
   if (!site) return res.status(404).json({ error: "Floor's site not found" });
   const organizationId = site.organization;
 
-  const [resources, zones, labels, resourceTypes] = await Promise.all([
-    Resource.find({ floor: floor._id }).select("resourceType position units").sort({ createdAt: 1 }),
+  const [resources, zones, labels, resourceTypes, rooms, building] = await Promise.all([
+    Resource.find({ floor: floor._id, kind: { $ne: "room" } }).select("resourceType position units").sort({ createdAt: 1 }),
     Zone.find({ floor: floor._id }).select("name bounds").sort({ name: 1 }),
     Label.find({ floor: floor._id }).select("text position"),
-    ResourceType.find({ organization: organizationId }).select(
+    ResourceType.find({ organization: organizationId, internal: { $ne: true } }).select(
       "key label footprint seatCount reservable icon hasServiceStatus"
     ),
+    Room.find({ organization: organizationId, "levels.floor": floor._id }),
+    floor.building ? Building.findById(floor.building) : null,
   ]);
 
-  const staff = isStaff(readRole(req));
+  const staff = isStaff(await readRole(req, organizationId));
 
+  const roomTargets = await Resource.find({ _id: { $in: rooms.map((r) => r.resource) } });
   const status = {};
-  for (const resource of resources) {
+  for (const resource of [...resources, ...roomTargets]) {
     status[resource._id.toString()] = resource.units.map((unit) => ({
       status: unit.status,
       serviceStatus: unit.serviceStatus,
@@ -136,6 +145,7 @@ router.get("/:id/layout", asyncHandler(async (req, res) => {
       order: floor.order,
       grid: floor.grid,
       site: { id: site._id.toString(), name: site.name },
+      building: building ? { id: String(building._id), name: building.name } : null,
     },
     resourceTypes: resourceTypes.map((t) => ({
       id: t._id.toString(),
@@ -148,10 +158,12 @@ router.get("/:id/layout", asyncHandler(async (req, res) => {
       hasServiceStatus: t.hasServiceStatus,
     })),
     layout: {
+      rooms: rooms.map(shapeRoom),
       resources: resources.map((r) => ({
         id: r._id.toString(),
         resourceType: r.resourceType.toString(),
         position: r.position,
+        roomId: rooms.find((room) => room.levels.some((l) => String(l.floor) === String(floor._id) && contains(l.bounds, pieceBounds(r, resourceTypes.find((t) => String(t._id) === String(r.resourceType))))))?._id?.toString() || null,
         // Only the unit's identity lives in layout; its status lives in
         // `status` above.
         units: r.units.map((u) => ({ label: u.label })),
@@ -188,173 +200,89 @@ function validateGrid(cols, rows) {
  * POST /api/floors
  * Body: { siteId?, name, order?, grid: { cols, rows } }
  */
-router.post(
-  "/",
-  requireAuth,
-  requireRole("superadmin"),
-  asyncHandler(async (req, res) => {
-    const { siteId, name, order, grid } = req.body || {};
-    if (!name?.trim()) return res.status(400).json({ error: "A floor name is required" });
-
-    const cols = grid?.cols ?? 20;
-    const rows = grid?.rows ?? 12;
-    const gridError = validateGrid(cols, rows);
-    if (gridError) return res.status(400).json({ error: gridError });
-
-    // Default to the org's first site — multi-site is in the data model
-    // but its management UI is fast-follow (spec §2).
-    const site = siteId && mongoose.isValidObjectId(siteId)
-      ? await Site.findOne({ _id: siteId, organization: req.user.organizationId })
-      : await Site.findOne({ organization: req.user.organizationId }).sort({ createdAt: 1 });
-    if (!site) return res.status(404).json({ error: "No site found for this organization" });
-
-    // Append to the end unless an explicit order is given.
-    const last = await Floor.findOne({ site: site._id }).sort({ order: -1 }).select("order");
-    const nextOrder = Number.isInteger(order) ? order : (last?.order ?? -1) + 1;
-
-    const floor = await Floor.create({
-      site: site._id,
-      name: name.trim(),
-      order: nextOrder,
-      grid: { cols, rows },
-    });
-
-    res.status(201).json({
-      floor: {
-        id: floor._id.toString(),
-        name: floor.name,
-        order: floor.order,
-        grid: floor.grid,
-        site: { id: site._id.toString(), name: site.name },
-      },
-    });
-  })
-);
-
-/**
- * PATCH /api/floors/:id
- * Body: { name?, order?, grid?: { cols, rows } }
- *
- * Shrinking a grid is refused while anything sits outside the new
- * bounds. Silently orphaning pieces off the edge of the map would leave
- * bookable seats nobody can see.
- */
-router.patch(
-  "/:id",
-  requireAuth,
-  requireRole("superadmin"),
-  asyncHandler(async (req, res) => {
-    if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({ error: "Invalid floor id" });
-    }
-    const floor = await Floor.findById(req.params.id);
-    if (!floor) return res.status(404).json({ error: "Floor not found" });
-
-    const site = await Site.findById(floor.site).select("organization name");
-    if (!site || site.organization.toString() !== req.user.organizationId) {
-      return res.status(404).json({ error: "Floor not found" });
-    }
-
-    const { name, order, grid } = req.body || {};
-
+const floorShape = (f, site) => ({ id: String(f._id), name: f.name, order: f.order, grid: f.grid, buildingId: f.building ? String(f.building) : null, site: { id: String(site._id), name: site.name } });
+function bad(message, status = 400) { return Object.assign(new Error(message), { status }); }
+async function ownedFloor(id, orgId, session) {
+  if (!mongoose.isValidObjectId(id)) throw bad("Invalid floor id");
+  const floor = await Floor.findById(id).session(session);
+  const site = floor && await Site.findOne({ _id: floor.site, organization: orgId }).session(session);
+  if (!site) throw bad("Floor not found", 404);
+  return { floor, site };
+}
+router.post("/", requireAuth, requireRole("superadmin"), asyncHandler(async (req, res) => {
+  const result = await withSpaceTransaction(req.user.organizationId, async (session) => {
+    const { siteId, buildingId, name, order, grid } = req.body || {};
+    if (typeof name !== "string" || !name.trim()) throw bad("A floor name is required");
+    const cols = grid?.cols ?? 20, rows = grid?.rows ?? 12;
+    const error = validateGrid(cols, rows); if (error) throw bad(error);
+    if (siteId && !mongoose.isValidObjectId(siteId)) throw bad("Invalid site id");
+    let site = await Site.findOne({ organization: req.user.organizationId, ...(siteId ? { _id: siteId } : {}) }).session(session);
+    if (!site) throw bad("Site not found", 404);
+    if (buildingId && !mongoose.isValidObjectId(buildingId)) throw bad("Invalid building id");
+    const building = await Building.findOne({ organization: req.user.organizationId, ...(buildingId ? { _id: buildingId } : { site: site._id }) }).session(session);
+    if (buildingId && !building) throw bad("Building not found", 404);
+    if (building) site = await Site.findById(building.site).session(session);
+    const count = await Floor.countDocuments({ site: site._id, building: building?._id || null }).session(session);
+    const [floor] = await Floor.create([{ site: site._id, building: building?._id || null, name: name.trim().slice(0, 120), order: Number.isInteger(order) ? order : count, grid: { cols, rows } }], { session });
+    return floorShape(floor, site);
+  });
+  res.status(201).json({ floor: result });
+}));
+router.patch("/:id", requireAuth, requireRole("superadmin"), asyncHandler(async (req, res) => {
+  const result = await withSpaceTransaction(req.user.organizationId, async (session) => {
+    const { floor, site } = await ownedFloor(req.params.id, req.user.organizationId, session);
+    const { name, order, grid, buildingId } = req.body || {};
     if (grid) {
-      const cols = grid.cols ?? floor.grid.cols;
-      const rows = grid.rows ?? floor.grid.rows;
-      const gridError = validateGrid(cols, rows);
-      if (gridError) return res.status(400).json({ error: gridError });
-
-      if (cols < floor.grid.cols || rows < floor.grid.rows) {
-        const offenders = await findOutsideGrid(floor._id, cols, rows);
-        if (offenders.length) {
-          return res.status(409).json({
-            error:
-              `Shrinking to ${cols}×${rows} would leave ${offenders.length} item(s) outside the grid. ` +
-              `Move or remove them first.`,
-            outside: offenders.slice(0, 10),
-          });
-        }
-      }
+      const cols = grid.cols ?? floor.grid.cols, rows = grid.rows ?? floor.grid.rows;
+      const error = validateGrid(cols, rows); if (error) throw bad(error);
+      const outside = await findOutsideGrid(floor._id, cols, rows, session);
+      if (outside.length) throw Object.assign(bad("Move or remove items and room levels outside the new grid first.", 409), { outside: outside.slice(0, 10) });
       floor.grid = { cols, rows };
     }
-
-    if (name?.trim()) floor.name = name.trim();
+    if (buildingId !== undefined && String(floor.building) !== buildingId) {
+      if (!mongoose.isValidObjectId(buildingId)) throw bad("Invalid building id");
+      const b = await Building.findOne({ _id: buildingId, organization: req.user.organizationId, site: floor.site }).session(session);
+      if (!b) throw bad("Choose a building at the same site.", 404);
+      if (await Room.exists({ "levels.floor": floor._id }).session(session)) throw bad("Move this floor's room levels before changing its building.", 409);
+      floor.building = b._id;
+    }
+    if (name !== undefined) { if (typeof name !== "string" || !name.trim()) throw bad("A floor name is required"); floor.name = name.trim().slice(0, 120); }
     if (Number.isInteger(order)) floor.order = order;
-    await floor.save();
-
-    res.json({
-      floor: {
-        id: floor._id.toString(),
-        name: floor.name,
-        order: floor.order,
-        grid: floor.grid,
-        site: { id: site._id.toString(), name: site.name },
-      },
-    });
-  })
-);
-
-/**
- * DELETE /api/floors/:id
- * Refuses while the floor holds live reservations, and requires the
- * layout to be cleared first — deleting a populated floor by accident is
- * not something a confirmation dialog should be the only guard against.
- */
-router.delete(
-  "/:id",
-  requireAuth,
-  requireRole("superadmin"),
-  asyncHandler(async (req, res) => {
-    if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({ error: "Invalid floor id" });
-    }
-    const floor = await Floor.findById(req.params.id);
-    if (!floor) return res.status(404).json({ error: "Floor not found" });
-
-    const site = await Site.findById(floor.site).select("organization");
-    if (!site || site.organization.toString() !== req.user.organizationId) {
-      return res.status(404).json({ error: "Floor not found" });
-    }
-
-    const resources = await Resource.find({ floor: floor._id }).select("_id");
-    const live = resources.length
-      ? await Reservation.countDocuments({
-          resource: { $in: resources.map((r) => r._id) },
-          status: { $in: LIVE_STATUSES },
-        })
-      : 0;
-    if (live > 0) {
-      return res.status(409).json({ error: `That floor has ${live} active or upcoming reservation(s).` });
-    }
-    if (resources.length) {
-      return res.status(409).json({
-        error: `That floor still has ${resources.length} placed item(s). Remove them first.`,
-      });
-    }
-
-    const remaining = await Floor.countDocuments({ site: floor.site });
-    if (remaining <= 1) {
-      return res.status(409).json({ error: "A site must keep at least one floor." });
-    }
-
-    await Promise.all([Zone.deleteMany({ floor: floor._id }), Label.deleteMany({ floor: floor._id })]);
-    await Floor.deleteOne({ _id: floor._id });
-    res.json({ ok: true });
-  })
-);
+    await floor.save({ session });
+    return floorShape(floor, site);
+  });
+  res.json({ floor: result });
+}));
+router.delete("/:id", requireAuth, requireRole("superadmin"), asyncHandler(async (req, res) => {
+  await withSpaceTransaction(req.user.organizationId, async (session) => {
+    const { floor } = await ownedFloor(req.params.id, req.user.organizationId, session);
+    if (await Room.exists({ "levels.floor": floor._id }).session(session)) throw bad("Move or remove this floor's room levels first.", 409);
+    const pieces = await Resource.find({ floor: floor._id }).session(session);
+    if (pieces.length) throw bad("Remove the placed items before deleting this floor.", 409);
+    if (await Floor.countDocuments({ site: floor.site }).session(session) <= 1) throw bad("A site must keep at least one floor.", 409);
+    await Zone.deleteMany({ floor: floor._id }).session(session);
+    await Label.deleteMany({ floor: floor._id }).session(session);
+    await floor.deleteOne({ session });
+  });
+  res.json({ ok: true });
+}));
+router.use((err, req, res, next) => err.status ? res.status(err.status).json({ error: err.message, ...(err.outside ? { outside: err.outside } : {}) }) : next(err));
 
 /** Pieces, zones or labels that would fall outside a proposed grid. */
-async function findOutsideGrid(floorId, cols, rows) {
+async function findOutsideGrid(floorId, cols, rows, session) {
   const [resources, zones, labels] = await Promise.all([
-    Resource.find({ floor: floorId }).select("position resourceType"),
-    Zone.find({ floor: floorId }).select("name bounds"),
-    Label.find({ floor: floorId }).select("text position"),
+    Resource.find({ floor: floorId, kind: { $ne: "room" } }).select("position resourceType").session(session),
+    Zone.find({ floor: floorId }).select("name bounds").session(session),
+    Label.find({ floor: floorId }).select("text position").session(session),
   ]);
   const types = await ResourceType.find({
     _id: { $in: [...new Set(resources.map((r) => r.resourceType.toString()))] },
-  }).select("footprint label");
+  }).select("footprint label").session(session);
   const typeById = new Map(types.map((t) => [t._id.toString(), t]));
 
   const outside = [];
+  const rooms = await Room.find({ "levels.floor": floorId }).session(session);
+  for (const r of rooms) for (const l of r.levels) if (String(l.floor) === String(floorId) && (l.bounds.col + l.bounds.w > cols || l.bounds.row + l.bounds.h > rows)) outside.push({ kind: "room", name: r.name });
   for (const r of resources) {
     const f = typeById.get(r.resourceType.toString())?.footprint || { w: 1, h: 1 };
     if (r.position.col + f.w > cols || r.position.row + f.h > rows) {

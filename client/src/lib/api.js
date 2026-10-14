@@ -113,6 +113,18 @@ export const api = {
   updateFloor: (id, patch) => request(`/api/floors/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteFloor: (id) => request(`/api/floors/${id}`, { method: "DELETE" }),
 
+  reservationAvailability: (resourceId, unitLabel, startTime, endTime) => request(`/api/reservations/availability?${new URLSearchParams({ resourceId, unitLabel, startTime, endTime })}`),
+
+  // Buildings organize floors; rooms define shared booking boundaries.
+  getSpaces: (orgId) => request(`/api/spaces?organizationId=${orgId}`),
+  createBuilding: (payload) => request(`/api/spaces/buildings`, { method: "POST", body: JSON.stringify(payload) }),
+  updateBuilding: (id, patch) => request(`/api/spaces/buildings/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteBuilding: (id) => request(`/api/spaces/buildings/${id}`, { method: "DELETE" }),
+  createRoom: (payload) => request(`/api/spaces/rooms`, { method: "POST", body: JSON.stringify(payload) }),
+  updateRoom: (id, patch) => request(`/api/spaces/rooms/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteRoom: (id) => request(`/api/spaces/rooms/${id}`, { method: "DELETE" }),
+  setRoomAvailability: (id, status) => request(`/api/spaces/rooms/${id}/availability`, { method: "PATCH", body: JSON.stringify({ status }) }),
+
   // MAP-3/4/5 — editor writes.
   placeResource: (payload) => request(`/api/resources`, { method: "POST", body: JSON.stringify(payload) }),
   removeResource: (id) => request(`/api/resources/${id}`, { method: "DELETE" }),
