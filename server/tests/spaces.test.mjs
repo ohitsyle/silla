@@ -18,6 +18,7 @@ const { default: Reservation } = await import("../src/models/Reservation.js");
 const { claimReservation, cancelReservation, syncUnitStatus } = await import("../src/services/reservations/index.js");
 const { assignWalkIn, checkOut, checkIn } = await import("../src/services/reservations/occupancy.js");
 const { startScheduler, releaseExpiredGraceHolds, refreshDueHolds } = await import("../src/workers/scheduler.js");
+const { clearOfMidnight, endOfDay, MINUTE, HOUR } = await import("./helpers.mjs");
 let passed = 0;
 function check(name, value) { assert.ok(value, name); passed++; console.log("PASS " + name); }
 const replica = await MongoMemoryReplSet.create({ replSet: { count: 1 }, binary: { version: "8.2.6" } });
@@ -124,18 +125,25 @@ try {
   await rejected(() => claim(members[0], upperDesk.id), "ROOM_CLOSED");
   await call("/api/spaces/rooms/" + room.id + "/availability", "PATCH", { status: "available" }, 200, staff);
   await call("/api/spaces/rooms/" + room.id, "PATCH", { bookingMode: "either" });
+  // "Right now" scenarios. Every window below stays inside today, because a
+  // booking may not span two days; seconds from midnight the block waits for
+  // the date to turn instead (see helpers.mjs).
+  await clearOfMidnight();
   const now = new Date();
-  const boundary = new Date(+now + 8 * 60000);
+  const dayEnd = endOfDay(now);
+  const boundary = new Date(+now + Math.min(8 * MINUTE, (dayEnd - now) / 2));
   const occupying = await claim(members[3], desk.id, "1", { startTime: now, endTime: boundary });
   await checkIn({ organizationId: org._id, memberId: members[3]._id });
-  const earlyRoom = await claim(members[4], room.resourceId, "room", { startTime: boundary, endTime: new Date(+boundary + 3600000) });
+  const earlyRoom = await claim(members[4], room.resourceId, "room", { startTime: boundary, endTime: new Date(Math.min(+boundary + HOUR, +dayEnd)) });
   await rejected(() => checkIn({ organizationId: org._id, memberId: members[4]._id }), "CONFLICT");
   check("refused early room arrival keeps the future reservation held", (await Reservation.findById(earlyRoom._id)).status === "held");
   await checkOut({ memberId: members[3]._id });
   check("room arrival succeeds after the previous seat checks out", (await checkIn({ organizationId: org._id, memberId: members[4]._id })).status === "active");
   await checkOut({ memberId: members[4]._id });
-  const overstay = await claim(members[3], upperDesk.id, "1", { startTime: new Date(+now - 3600000), endTime: new Date(+now - 60000) });
-  await Reservation.updateOne({ _id: overstay._id }, { status: "active", checkedInAt: new Date(+now - 3600000), overstay: true });
+  // An overstay is a session whose scheduled end has passed. Booked as a
+  // normal window, then moved into the past: an hour ago may be yesterday.
+  const overstay = await claim(members[3], upperDesk.id, "1");
+  await Reservation.updateOne({ _id: overstay._id }, { startTime: new Date(+now - HOUR), endTime: new Date(+now - MINUTE), status: "active", checkedInAt: new Date(+now - HOUR), overstay: true });
   await rejected(() => assignWalkIn({ organizationId: org._id, memberId: members[4]._id, resourceId: room.resourceId, unitLabel: "room" }), "CONFLICT");
   await checkOut({ memberId: members[3]._id });
   check("completed sessions release all room conflicts", (await Reservation.findById(occupying._id)).status === "completed");
@@ -160,7 +168,10 @@ try {
   check("scheduled room holds become reserved when their window starts", (await Resource.findById(room.resourceId)).units[0].status === "reserved");
   check("scheduled room status reaches every level automatically", dueEmissions.length === 2 && dueEmissions.every((e) => e.value.units[0].status === "reserved"));
   await cancelReservation({ reservationId: due._id });
-  const noShow = await claim(members[0], room.resourceId, "room", { startTime: new Date(+now - 30 * 60000), endTime: new Date(+now + 30 * 60000) });
+  // A no-show started half an hour ago. Booked as a normal window and moved,
+  // for the same reason as the overstay above.
+  const noShow = await claim(members[0], room.resourceId, "room");
+  await Reservation.updateOne({ _id: noShow._id }, { startTime: new Date(+now - 30 * MINUTE), endTime: new Date(+now + 30 * MINUTE) });
   await releaseExpiredGraceHolds();
   check("no-show worker expires whole-room bookings through the shared lifecycle", (await Reservation.findById(noShow._id)).status === "expired");
   check("no-show worker restores room availability", (await Resource.findById(room.resourceId)).units[0].status === "available");

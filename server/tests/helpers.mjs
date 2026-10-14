@@ -119,9 +119,83 @@ export async function emailIsLive() {
   return Boolean(mod.emailConfigured);
 }
 
+/* ───────────── booking windows that are valid at any time of day ─────────────
+ *
+ * The product refuses a reservation that spans two days, and it is right
+ * to. The suites used to book "now" windows as `now + 1 hour`, so every
+ * run after about 23:00 failed on correct behaviour — four checks in the
+ * system suites, and the spatial suite crashed outright. Two kinds of
+ * window cover everything the suites need:
+ *
+ *   window()     a future day, anchored at 10:00 + offset — inside every
+ *                seeded profile's opening hours, whenever the run starts.
+ *   nowWindow()  around the present moment, clamped to today.
+ *
+ * Prove a change with the moved clock in tests/clock.mjs, for example:
+ *   SILLA_TEST_CLOCK=23:50 NODE_OPTIONS=--import=./tests/clock.mjs npm run test:isolated
+ */
+
+export const MINUTE = 60_000;
+export const HOUR = 60 * MINUTE;
+
+/** Local midnight at the start of `date`'s day. */
+export function startOfDay(date = new Date()) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+/** The last whole second of `date`'s day — the latest a same-day booking may end. */
+export function endOfDay(date = new Date()) {
+  const d = new Date(date);
+  d.setHours(23, 59, 59, 0);
+  return d;
+}
+
+/**
+ * A window around the present: it opens `before` ago and runs `after`
+ * ahead, but never starts before midnight or ends after 23:59:59. At 14:00
+ * that is 13:59–15:00; at 23:50 it is 23:49–23:59:59.
+ *
+ * Callers set operating hours to the whole day first (withOpenHours): the
+ * scenarios that need "now" test the physical loop, not the opening hours.
+ */
+export function nowWindow({ before = MINUTE, after = HOUR, now = new Date() } = {}) {
+  const start = new Date(Math.max(now.getTime() - before, startOfDay(now).getTime()));
+  const end = new Date(Math.min(now.getTime() + after, endOfDay(now).getTime()));
+  return { startTime: start.toISOString(), endTime: end.toISOString() };
+}
+
+/**
+ * Waits out the edges of the day before a block of "right now" scenarios.
+ *
+ * nowWindow already keeps each booking inside one day. What clamping
+ * cannot fix is a block that STARTS seconds before midnight and is still
+ * booking when the date changes, or one so soon after midnight that its
+ * windows shrink to nothing. Within `margin` of midnight this waits for the
+ * safe part of the day; at any other time it returns at once.
+ */
+export async function clearOfMidnight(margin = 2 * MINUTE) {
+  const now = new Date();
+  const midnight = startOfDay(now);
+  const nextMidnight = new Date(midnight);
+  nextMidnight.setDate(nextMidnight.getDate() + 1);
+
+  const sinceMidnight = now - midnight;
+  const untilMidnight = nextMidnight - now;
+  let wait = 0;
+  if (untilMidnight < margin) wait = untilMidnight + margin;
+  else if (sinceMidnight < margin) wait = margin - sinceMidnight;
+  if (!wait) return;
+
+  console.log(`  (waiting ${Math.ceil(wait / 1000)}s to clear midnight: a booking cannot span two days)`);
+  await new Promise((resolve) => setTimeout(resolve, wait));
+}
+
 /**
  * A booking window on a day unique to this run, so repeated runs never
- * collide with each other's leftover holds.
+ * collide with each other's leftover holds. Anchored at 10:00 on that day,
+ * so it is the same valid window whatever time the run starts.
  */
 const RUN_DAY = 2 + (Math.floor(Date.now() / 1000) % 40);
 export function window(offsetHours = 0, lengthHours = 2, dayOffset = RUN_DAY) {
