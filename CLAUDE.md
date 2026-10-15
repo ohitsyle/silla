@@ -629,11 +629,12 @@ overwrite a newer one — a member who tapped in at the last second used to
 be marked a no-show. Every suite now passes at any time of day; windows
 are built by `tests/clock.mjs`, never "now + 1h", which crossed midnight.
 
-**Live (deployed 15 Oct 2026):** the demo organization's floors sit under
-an unassigned "Main Campus" building until a superadmin presses "Set up
-building", and it has no rooms yet. Five of its floors are leftovers from
-earlier testing (faevea, qbkjwnq, sghdjfh, Test Floor, Test Ground for
-Org B).
+**Live (deployed 16 Oct 2026, shapes included):** the demo organization
+has two buildings, set up from the live editor on 15 Oct — "Building 1"
+holding all nine of its floors, and an empty "Main Building" — and no
+rooms yet. Every live floor is still a full rectangle (no outline saved).
+Five of its floors are leftovers from earlier testing (faevea, qbkjwnq,
+sghdjfh, Test Floor, Test Ground for Org B).
 
 ## Work in progress — tenancy, billing, staff console
 
