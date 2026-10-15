@@ -27,6 +27,9 @@ async function request(path, options = {}) {
 
 export const api = {
   getOrgConfig: (orgId) => request(`/api/organizations/${orgId}/config`),
+  // How the app finds its organization from the address it was opened at
+  // (<product>/<slug>/…). The same config, found by slug instead of id.
+  getOrgConfigBySlug: (slug) => request(`/api/organizations/by-slug/${encodeURIComponent(slug)}/config`),
   login: (organizationId, email, pin) =>
     request(`/api/auth/login`, { method: "POST", body: JSON.stringify({ organizationId, email, pin }) }),
 

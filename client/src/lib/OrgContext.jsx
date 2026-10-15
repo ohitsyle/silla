@@ -1,44 +1,54 @@
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { api } from "./api.js";
 import { applyOrgTheme } from "../theme/applyOrgTheme.js";
 
 const OrgContext = createContext(null);
 
 /**
- * OrgProvider — fetches the organization's config once on boot and
- * makes it available app-wide, applying its branding as it loads
- * (spec §16). Every screen should read resource/member terminology
- * from here rather than hardcoding "seat" or "student".
+ * OrgProvider — the organization this page is serving, app-wide, with its
+ * branding applied (spec §16). Every screen should read resource/member
+ * terminology from here rather than hardcoding "seat" or "student".
  *
  * It is also the ONE place a page learns which organization it is
- * serving. Pages used to read VITE_DEMO_ORG_ID themselves, which welded
- * every build to a single customer; reading `organizationId` from here
- * lets the app shell decide (by the address it was opened at) and every
- * page follow.
+ * serving. Which one is decided before this mounts, by the address the
+ * app was opened at (App.jsx, lib/orgAddress.js): the config that boot
+ * resolved arrives as `initialOrg`, so nothing renders until the
+ * organization is known and its colours are already on the page.
  *
  * `entitlements` is what the organization's plan allows, as the server
  * reports it. The server enforces every limit itself — this copy only
  * exists so a screen can explain a limit BEFORE someone hits it, instead
- * of offering a button that fails.
+ * of offering a button that fails. `reload()` fetches the config again,
+ * for the moments it is known to be stale.
  */
-export function OrgProvider({ organizationId, children }) {
-  const [org, setOrg] = useState(null);
-  const [error, setError] = useState(null);
+export function OrgProvider({ initialOrg, children }) {
+  const [org, setOrg] = useState(initialOrg);
+  const organizationId = String(initialOrg._id);
 
-  useEffect(() => {
-    if (!organizationId) return;
-    api
-      .getOrgConfig(organizationId)
-      .then((data) => {
-        setOrg(data);
-        applyOrgTheme(data);
-      })
-      .catch((err) => setError(err.message));
+  const reload = useCallback(async () => {
+    try {
+      const fresh = await api.getOrgConfig(organizationId);
+      setOrg(fresh);
+      applyOrgTheme(fresh);
+      return fresh;
+    } catch {
+      // Keep what we have: a failed refresh must not blank a working page.
+      return null;
+    }
   }, [organizationId]);
 
   const value = useMemo(
-    () => ({ org, error, organizationId, entitlements: entitlementsOf(org) }),
-    [org, error, organizationId]
+    () => ({
+      org,
+      // Kept for the pages that still check it. A config that fails to load
+      // is now handled before the app mounts (the boot screens in App.jsx).
+      error: null,
+      organizationId,
+      slug: org?.slug || null,
+      entitlements: entitlementsOf(org),
+      reload,
+    }),
+    [org, organizationId, reload]
   );
 
   return <OrgContext.Provider value={value}>{children}</OrgContext.Provider>;
