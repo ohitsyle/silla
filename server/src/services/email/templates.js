@@ -22,11 +22,20 @@ const resourceNoun = (org) => org?.terminology?.resourceNoun || "resource";
  * when set, otherwise the first allowed CORS origin — which is that same
  * client, since it is the only thing permitted to call this API. With
  * neither, the message simply has no button.
+ *
+ * One client serves every organization, told apart by the first path
+ * segment (<client>/<slug>/map — docs/control-plane.md §1), so every link
+ * carries the organization's slug. A bare /map would land a member of one
+ * organization on the DEFAULT organization's sign-in page. An organization
+ * that has no slug yet (before `npm run migrate:slugs`) keeps the old
+ * unprefixed links, which still reach it while it is the default.
  */
-const appUrl = (path = "") => {
+export const organizationUrl = (org, path = "") => {
   const base = (process.env.APP_URL || (process.env.CORS_ORIGINS || "").split(",")[0] || "").trim().replace(/\/+$/, "");
-  return base ? `${base}${path}` : null;
+  if (!base) return null;
+  return `${base}${org?.slug ? `/${encodeURIComponent(org.slug)}` : ""}${path}`;
 };
+const appUrl = (org, path) => organizationUrl(org, path);
 
 const day = (date) => new Date(date).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
 const time = (date) => new Date(date).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
@@ -71,7 +80,7 @@ export function reservationConfirmedEmail({ org, user, reservation, resourceLabe
       details([[capitalise(noun), resourceLabel], ...span(reservation.startTime, reservation.endTime)]),
       p(`Tap your card at the kiosk within ${grace} minutes of the start time to check in.`),
       note(`If you don't check in by then, the ${noun} is released for someone else.`, "warning"),
-      appUrl("/map") ? button("View the map", appUrl("/map")) : null,
+      appUrl(org, "/map") ? button("View the map", appUrl(org, "/map")) : null,
     ].filter(Boolean),
     reason: `because you reserved a ${noun} at ${org.name}`,
   });
@@ -125,7 +134,7 @@ export function noShowReleasedEmail({ org, user, reservation, resourceLabel }) {
       p(`Your ${noun} wasn't checked in within the grace period, so it was released for someone else.`),
       details([[capitalise(noun), resourceLabel], ...span(reservation.startTime, reservation.endTime)]),
       p("You can book again at any time."),
-      appUrl("/map") ? button("Book again", appUrl("/map")) : null,
+      appUrl(org, "/map") ? button("Book again", appUrl(org, "/map")) : null,
     ].filter(Boolean),
     reason: `because a reservation at ${org.name} was not checked in`,
   });
@@ -180,7 +189,7 @@ export function staffOnboardingEmail({ org, user, temporaryPin }) {
       details([["Sign in with", user.email]]),
       code(temporaryPin, "Temporary PIN"),
       p("You'll set your own 6-digit PIN and accept the terms of use the first time you sign in."),
-      appUrl("/login") ? button("Sign in", appUrl("/login")) : null,
+      appUrl(org, "/login") ? button("Sign in", appUrl(org, "/login")) : null,
       note(`Weren't expecting this? Tell ${org.name} before signing in.`),
     ].filter(Boolean),
     reason: `because an administrator at ${org.name} created an account for you`,
@@ -228,6 +237,46 @@ export function founderWelcomeEmail({ org, user, temporaryPin, deploymentUrl }) 
         note("If you did not expect this email, tell us before signing in.", "warning"),
       ].filter(Boolean),
       reason: `because a SILLA deployment was provisioned for ${org.name}`,
+    },
+    SILLA_BRAND
+  );
+}
+
+/**
+ * SILLA support re-issued a superadmin's access — the control plane's
+ * owner-access reset (POST /api/internal/organizations/:id/owner-access),
+ * used when the founder never received their welcome or lost their PIN
+ * and has nobody inside the organization who can reset it.
+ *
+ * SILLA-branded like founderWelcomeEmail, because SILLA is the one
+ * speaking: the organization did not do this, its vendor did, and a
+ * message dressed as the organization would put words in its mouth.
+ * The old PIN has already stopped working by the time this is read, and
+ * the "wasn't you" line matters more than usual — an access reset nobody
+ * asked for is exactly what a takeover attempt looks like.
+ */
+export function ownerAccessResetEmail({ org, user, temporaryPin, deploymentUrl }) {
+  return build(
+    org,
+    user.email,
+    `Your ${org.name} access was reset`,
+    {
+      preheader: "Sign in with the temporary PIN inside, then choose your own.",
+      eyebrow: "Access reset",
+      title: "Your access was reset",
+      greeting: `Hi ${user.firstName},`,
+      blocks: [
+        p(`SILLA support has reset the PIN for your superadmin account at ${org.name}. Your previous PIN no longer works.`),
+        details([
+          ["Sign in at", deploymentUrl || null],
+          ["Your email", user.email],
+        ]),
+        code(temporaryPin, "Temporary PIN"),
+        p("You'll choose a new 6-digit PIN as soon as you sign in. Nobody at SILLA can see the PIN you choose."),
+        deploymentUrl ? button(`Open ${org.name}`, deploymentUrl) : null,
+        note("Didn't ask SILLA to reset your access? Tell us right away, and don't sign in with this PIN.", "warning"),
+      ].filter(Boolean),
+      reason: `because SILLA support reset access to ${org.name} for this address`,
     },
     SILLA_BRAND
   );

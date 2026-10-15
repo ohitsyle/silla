@@ -72,9 +72,14 @@ export function rateLimit({ windowMs, max, name, keyFor }) {
   };
 }
 
+/**
+ * The caller's address. req.ip is only the VISITOR's because app.js tells
+ * Express how many proxies sit in front of it (TRUST_PROXY_HOPS: CloudFront
+ * and nginx in production). Before that was set, every request behind the
+ * proxy was 127.0.0.1, and each limiter below keyed "per IP" was really one
+ * bucket shared by everybody. The fallbacks keep a bare dev setup working.
+ */
 function clientIp(req) {
-  // req.ip honours trust proxy when it's configured; the fallbacks keep
-  // this working in a bare dev setup.
   return req.ip || req.socket?.remoteAddress || "unknown";
 }
 
@@ -89,8 +94,26 @@ export const loginRateLimit = rateLimit({
   keyFor: (req) => `${clientIp(req)}|${String(req.body?.email || "").toLowerCase()}`,
 });
 
-/** Kiosk taps are frequent and low-risk, but shouldn't be a free UID oracle. */
-export const tapRateLimit = rateLimit({ name: "tap", windowMs: 60 * 1000, max: 30 });
+/**
+ * Kiosk taps are frequent and low-risk, but shouldn't be a free UID oracle.
+ *
+ * Keyed by address AND organization: one product now serves many
+ * organizations, and two of them behind one network (a campus, a shared
+ * office building) must not spend each other's allowance. Card UIDs are
+ * resolved per organization, so an oracle is per organization too and the
+ * protection per organization is unchanged.
+ */
+export const tapRateLimit = rateLimit({
+  name: "tap",
+  windowMs: 60 * 1000,
+  max: 30,
+  // Only a well-formed id gets its own bucket, so junk values cannot be
+  // used to mint fresh ones.
+  keyFor: (req) => {
+    const org = String(req.body?.organizationId || "");
+    return `${clientIp(req)}|${/^[a-f0-9]{24}$/i.test(org) ? org.toLowerCase() : "-"}`;
+  },
+});
 
 /**
  * Registration creates records, but the limit must not fight the actual

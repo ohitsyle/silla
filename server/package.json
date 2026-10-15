@@ -14,6 +14,7 @@
     "seed": "node src/scripts/seed.js",
     "seed:file": "node src/scripts/seed.js --file",
     "seed:layout": "node src/scripts/seedLayout.js",
+    "migrate:slugs": "node src/scripts/migrateSlugs.js",
     "spike:rfid": "node src/scripts/rfidSpike.js",
     "profile": "node src/scripts/applyProfile.js",
     "test": "node tests/run.mjs",

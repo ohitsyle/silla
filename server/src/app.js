@@ -13,12 +13,49 @@ import internalRoutes from "./routes/internal.routes.js";
 import { keepRawBody } from "./lib/controlPlane.js";
 import { operationalGuard, respondToEntitlementError } from "./services/entitlements.js";
 
+/**
+ * How many proxies stand between a visitor and this process — and so how
+ * far back along X-Forwarded-For the visitor's own address is.
+ *
+ * In production a request passes CloudFront, then nginx on the box:
+ *
+ *   visitor ──► CloudFront ──► nginx ──► this process
+ *
+ * CloudFront appends the address it saw (the visitor's) to
+ * X-Forwarded-For and nginx appends CloudFront's. Trusting exactly those
+ * two hops makes req.ip the visitor, which is what every per-IP rate
+ * limit keys on. Without it every request arrived from nginx's 127.0.0.1,
+ * so each per-IP limit was one bucket shared by the whole world — thirty
+ * kiosk taps a minute across every organization.
+ *
+ * Exactly two, never "trust everything": anything further left in the
+ * header was written by the visitor and is whatever they like. That only
+ * holds if nobody can reach nginx WITHOUT passing CloudFront, which is why
+ * the origin's port 80 belongs behind CloudFront's origin-facing prefix
+ * list (docs/INF-5-aws-deployment.md).
+ *
+ * TRUST_PROXY_HOPS overrides it; 0 means "no proxy", for a process that
+ * takes requests directly.
+ */
+function trustedProxyHops() {
+  const raw = process.env.TRUST_PROXY_HOPS;
+  if (raw === undefined || raw.trim() === "") return 2;
+  const hops = Number(raw);
+  return Number.isInteger(hops) && hops >= 0 ? hops : 2;
+}
+
 export function createApp() {
   const app = express();
+  app.set("trust proxy", trustedProxyHops());
 
   const allowedOrigins = (process.env.CORS_ORIGINS || "").split(",").filter(Boolean);
   app.use(cors({ origin: allowedOrigins.length ? allowedOrigins : true }));
   // keepRawBody: control-plane signatures cover the exact bytes sent.
+  // A provisioning profile carries a whole building's layout, which can
+  // outgrow the 100kb default; the larger limit applies to the signed
+  // internal API only, never to the public endpoints. (The second parser
+  // skips a body the first has already read.)
+  app.use("/api/internal", express.json({ limit: "2mb", verify: keepRawBody }));
   app.use(express.json({ verify: keepRawBody }));
 
   app.get("/api/health", (req, res) =>
@@ -55,6 +92,10 @@ export function createApp() {
     // Plan limits, withheld features and suspension carry their own
     // status and a message written for the person who hit them.
     if (respondToEntitlementError(err, res)) return;
+    // A body that is not JSON, or is too large, is the caller's mistake
+    // and deserves a 4xx that says so, not a 500 and a stack in the log.
+    if (err?.type === "entity.parse.failed") return res.status(400).json({ error: "The request body isn't valid JSON." });
+    if (err?.type === "entity.too.large") return res.status(413).json({ error: "The request body is too large." });
     console.error("[api]", err);
     res.status(500).json({ error: "Internal server error" });
   });

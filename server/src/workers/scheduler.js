@@ -6,6 +6,7 @@ import Resource from "../models/Resource.js";
 import Floor from "../models/Floor.js";
 import Closure from "../models/Closure.js";
 import { syncUnitStatus } from "../services/reservations/index.js";
+import { hasFeature } from "../services/entitlements.js";
 import { sendEmail } from "../services/email/index.js";
 import {
   closureCancelledEmail,
@@ -232,6 +233,11 @@ export async function sendStartingSoonReminders() {
 
   for (const reservation of upcoming) {
     const org = await loadOrg(reservation.organization);
+    // Reminder emails are a plan feature (emailReminders). Skipped WITHOUT
+    // setting remindedAt: the flag records a reminder that was sent, and
+    // an organization that gains the feature inside the lead window
+    // should still get this one out before the reservation starts.
+    if (org && !hasFeature(org, "emailReminders")) continue;
     const member = await User.findById(reservation.member);
     if (member && org) {
       sendEmail(
