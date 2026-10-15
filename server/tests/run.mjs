@@ -16,6 +16,9 @@ const suites = [
   await import("./reservations.test.mjs"),
   await import("./permissions.test.mjs"),
   await import("./admin.test.mjs"),
+  // The control plane, provisioning, plans and tenancy. Last, so the
+  // plans it pushes can never be mistaken for the demo organization's.
+  await import("./platform.test.mjs"),
 ];
 
 const filter = process.argv[2]?.toLowerCase();

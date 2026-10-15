@@ -16,10 +16,32 @@ import {
   isDuplicateTap,
 } from "../services/reservations/occupancy.js";
 import { ReservationError } from "../services/reservations/index.js";
+import { EntitlementError, assertWithinLimit, requireFeature } from "../services/entitlements.js";
 
 const router = Router();
 
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+/**
+ * Whether a card that is not yet registered could register right now.
+ *
+ * Asked at the TAP, so the kiosk can say "registration is closed" before
+ * someone types their name, ID, email and PIN into a form the server
+ * would then refuse. /registration/start still enforces both rules on its
+ * own — this is the explanation, not the control.
+ */
+async function registrationAvailability(organizationId) {
+  const org = await Organization.findById(organizationId).select("name identity entitlements terminology").lean();
+  if (!org) return { open: false, code: "ORG_NOT_FOUND" };
+  if (org.identity?.selfServiceRegistration === false) return { open: false, code: "REGISTRATION_DISABLED" };
+  try {
+    await assertWithinLimit({ ...org, entitlements: org.entitlements || {} }, "members");
+  } catch (err) {
+    if (err instanceof EntitlementError && err.code === "PLAN_LIMIT") return { open: false, code: "PLAN_LIMIT" };
+    throw err;
+  }
+  return { open: true };
+}
 
 /**
  * POST /api/checkin/tap
@@ -36,10 +58,15 @@ const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, ne
  *   pending      -> resume verification (ID-2)
  *   member       -> Sprint 2 hands off to the reservation/walk-in flow
  *   inactive     -> refer to staff
+ *
+ * The kiosk is a plan feature: without `kiosk` this answers PLAN_FEATURE
+ * before any credential is resolved, and a suspended organization is
+ * refused by app.js's read-only guard (a tap checks people in and out).
  */
 router.post(
   "/tap",
   tapRateLimit,
+  requireFeature("kiosk"),
   asyncHandler(async (req, res) => {
     const { organizationId, method = "rfid", credential } = req.body || {};
     if (!organizationId || !mongoose.isValidObjectId(organizationId)) {
@@ -51,7 +78,7 @@ router.post(
     const base = { outcome: result.outcome, method: result.method, cardUid: result.cardUid };
 
     if (result.outcome === OUTCOME.UNREGISTERED) {
-      return res.json({ ...base, next: "register" });
+      return res.json({ ...base, next: "register", registration: await registrationAvailability(organizationId) });
     }
 
     if (result.outcome === OUTCOME.PENDING) {
@@ -149,6 +176,7 @@ router.post(
 router.post(
   "/walkin",
   tapRateLimit,
+  requireFeature("kiosk"),
   asyncHandler(async (req, res) => {
     const { organizationId, method = "rfid", credential, resourceId, unitLabel } = req.body || {};
     if (!organizationId || !mongoose.isValidObjectId(organizationId)) {

@@ -21,6 +21,7 @@ import {
   generateVerificationCode,
   memberIdExample,
 } from "../lib/identity.js";
+import { assertFeature, assertOperational, assertWithinLimit } from "../services/entitlements.js";
 
 const router = Router();
 
@@ -90,6 +91,11 @@ router.post(
       return res.status(403).json({ error: "Self-service registration is disabled for this organization." });
     }
 
+    // Kiosk self-registration is a plan feature (PLAN_FEATURE). Refused
+    // before anything is read from the form, so nobody's details are
+    // half-processed for a registration that cannot happen.
+    await assertFeature(org, "kiosk");
+
     if (!firstName?.trim() || !lastName?.trim()) {
       return res.status(400).json({ error: "First and last name are required." });
     }
@@ -128,6 +134,12 @@ router.post(
         });
       }
     }
+
+    // The plan's member cap (PLAN_LIMIT), immediately before the create —
+    // after an expired pending registration has been reclaimed above, so
+    // a walked-away sign-up is not what stops the next person. A pending
+    // account counts while it is pending: it holds its card and email.
+    await assertWithinLimit(org, "members");
 
     const expiryMinutes = org.policy?.verificationCodeExpiryMinutes ?? 10;
     const code = generateVerificationCode();
@@ -201,6 +213,13 @@ router.post(
     if (!user) return res.status(404).json({ error: "Registration not found." });
     if (user.verified) return res.json({ ok: true, alreadyVerified: true });
 
+    // These two carry no organizationId, so app.js's read-only guard
+    // cannot see whose they are. Finishing a registration is a change, and
+    // a paused organization takes none; nor does one whose plan no longer
+    // includes the kiosk.
+    await assertOperational(user.organization);
+    await assertFeature(user.organization, "kiosk");
+
     if (!user.verificationExpiresAt || user.verificationExpiresAt < new Date()) {
       // Expired: discard the pending account outright rather than
       // leaving a half-registered record holding a card UID hostage.
@@ -265,6 +284,10 @@ router.post(
     if (user.verified) return res.status(409).json({ error: "This account is already verified." });
 
     const org = await Organization.findById(user.organization);
+    // Same reasoning as /verify: no organizationId in the body, so the
+    // read-only guard has to be applied here by hand.
+    await assertOperational(org || user.organization);
+    await assertFeature(org || user.organization, "kiosk");
     const expiryMinutes = org?.policy?.verificationCodeExpiryMinutes ?? 10;
     const code = generateVerificationCode();
 
