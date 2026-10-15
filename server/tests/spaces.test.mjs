@@ -7,6 +7,8 @@
  *                                              with preview data (docs/spatial-map.md)
  *   npm run test:spaces -- --serve --managed   the same, with the preview organization
  *                                              on a limited plan, to see the limits
+ *   npm run test:spaces -- --serve --port=4011 the same on another port, when another
+ *                                              worktree's preview already holds 4010
  *
  * It runs on a DISPOSABLE replica set: it never reads .env and never
  * touches Atlas. A replica set rather than a standalone server because the
@@ -27,6 +29,8 @@ process.env.JWT_SECRET = "isolated-space-tests-only";
 process.env.NODE_ENV = "test";
 
 const SERVE = process.argv.includes("--serve");
+/** The preview API's port: 4010 unless --port=<n> says otherwise. */
+const PREVIEW_PORT = Number(process.argv.find((arg) => arg.startsWith("--port="))?.slice("--port=".length)) || 4010;
 /** The fixed id the browser preview's VITE_DEMO_ORG_ID points at. */
 const PREVIEW_ORG_ID = "6abd97aca6022143a42a51d7";
 
@@ -161,7 +165,7 @@ try {
 
   const app = createApp();
   server = await new Promise((resolve) => {
-    const listening = app.listen(SERVE ? 4010 : 0, "127.0.0.1", () => resolve(listening));
+    const listening = app.listen(SERVE ? PREVIEW_PORT : 0, "127.0.0.1", () => resolve(listening));
   });
   io = new Server(server, { cors: { origin: true } });
   app.set("io", io);
@@ -986,7 +990,7 @@ try {
     }
 
     scheduler = startScheduler(io);
-    console.log("PREVIEW_ORG=" + org._id + " API=http://localhost:4010");
+    console.log("PREVIEW_ORG=" + org._id + " API=http://localhost:" + PREVIEW_PORT);
     await new Promise((resolve) => {
       process.on("SIGINT", resolve);
       process.on("SIGTERM", resolve);
