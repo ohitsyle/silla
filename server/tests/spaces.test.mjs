@@ -621,6 +621,12 @@ try {
       levels: [{ floorId: workshop.id, bounds: { col: 1, row: 1, w: 9, h: 7 } }],
     }, 201);
 
+    // Floors from before buildings existed, at a second site — what the
+    // editor's "Set up building" path is for.
+    const annex = await Site.create({ organization: org._id, name: "South annex" });
+    const annexFloor = await Floor.create({ site: annex._id, name: "Annex ground", grid: { cols: 16, rows: 10 } });
+    for (const col of [2, 5, 8]) await place(annexFloor._id, "desk", col, 4);
+
     // Somebody at a desk, a desk held for now, and one closed by staff.
     // member0 is left free, to explore and book.
     await clearOfMidnight();

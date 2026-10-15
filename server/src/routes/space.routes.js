@@ -1,174 +1,381 @@
+/**
+ * Buildings and rooms — the structural half of the map (INF-1, MAP-3).
+ * Floors are in floor.routes.js; furniture, zones and labels in
+ * resource.routes.js.
+ *
+ *   GET    /api/spaces?organizationId=          the hierarchy, buildings → floors → rooms
+ *   POST   /api/spaces/buildings                create one, optionally adopting loose floors   superadmin
+ *   PATCH  /api/spaces/buildings/:id            rename                                         superadmin
+ *   DELETE /api/spaces/buildings/:id            remove an empty one                            superadmin
+ *   POST   /api/spaces/rooms                    draw a room and choose its booking mode        superadmin
+ *   PATCH  /api/spaces/rooms/:id                rename, change mode, redraw levels             superadmin
+ *   DELETE /api/spaces/rooms/:id                remove; furniture and history stay             superadmin
+ *   PATCH  /api/spaces/rooms/:id/availability   close or reopen                                staff
+ *
+ * Every write runs inside withSpaceTransaction (services/spaces.js), the
+ * same guard the reservation engine uses, so a room can never be redrawn
+ * around a booking that is being made at the same moment.
+ *
+ * Staff OPERATE the space — they close and reopen rooms. Only a superadmin
+ * DEFINES it: buildings, boundaries and booking modes.
+ */
 import { Router } from "express";
 import mongoose from "mongoose";
 import Building from "../models/Building.js";
-import Room from "../models/Room.js";
-import Site from "../models/Site.js";
 import Floor from "../models/Floor.js";
+import Reservation from "../models/Reservation.js";
 import Resource from "../models/Resource.js";
 import ResourceType from "../models/ResourceType.js";
-import Reservation from "../models/Reservation.js";
+import Room from "../models/Room.js";
+import Site from "../models/Site.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
-import { SpaceError, withSpaceTransaction, shapeRoom, roomContents, contains, intersects, pieceBounds } from "../services/spaces.js";
 import { LIVE_STATUSES } from "../services/reservations/availability.js";
-import { syncUnitStatus } from "../services/reservations/index.js";
+import { announceUnitStatus } from "../services/reservations/index.js";
+import {
+  SpaceError, contains, intersects, pieceBounds, roomContents, shapeRoom, withSpaceTransaction,
+} from "../services/spaces.js";
 
 const router = Router();
-const run = (fn) => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
-const validId = (id) => typeof id === "string" && /^[a-f0-9]{24}$/i.test(id);
-const nameOf = (value) => typeof value === "string" ? value.trim().slice(0, 120) : "";
-const modes = ["individual", "whole", "either"];
+const run = (handler) => (req, res, next) => Promise.resolve(handler(req, res)).catch(next);
+const superadmin = [requireAuth, requireRole("superadmin")];
 
-// MAP-1 / INF-1: stable ids preserve deep links. Legacy floors are read in an
-// unassigned building until a superadmin adopts them; this GET never migrates data.
+const validId = (id) => typeof id === "string" && /^[a-f0-9]{24}$/i.test(id);
+const nameOf = (value) => (typeof value === "string" ? value.trim().slice(0, 120) : "");
+
+const BOOKING_MODES = ["individual", "whole", "either"];
+
+/** A room may span at most this many floors of its building. */
+const MAX_LEVELS = 30;
+
+/* ───────────────────────────── the hierarchy ───────────────────────────── */
+
+/**
+ * MAP-1 / INF-1. Ids are stable, so deep links into the map survive.
+ *
+ * Floors created before buildings existed have none. They are shown under
+ * an "unassigned" building named after their site — "needs setup" in the
+ * editor — until a superadmin adopts them. This read never migrates
+ * anything: adoption is an explicit action (POST /buildings with
+ * adoptExisting), so nothing moves without someone choosing it.
+ */
 router.get("/", run(async (req, res) => {
-  const orgId = req.query.organizationId;
-  if (!validId(orgId)) throw new SpaceError("A valid organizationId is required");
-  const sites = await Site.find({ organization: orgId }).sort({ createdAt: 1 }).lean();
-  const buildings = await Building.find({ organization: orgId }).sort({ order: 1, name: 1 }).lean();
-  const floors = await Floor.find({ site: { $in: sites.map((s) => s._id) } }).sort({ order: 1, name: 1 }).lean();
-  const rooms = await Room.find({ organization: orgId }).sort({ name: 1 });
-  res.json({ sites: sites.map((s) => ({ id: String(s._id), name: s.name })), buildings: sites.flatMap((site) => {
-    const assigned = buildings.filter((b) => String(b.site) === String(site._id));
-    const legacy = floors.filter((f) => String(f.site) === String(site._id) && !f.building);
-    return [...assigned, ...(legacy.length ? [{ _id: "unassigned:" + site._id, site: site._id, name: site.name, unassigned: true }] : [])].map((b) => ({
-      id: String(b._id), name: b.name, siteId: String(site._id), siteName: site.name, unassigned: Boolean(b.unassigned),
-      floors: (b.unassigned ? legacy : floors.filter((f) => String(f.building) === String(b._id))).map((f) => ({
-        id: String(f._id), name: f.name, order: f.order, grid: f.grid,
-        rooms: rooms.filter((r) => r.levels.some((l) => String(l.floor) === String(f._id))).map(shapeRoom),
-      })),
-    }));
-  }) });
+  const organizationId = req.query.organizationId;
+  if (!validId(organizationId)) throw new SpaceError("A valid organizationId is required");
+
+  const sites = await Site.find({ organization: organizationId }).sort({ createdAt: 1 }).lean();
+  const buildings = await Building.find({ organization: organizationId }).sort({ order: 1, name: 1 }).lean();
+  const floors = await Floor.find({ site: { $in: sites.map((site) => site._id) } }).sort({ order: 1, name: 1 }).lean();
+  const rooms = await Room.find({ organization: organizationId }).sort({ name: 1 });
+
+  const shapeFloor = (floor) => ({
+    id: String(floor._id),
+    name: floor.name,
+    order: floor.order,
+    grid: floor.grid,
+    rooms: rooms
+      .filter((room) => room.levels.some((level) => String(level.floor) === String(floor._id)))
+      .map(shapeRoom),
+  });
+
+  const shaped = sites.flatMap((site) => {
+    const onSite = (doc) => String(doc.site) === String(site._id);
+    const shapeBuilding = (building, buildingFloors, unassigned = false) => ({
+      id: String(building._id),
+      name: building.name,
+      siteId: String(site._id),
+      siteName: site.name,
+      unassigned,
+      floors: buildingFloors.map(shapeFloor),
+    });
+
+    const assigned = buildings
+      .filter(onSite)
+      .map((building) => shapeBuilding(building, floors.filter((floor) => String(floor.building) === String(building._id))));
+    const loose = floors.filter((floor) => onSite(floor) && !floor.building);
+    if (loose.length) {
+      assigned.push(shapeBuilding({ _id: `unassigned:${site._id}`, name: site.name }, loose, true));
+    }
+    return assigned;
+  });
+
+  res.json({ sites: sites.map((site) => ({ id: String(site._id), name: site.name })), buildings: shaped });
 }));
 
-router.post("/buildings", requireAuth, requireRole("superadmin"), run(async (req, res) => {
+/* ─────────────────────────────── buildings ─────────────────────────────── */
+
+/**
+ * Body: { name, siteId?, adoptExisting? }. With adoptExisting, the site's
+ * floors that have no building move into this one — keeping their ids,
+ * furniture, zones, labels and booking history.
+ */
+router.post("/buildings", ...superadmin, run(async (req, res) => {
   const name = nameOf(req.body?.name);
   if (!name) throw new SpaceError("Give this building a name.");
+  if (req.body.siteId && !validId(req.body.siteId)) throw new SpaceError("A valid siteId is required");
+
   const building = await withSpaceTransaction(req.user.organizationId, async (session) => {
-    const query = { organization: req.user.organizationId };
-    if (req.body.siteId) {
-      if (!validId(req.body.siteId)) throw new SpaceError("A valid siteId is required");
-      query._id = req.body.siteId;
-    }
-    const site = await Site.findOne(query).session(session);
+    const site = await Site.findOne({
+      organization: req.user.organizationId,
+      ...(req.body.siteId ? { _id: req.body.siteId } : {}),
+    }).session(session);
     if (!site) throw new SpaceError("Site not found", 404);
-    const [b] = await Building.create([{ organization: req.user.organizationId, site: site._id, name }], { session });
-    if (req.body.adoptExisting === true) await Floor.updateMany({ site: site._id, building: null }, { $set: { building: b._id } }, { session });
-    return b;
+
+    const [created] = await Building.create([{ organization: req.user.organizationId, site: site._id, name }], { session });
+    if (req.body.adoptExisting === true) {
+      await Floor.updateMany({ site: site._id, building: null }, { $set: { building: created._id } }, { session });
+    }
+    return created;
   });
   res.status(201).json({ building: { id: String(building._id), name: building.name } });
 }));
-router.patch("/buildings/:id", requireAuth, requireRole("superadmin"), run(async (req, res) => {
+
+router.patch("/buildings/:id", ...superadmin, run(async (req, res) => {
   if (!validId(req.params.id)) throw new SpaceError("Invalid building id");
   const name = nameOf(req.body?.name);
   if (!name) throw new SpaceError("Give this building a name.");
-  const b = await Building.findOneAndUpdate({ _id: req.params.id, organization: req.user.organizationId }, { name }, { new: true, runValidators: true });
-  if (!b) throw new SpaceError("Building not found", 404);
-  res.json({ building: { id: String(b._id), name: b.name } });
+  const building = await Building.findOneAndUpdate(
+    { _id: req.params.id, organization: req.user.organizationId },
+    { name },
+    { new: true, runValidators: true }
+  );
+  if (!building) throw new SpaceError("Building not found", 404);
+  res.json({ building: { id: String(building._id), name: building.name } });
 }));
-router.delete("/buildings/:id", requireAuth, requireRole("superadmin"), run(async (req, res) => {
+
+router.delete("/buildings/:id", ...superadmin, run(async (req, res) => {
   if (!validId(req.params.id)) throw new SpaceError("Invalid building id");
   await withSpaceTransaction(req.user.organizationId, async (session) => {
-    const b = await Building.findOne({ _id: req.params.id, organization: req.user.organizationId }).session(session);
-    if (!b) throw new SpaceError("Building not found", 404);
-    if (await Floor.exists({ building: b._id }).session(session)) throw new SpaceError("Remove this building's floors first.", 409);
-    await b.deleteOne({ session });
+    const building = await Building.findOne({ _id: req.params.id, organization: req.user.organizationId }).session(session);
+    if (!building) throw new SpaceError("Building not found", 404);
+    if (await Floor.exists({ building: building._id }).session(session)) {
+      throw new SpaceError("Remove this building's floors first.", 409);
+    }
+    await building.deleteOne({ session });
   });
   res.json({ ok: true });
 }));
 
-async function validateLevels(input, building, excludeId, session) {
-  if (!Array.isArray(input) || !input.length || input.length > 30) throw new SpaceError("A room needs between 1 and 30 levels.");
+/* ───────────────────────────────── rooms ───────────────────────────────── */
+
+/**
+ * Checks a room's proposed levels and returns them ready to store.
+ *
+ * Each level is a rectangle of whole cells on a different floor of the
+ * room's own building. It must fit the floor, must not overlap another
+ * room on that floor, and must not cut through a placed piece — a piece
+ * is either wholly inside a room or wholly outside it, which is what lets
+ * membership be derived from position instead of stored.
+ */
+async function validateLevels(input, building, excludeRoomId, session) {
+  if (!Array.isArray(input) || !input.length || input.length > MAX_LEVELS) {
+    throw new SpaceError(`A room needs between 1 and ${MAX_LEVELS} levels.`);
+  }
+
+  const otherRooms = await Room.find({
+    organization: building.organization,
+    ...(excludeRoomId ? { _id: { $ne: excludeRoomId } } : {}),
+  }).session(session);
+  const types = await ResourceType.find({ organization: building.organization }).session(session);
+  const typeById = new Map(types.map((type) => [String(type._id), type]));
+
   const seen = new Set();
   const levels = [];
-  const otherRooms = await Room.find({ organization: building.organization, ...(excludeId ? { _id: { $ne: excludeId } } : {}) }).session(session);
-  const types = await ResourceType.find({ organization: building.organization }).session(session);
-  const typeById = new Map(types.map((t) => [String(t._id), t]));
   for (const item of input) {
-    if (!validId(item?.floorId) || seen.has(item.floorId)) throw new SpaceError("Choose a different building floor for each level.");
+    if (!validId(item?.floorId) || seen.has(item.floorId)) {
+      throw new SpaceError("Choose a different building floor for each level.");
+    }
     seen.add(item.floorId);
+
     const floor = await Floor.findOne({ _id: item.floorId, building: building._id, site: building.site }).session(session);
     if (!floor) throw new SpaceError("Every room level must be on a floor in this building.", 404);
+
     const bounds = item.bounds;
-    if (!bounds || ![bounds.col, bounds.row, bounds.w, bounds.h].every(Number.isInteger) || bounds.col < 0 || bounds.row < 0 || bounds.w < 1 || bounds.h < 1) throw new SpaceError("Draw a room using whole grid cells.");
-    if (bounds.col + bounds.w > floor.grid.cols || bounds.row + bounds.h > floor.grid.rows) throw new SpaceError("That room extends beyond the floor.");
-    if (otherRooms.some((r) => r.levels.some((l) => String(l.floor) === item.floorId && intersects(l.bounds, bounds)))) throw new SpaceError("Rooms cannot overlap on the same floor.", 409);
-    const pieces = await Resource.find({ organization: building.organization, floor: floor._id, kind: { $ne: "room" } }).session(session);
-    for (const p of pieces) {
-      const rect = pieceBounds(p, typeById.get(String(p.resourceType)));
-      if (intersects(bounds, rect) && !contains(bounds, rect)) throw new SpaceError("A room boundary cuts through a placed item. Include the entire item or move the boundary.", 409);
+    const wholeCells = bounds && [bounds.col, bounds.row, bounds.w, bounds.h].every(Number.isInteger);
+    if (!wholeCells || bounds.col < 0 || bounds.row < 0 || bounds.w < 1 || bounds.h < 1) {
+      throw new SpaceError("Draw a room using whole grid cells.");
     }
-    levels.push({ floor: floor._id, name: nameOf(item.name).slice(0, 80), bounds: { col: bounds.col, row: bounds.row, w: bounds.w, h: bounds.h } });
+    if (bounds.col + bounds.w > floor.grid.cols || bounds.row + bounds.h > floor.grid.rows) {
+      throw new SpaceError("That room extends beyond the floor.");
+    }
+    const overlapping = otherRooms.some((room) =>
+      room.levels.some((level) => String(level.floor) === item.floorId && intersects(level.bounds, bounds))
+    );
+    if (overlapping) throw new SpaceError("Rooms cannot overlap on the same floor.", 409);
+
+    const pieces = await Resource.find({ organization: building.organization, floor: floor._id, kind: { $ne: "room" } })
+      .session(session);
+    for (const piece of pieces) {
+      const footprint = pieceBounds(piece, typeById.get(String(piece.resourceType)));
+      if (intersects(bounds, footprint) && !contains(bounds, footprint)) {
+        throw new SpaceError(
+          "A room boundary cuts through a placed item. Include the entire item or move the boundary.",
+          409
+        );
+      }
+    }
+
+    levels.push({
+      floor: floor._id,
+      name: nameOf(item.name).slice(0, 80),
+      bounds: { col: bounds.col, row: bounds.row, w: bounds.w, h: bounds.h },
+    });
   }
   return levels;
 }
+
+/**
+ * Refuses a change while the room, or anything inside it, has a live
+ * booking. Redrawing a room under a booking would silently change what
+ * that booking covers; better to ask for it to be cancelled first.
+ */
 async function assertNoBookings(room, session) {
   const contents = await roomContents(room, session);
-  if (await Reservation.exists({ resource: { $in: [room.resource, ...contents.map((p) => p._id)] }, status: { $in: LIVE_STATUSES } }).session(session)) throw new SpaceError("This room or an item inside has an active or upcoming reservation. Cancel it before changing the room.", 409);
+  const booked = await Reservation.exists({
+    resource: { $in: [room.resource, ...contents.map((piece) => piece._id)] },
+    status: { $in: LIVE_STATUSES },
+  }).session(session);
+  if (booked) {
+    throw new SpaceError(
+      "This room or an item inside has an active or upcoming reservation. Cancel it before changing the room.",
+      409
+    );
+  }
 }
 
-router.post("/rooms", requireAuth, requireRole("superadmin"), run(async (req, res) => {
+/**
+ * The internal catalog type every room's booking target uses. Hidden
+ * from the catalog (internal) and never drawn as furniture; created the
+ * first time an organization draws a room.
+ */
+async function roomTargetType(organizationId, session) {
+  const existing = await ResourceType.findOne({ organization: organizationId, key: "__room" }).session(session);
+  if (existing) return existing;
+  const [created] = await ResourceType.create(
+    [{
+      organization: organizationId, key: "__room", label: "Room", footprint: { w: 1, h: 1 },
+      seatCount: 1, internal: true, icon: "DoorOpen",
+    }],
+    { session }
+  );
+  return created;
+}
+
+/**
+ * Body: { name, buildingId, bookingMode, levels: [{ floorId, name?, bounds }] }.
+ *
+ * A room is two documents: the Room (its boundary and rules) and one
+ * internal Resource with a single unit, "room" — its booking target, so
+ * the existing reservation engine, check-in and workers handle whole-room
+ * bookings with no parallel lifecycle.
+ */
+router.post("/rooms", ...superadmin, run(async (req, res) => {
   const name = nameOf(req.body?.name);
   if (!name) throw new SpaceError("Give this room a name.");
   if (!validId(req.body.buildingId)) throw new SpaceError("Choose a building first.");
-  if (!modes.includes(req.body.bookingMode)) throw new SpaceError("Choose individual, whole, or either booking.");
-  const room = await withSpaceTransaction(req.user.organizationId, async (session) => {
-    const building = await Building.findOne({ _id: req.body.buildingId, organization: req.user.organizationId }).session(session);
+  if (!BOOKING_MODES.includes(req.body.bookingMode)) throw new SpaceError("Choose individual, whole, or either booking.");
+
+  const organizationId = req.user.organizationId;
+  const room = await withSpaceTransaction(organizationId, async (session) => {
+    const building = await Building.findOne({ _id: req.body.buildingId, organization: organizationId }).session(session);
     if (!building) throw new SpaceError("Building not found", 404);
+
     const levels = await validateLevels(req.body.levels, building, null, session);
-    const proposed = { organization: req.user.organizationId, levels, resource: new mongoose.Types.ObjectId() };
-    await assertNoBookings(proposed, session);
-    let type = await ResourceType.findOne({ organization: req.user.organizationId, key: "__room" }).session(session);
-    if (!type) [type] = await ResourceType.create([{ organization: req.user.organizationId, key: "__room", label: "Room", footprint: { w: 1, h: 1 }, seatCount: 1, internal: true, icon: "DoorOpen" }], { session });
+    // Furniture already inside the new boundary may have bookings of its own.
+    await assertNoBookings({ organization: organizationId, levels, resource: new mongoose.Types.ObjectId() }, session);
+
+    const type = await roomTargetType(organizationId, session);
     const roomId = new mongoose.Types.ObjectId();
-    const [resource] = await Resource.create([{ organization: req.user.organizationId, floor: levels[0].floor, resourceType: type._id, kind: "room", room: roomId, position: { col: levels[0].bounds.col, row: levels[0].bounds.row }, units: [{ label: "room" }] }], { session });
-    const [created] = await Room.create([{ _id: roomId, organization: req.user.organizationId, building: building._id, name, bookingMode: req.body.bookingMode, levels, resource: resource._id }], { session });
+    const [target] = await Resource.create(
+      [{
+        organization: organizationId, floor: levels[0].floor, resourceType: type._id, kind: "room", room: roomId,
+        position: { col: levels[0].bounds.col, row: levels[0].bounds.row }, units: [{ label: "room" }],
+      }],
+      { session }
+    );
+    const [created] = await Room.create(
+      [{
+        _id: roomId, organization: organizationId, building: building._id, name,
+        bookingMode: req.body.bookingMode, levels, resource: target._id,
+      }],
+      { session }
+    );
     return created;
   });
   res.status(201).json({ room: shapeRoom(room) });
 }));
-router.patch("/rooms/:id", requireAuth, requireRole("superadmin"), run(async (req, res) => {
+
+/** Body: any of { name, bookingMode, levels }. */
+router.patch("/rooms/:id", ...superadmin, run(async (req, res) => {
   if (!validId(req.params.id)) throw new SpaceError("Invalid room id");
-  const room = await withSpaceTransaction(req.user.organizationId, async (session) => {
-    const r = await Room.findOne({ _id: req.params.id, organization: req.user.organizationId }).session(session);
-    if (!r) throw new SpaceError("Room not found", 404);
-    await assertNoBookings(r, session);
-    if (req.body.name !== undefined) { r.name = nameOf(req.body.name); if (!r.name) throw new SpaceError("Give this room a name."); }
-    if (req.body.bookingMode !== undefined) { if (!modes.includes(req.body.bookingMode)) throw new SpaceError("Invalid booking mode"); r.bookingMode = req.body.bookingMode; }
-    if (req.body.levels !== undefined) {
-      const b = await Building.findOne({ _id: r.building, organization: req.user.organizationId }).session(session);
-      r.levels = await validateLevels(req.body.levels, b, r._id, session);
-      await assertNoBookings(r, session);
-      await Resource.updateOne({ _id: r.resource }, { floor: r.levels[0].floor, position: { col: r.levels[0].bounds.col, row: r.levels[0].bounds.row } }, { session });
+  const organizationId = req.user.organizationId;
+
+  const room = await withSpaceTransaction(organizationId, async (session) => {
+    const current = await Room.findOne({ _id: req.params.id, organization: organizationId }).session(session);
+    if (!current) throw new SpaceError("Room not found", 404);
+    await assertNoBookings(current, session);
+
+    if (req.body.name !== undefined) {
+      current.name = nameOf(req.body.name);
+      if (!current.name) throw new SpaceError("Give this room a name.");
     }
-    await r.save({ session });
-    return r;
+    if (req.body.bookingMode !== undefined) {
+      if (!BOOKING_MODES.includes(req.body.bookingMode)) throw new SpaceError("Invalid booking mode");
+      current.bookingMode = req.body.bookingMode;
+    }
+    if (req.body.levels !== undefined) {
+      const building = await Building.findOne({ _id: current.building, organization: organizationId }).session(session);
+      current.levels = await validateLevels(req.body.levels, building, current._id, session);
+      // The new boundary may take in furniture that is booked.
+      await assertNoBookings(current, session);
+      // The booking target sits on the first level, where the map anchors it.
+      await Resource.updateOne(
+        { _id: current.resource },
+        { floor: current.levels[0].floor, position: { col: current.levels[0].bounds.col, row: current.levels[0].bounds.row } },
+        { session }
+      );
+    }
+    await current.save({ session });
+    return current;
   });
   res.json({ room: shapeRoom(room) });
 }));
-router.delete("/rooms/:id", requireAuth, requireRole("superadmin"), run(async (req, res) => {
+
+/** The room's boundary and booking target go; its furniture and booking history stay. */
+router.delete("/rooms/:id", ...superadmin, run(async (req, res) => {
   if (!validId(req.params.id)) throw new SpaceError("Invalid room id");
   await withSpaceTransaction(req.user.organizationId, async (session) => {
-    const r = await Room.findOne({ _id: req.params.id, organization: req.user.organizationId }).session(session);
-    if (!r) throw new SpaceError("Room not found", 404);
-    await assertNoBookings(r, session);
-    await Resource.deleteOne({ _id: r.resource }, { session });
-    await r.deleteOne({ session });
-  });
-  res.json({ ok: true });
-}));
-// ADM-2: staff can close/reopen a room, but cannot redefine its booking boundary.
-router.patch("/rooms/:id/availability", requireAuth, requireRole("staff", "superadmin"), run(async (req, res) => {
-  if (!validId(req.params.id)) throw new SpaceError("Invalid room id");
-  if (!["available", "unavailable"].includes(req.body?.status)) throw new SpaceError("Choose available or unavailable.");
-  const r = await withSpaceTransaction(req.user.organizationId, async (session) => {
     const room = await Room.findOne({ _id: req.params.id, organization: req.user.organizationId }).session(session);
     if (!room) throw new SpaceError("Room not found", 404);
     await assertNoBookings(room, session);
-    await Resource.updateOne({ _id: room.resource }, { "units.0.status": req.body.status }, { session });
-    return room;
+    await Resource.deleteOne({ _id: room.resource }, { session });
+    await room.deleteOne({ session });
   });
-  await syncUnitStatus(r.resource, "room", { io: req.app.get("io") });
   res.json({ ok: true });
 }));
-router.use((err, req, res, next) => err instanceof SpaceError ? res.status(err.status).json({ error: err.message, code: err.code }) : next(err));
+
+/**
+ * ADM-2: staff close and reopen a room. Its boundary and booking mode are
+ * the superadmin's; whether it is open today is operations.
+ */
+router.patch("/rooms/:id/availability", requireAuth, requireRole("staff", "superadmin"), run(async (req, res) => {
+  if (!validId(req.params.id)) throw new SpaceError("Invalid room id");
+  if (!["available", "unavailable"].includes(req.body?.status)) throw new SpaceError("Choose available or unavailable.");
+
+  const room = await withSpaceTransaction(req.user.organizationId, async (session) => {
+    const current = await Room.findOne({ _id: req.params.id, organization: req.user.organizationId }).session(session);
+    if (!current) throw new SpaceError("Room not found", 404);
+    await assertNoBookings(current, session);
+    await Resource.updateOne({ _id: current.resource }, { "units.0.status": req.body.status }, { session });
+    return current;
+  });
+  await announceUnitStatus(room.resource, "room", { io: req.app.get("io") });
+  res.json({ ok: true });
+}));
+
+/* Errors written for the person who caused them; anything else is app.js's to answer. */
+router.use((err, req, res, next) => {
+  if (!(err instanceof SpaceError)) return next(err);
+  res.status(err.status).json({ error: err.message, code: err.code });
+});
+
 export default router;
