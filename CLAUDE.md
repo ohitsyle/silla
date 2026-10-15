@@ -641,9 +641,45 @@ first — nothing had a live booking).
 
 `docs/control-plane.md` is the design. Its foundation is on main (commit
 313eb03); the routes `#/staff`, `#/billing`, `#/messages` exist but are
-deliberately UNLINKED until built. Unfinished work is saved on branches
-`worktree-wf_5e3385eb-597-{1,3,4}` (tenancy + plan enforcement, billing,
-staff console) as WIP commits — not reviewed or tested yet.
+deliberately UNLINKED until built. Billing and the staff console are saved
+on their branches as WIP commits — not reviewed or tested yet.
+
+Tenancy and plan enforcement are built on the `tenancy` branch, both
+halves: the server (signed internal API, provisioning shared with
+`seed:file`, `migrate:slugs`, limits and features, the read-only guard —
+56 checks in `tests/platform.test.mjs`) and the client, below.
+
+### Organization addresses (client)
+
+Every organization lives at `<product>/<slug>/…`. `App.jsx` resolves the
+first path segment at boot (`lib/orgAddress.js`) and mounts the UNCHANGED
+router with `basename="/<slug>"`, so no page knows about slugs — keep it
+that way: links and `navigate()` stay `/map`, `/admin/plan`.
+- The old paths (`/`, `/map`, `/kiosk`, `/login`, …) are rewritten to the
+  default organization (`VITE_DEMO_ORG_ID`) by its slug. A default with no
+  slug yet — before `migrate:slugs` — is served at the old paths
+  unprefixed, so deploying ahead of the migration breaks nothing.
+- No address and no default: "Find your organization". An unknown address:
+  the same box, prefilled. Either continues to the page that was asked for
+  (`/kiosk` → `/<slug>/kiosk`). Neither lists organizations — that is the
+  customer list.
+- A new TOP-LEVEL route is a word no slug may take: add it to
+  `LEGACY_ROUTES` and the server's `RESERVED_SLUGS`, or nest it under an
+  existing one as `/login/reset` (Forgot PIN) is.
+- Sessions are per organization (`lib/session.js`,
+  `silla_token:<organizationId>`); a token is never sent for an
+  organization its own claim does not name, and the old single key is
+  adopted once, by the organization it belongs to.
+- `lib/api.js` errors carry `code` and `details`; PLAN_FEATURE and
+  ORG_SUSPENDED make OrgProvider re-read the config. Plan wording lives in
+  `lib/plan.js`. Upgrade prompts (`UpgradePrompt`, the console's Plan &
+  usage page) are for staff and superadmins; members get their own words
+  ("Booking is paused", "Check-in is paused"), never a sales pitch.
+- Walk it: `node tests/tenancy-preview.mjs --port=<n>` (server/) serves the
+  demo plus "Harborview", provisioned like a customer on a limited plan;
+  `--plan=suspended` (and `--features`, `--limits`) pushes a plan to the
+  running preview, signed like the control plane; `--legacy-demo` serves
+  the default with no address. Disposable, like `test:isolated`.
 
 ## Role model (spec §14)
 Who may do what to the map — enforced on the server, mirrored in the UI:
