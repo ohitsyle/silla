@@ -120,6 +120,8 @@ export const api = {
 
   // Buildings organize floors; rooms define shared booking boundaries.
   getSpaces: (orgId) => request(`/api/spaces?organizationId=${orgId}`),
+  // How much of each map limit the plan allows is in use (superadmin).
+  getSpaceUsage: () => request(`/api/spaces/usage`),
   createBuilding: (payload) => request(`/api/spaces/buildings`, { method: "POST", body: JSON.stringify(payload) }),
   updateBuilding: (id, patch) => request(`/api/spaces/buildings/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteBuilding: (id) => request(`/api/spaces/buildings/${id}`, { method: "DELETE" }),

@@ -11,6 +11,7 @@
  *   PATCH  /api/spaces/rooms/:id                rename, change mode, redraw levels             superadmin
  *   DELETE /api/spaces/rooms/:id                remove; furniture and history stay             superadmin
  *   PATCH  /api/spaces/rooms/:id/availability   close or reopen                                staff
+ *   GET    /api/spaces/usage                    plan usage for the editor's steps              superadmin
  *
  * Every write runs inside withSpaceTransaction (services/spaces.js), the
  * same guard the reservation engine uses, so a room can never be redrawn
@@ -18,6 +19,14 @@
  *
  * Staff OPERATE the space — they close and reopen rooms. Only a superadmin
  * DEFINES it: buildings, boundaries and booking modes.
+ *
+ * Plan limits (docs/control-plane.md §2) are checked only through
+ * services/entitlements.js, inside the same transaction as the create:
+ * every space write takes the organization's revision first, so two
+ * creations cannot both pass a count of "one left". A refusal is an
+ * EntitlementError (403 PLAN_LIMIT / PLAN_FEATURE), answered by app.js.
+ * Limits block NEW things only — nothing here hides or removes what an
+ * organization already has after a downgrade.
  */
 import { Router } from "express";
 import mongoose from "mongoose";
@@ -29,6 +38,7 @@ import ResourceType from "../models/ResourceType.js";
 import Room from "../models/Room.js";
 import Site from "../models/Site.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import { assertFeature, assertWithinLimit, countUsage } from "../services/entitlements.js";
 import { LIVE_STATUSES } from "../services/reservations/availability.js";
 import { announceUnitStatus } from "../services/reservations/index.js";
 import {
@@ -113,7 +123,8 @@ router.post("/buildings", ...superadmin, run(async (req, res) => {
   if (!name) throw new SpaceError("Give this building a name.");
   if (req.body.siteId && !validId(req.body.siteId)) throw new SpaceError("A valid siteId is required");
 
-  const building = await withSpaceTransaction(req.user.organizationId, async (session) => {
+  const building = await withSpaceTransaction(req.user.organizationId, async (session, org) => {
+    await assertWithinLimit(org, "buildings");
     const site = await Site.findOne({
       organization: req.user.organizationId,
       ...(req.body.siteId ? { _id: req.body.siteId } : {}),
@@ -275,9 +286,11 @@ router.post("/rooms", ...superadmin, run(async (req, res) => {
   if (!BOOKING_MODES.includes(req.body.bookingMode)) throw new SpaceError("Choose individual, whole, or either booking.");
 
   const organizationId = req.user.organizationId;
-  const room = await withSpaceTransaction(organizationId, async (session) => {
+  const room = await withSpaceTransaction(organizationId, async (session, org) => {
     const building = await Building.findOne({ _id: req.body.buildingId, organization: organizationId }).session(session);
     if (!building) throw new SpaceError("Building not found", 404);
+    if (req.body.bookingMode !== "individual") await assertFeature(org, "wholeRoomBooking");
+    await assertWithinLimit(org, "rooms");
 
     const levels = await validateLevels(req.body.levels, building, null, session);
     // Furniture already inside the new boundary may have bookings of its own.
@@ -309,7 +322,7 @@ router.patch("/rooms/:id", ...superadmin, run(async (req, res) => {
   if (!validId(req.params.id)) throw new SpaceError("Invalid room id");
   const organizationId = req.user.organizationId;
 
-  const room = await withSpaceTransaction(organizationId, async (session) => {
+  const room = await withSpaceTransaction(organizationId, async (session, org) => {
     const current = await Room.findOne({ _id: req.params.id, organization: organizationId }).session(session);
     if (!current) throw new SpaceError("Room not found", 404);
     await assertNoBookings(current, session);
@@ -320,6 +333,11 @@ router.patch("/rooms/:id", ...superadmin, run(async (req, res) => {
     }
     if (req.body.bookingMode !== undefined) {
       if (!BOOKING_MODES.includes(req.body.bookingMode)) throw new SpaceError("Invalid booking mode");
+      // Only a CHANGE to whole-room booking needs the feature: a room booked
+      // whole before a downgrade can still be renamed or redrawn as it is.
+      if (req.body.bookingMode !== current.bookingMode && req.body.bookingMode !== "individual") {
+        await assertFeature(org, "wholeRoomBooking");
+      }
       current.bookingMode = req.body.bookingMode;
     }
     if (req.body.levels !== undefined) {
@@ -370,6 +388,17 @@ router.patch("/rooms/:id/availability", requireAuth, requireRole("staff", "super
   });
   await announceUnitStatus(room.resource, "room", { io: req.app.get("io") });
   res.json({ ok: true });
+}));
+
+/**
+ * What the editor's setup steps show as "3 of 5 rooms": the organization's
+ * usage of each map limit, counted exactly as the limits are enforced
+ * (services/entitlements.js countUsage) so the two can never disagree.
+ */
+router.get("/usage", ...superadmin, run(async (req, res) => {
+  const keys = ["buildings", "floors", "rooms", "resources"];
+  const counts = await Promise.all(keys.map((key) => countUsage(req.user.organizationId, key)));
+  res.json({ usage: Object.fromEntries(keys.map((key, i) => [key, counts[i]])) });
 }));
 
 /* Errors written for the person who caused them; anything else is app.js's to answer. */

@@ -19,6 +19,10 @@ import { Button } from "./ui/index.jsx";
  * These existed before as a row of selects and buttons above the map —
  * Add building, Rename building, a Room tool, a Floors panel at the very
  * bottom of the page — and nothing said which came first.
+ *
+ * `limits` carries the plan's reading per step (lib/rooms.js readLimit):
+ * "3 of 5 rooms", and at the cap a sentence in place of the Add button.
+ * Unmanaged organizations have no limits, and see neither.
  */
 export default function SetupSteps({
   buildings,
@@ -26,6 +30,7 @@ export default function SetupSteps({
   floor,
   resourceNoun,
   drawing,
+  limits = {},
   onBuilding,
   onFloor,
   onAddBuilding,
@@ -61,6 +66,7 @@ export default function SetupSteps({
           needsSetup &&
           "Name the building they belong to. Floor names, furniture and bookings stay exactly as they are."
         }
+        usage={limits.buildings}
       >
         {choosable.length > 1 && (
           <BuildingSwitcher
@@ -73,7 +79,7 @@ export default function SetupSteps({
           />
         )}
         <div className="flex flex-wrap gap-2">
-          {needsSetup && (
+          {needsSetup && !limits.buildings?.blocked && (
             <Button size="sm" variant="primary" icon={Building2} onClick={onEditBuilding}>
               Set up building
             </Button>
@@ -83,9 +89,11 @@ export default function SetupSteps({
               Rename
             </Button>
           )}
-          <Button size="sm" variant={building ? "secondary" : "primary"} icon={Plus} onClick={onAddBuilding}>
-            {building ? "Add building" : "Add a building"}
-          </Button>
+          {!limits.buildings?.blocked && (
+            <Button size="sm" variant={building ? "secondary" : "primary"} icon={Plus} onClick={onAddBuilding}>
+              {building ? "Add building" : "Add a building"}
+            </Button>
+          )}
         </div>
       </Step>
 
@@ -102,9 +110,10 @@ export default function SetupSteps({
               : `${building.name} has no floors yet.`
         }
         detail={buildingDone && !floors.length && "Each floor is a grid you place rooms and furniture on."}
+        usage={buildingDone ? limits.floors : null}
       >
         {floorsDone && <FloorTabs floors={floors} value={floor?.id} onChange={onFloor} className="editor-floors" />}
-        {buildingDone && (
+        {buildingDone && !limits.floors?.blocked && (
           <div>
             <Button size="sm" variant={floors.length ? "secondary" : "primary"} icon={Plus} onClick={onAddFloor}>
               {floors.length ? "Add floor" : "Add the first floor"}
@@ -133,8 +142,9 @@ export default function SetupSteps({
             ? "Corner to corner, around everything the room holds. Next you'll choose how members book it."
             : `Draw a room around a space, then choose what members book: the whole room, or ${plural(resourceNoun)} inside it.`)
         }
+        usage={floorsDone ? limits.rooms : null}
       >
-        {floorsDone && (
+        {floorsDone && (drawing || !limits.rooms?.blocked) && (
           <div>
             {drawing ? (
               <Button size="sm" icon={X} onClick={onStopDrawing}>
@@ -152,8 +162,11 @@ export default function SetupSteps({
   );
 }
 
-/** One step: its number (a tick once done), what it is, where it stands, and its controls. */
-function Step({ number, title, icon: Icon, state, summary, detail, children }) {
+/**
+ * One step: its number (a tick once done), what it is, where it stands,
+ * the plan's reading for it when the plan limits it, and its controls.
+ */
+function Step({ number, title, icon: Icon, state, summary, detail, usage, children }) {
   const current = state === "current";
   const waiting = state === "waiting";
   return (
@@ -187,7 +200,27 @@ function Step({ number, title, icon: Icon, state, summary, detail, children }) {
           {detail && <p className="mt-1 text-sm leading-relaxed text-ink-secondary">{detail}</p>}
         </div>
       </div>
+      {usage && <Usage {...usage} />}
       {children}
     </li>
+  );
+}
+
+/** "3 of 5 rooms on your plan", a bar, and at the cap the reason there is no Add. */
+export function Usage({ used, max, noun, blocked, blockedReason }) {
+  const share = max ? Math.min(1, used / max) : 1;
+  return (
+    <div className="space-y-1.5">
+      <p className="text-xs text-ink-secondary">
+        <span className="font-semibold tabular-nums text-ink-primary">{used}</span> of {max} {noun} on your plan
+      </p>
+      <div className="h-1 overflow-hidden rounded-full bg-line/10" aria-hidden="true">
+        <div
+          className="h-full rounded-full"
+          style={{ width: `${share * 100}%`, background: `var(--color-state-${blocked ? "reserved" : "available"})` }}
+        />
+      </div>
+      {blocked && <p className="text-xs leading-relaxed text-ink-secondary">{blockedReason}</p>}
+    </div>
   );
 }

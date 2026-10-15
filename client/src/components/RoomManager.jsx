@@ -205,8 +205,15 @@ const MODE_ICON = { individual: Grid2x2, whole: DoorOpen, either: LayoutGrid };
  * `draft` = { id?, name, bookingMode, buildingId, levels, resourceId? }.
  * `onDraw(draft, floorId)` hands back to the map to draw a level (on
  * another floor, or again on this one) and reopens the dialog after.
+ *
+ * `wholeRoomAllowed` is the plan's wholeRoomBooking feature. Without it the
+ * two whole-room choices are shown but not offered, with the reason — the
+ * server would refuse them (PLAN_FEATURE). A room already booked whole
+ * keeps its choice: a downgrade never takes away what exists.
  */
-export function RoomDialog({ draft, floors = [], resourceNoun = "resource", onClose, onSaved, onDraw }) {
+export function RoomDialog({
+  draft, floors = [], resourceNoun = "resource", wholeRoomAllowed = true, onClose, onSaved, onDraw,
+}) {
   const [name, setName] = useState(draft?.name || "");
   const [mode, setMode] = useState(draft?.bookingMode || "individual");
   const [levels, setLevels] = useState(draft?.levels || []);
@@ -302,12 +309,13 @@ export function RoomDialog({ draft, floors = [], resourceNoun = "resource", onCl
               const words = roomMode(value, resourceNoun);
               const Icon = MODE_ICON[value];
               const chosen = mode === value;
+              const withheld = !wholeRoomAllowed && value !== "individual" && value !== draft?.bookingMode;
               return (
                 <label
                   key={value}
-                  className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors duration-fast ${
-                    chosen ? "" : "border-line/10 hover:border-line/25"
-                  }`}
+                  className={`flex items-start gap-3 rounded-lg border p-3 transition-colors duration-fast ${
+                    chosen ? "" : "border-line/10"
+                  } ${withheld ? "cursor-not-allowed opacity-50" : `cursor-pointer ${chosen ? "" : "hover:border-line/25"}`}`}
                   style={chosen ? { borderColor: "rgb(var(--c-accent) / 0.6)", background: "rgb(var(--c-accent) / 0.08)" } : undefined}
                 >
                   <input
@@ -315,6 +323,7 @@ export function RoomDialog({ draft, floors = [], resourceNoun = "resource", onCl
                     name="booking-mode"
                     value={value}
                     checked={chosen}
+                    disabled={withheld}
                     onChange={() => setMode(value)}
                     className="sr-only"
                   />
@@ -331,6 +340,12 @@ export function RoomDialog({ draft, floors = [], resourceNoun = "resource", onCl
               );
             })}
           </div>
+          {!wholeRoomAllowed && (
+            <p className="mt-2 text-xs leading-relaxed text-ink-secondary">
+              Booking whole rooms isn't included in your plan, so new rooms are booked one {resourceNoun} at a time;
+              a room set up before keeps its choice. Ask SILLA to add it to offer the whole-room choices.
+            </p>
+          )}
         </fieldset>
 
         <section aria-labelledby="room-levels-title">

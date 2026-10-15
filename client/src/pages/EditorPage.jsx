@@ -5,10 +5,10 @@ import { api } from "../lib/api.js";
 import { useOrg } from "../lib/OrgContext.jsx";
 import { useAuth } from "../lib/AuthContext.jsx";
 import { useFloorSocket } from "../lib/useFloorSocket.js";
-import { withArticle } from "../lib/rooms.js";
+import { readLimit, withArticle } from "../lib/rooms.js";
 import { resolveStatePalette } from "../theme/applyOrgTheme.js";
 import SpaceMap from "../components/SpaceMap.jsx";
-import SetupSteps from "../components/SetupSteps.jsx";
+import SetupSteps, { Usage } from "../components/SetupSteps.jsx";
 import { BuildingSwitcher, FloorTabs } from "../components/SpaceNavigator.jsx";
 import RoomManager, { BuildingDialog, RoomDialog } from "../components/RoomManager.jsx";
 import { AddFloorDialog, FloorSettings } from "../components/FloorSettings.jsx";
@@ -31,6 +31,12 @@ import {
  * The server enforces the split (resource, floor and space writes are
  * superadmin-only); the page hides what a role cannot use so nobody is
  * offered a button that would only refuse them.
+ *
+ * Plan limits work the same way. The server refuses creations beyond the
+ * plan (PLAN_LIMIT / PLAN_FEATURE); the page reads the same entitlements
+ * (useOrg) and the same usage counts (GET /api/spaces/usage) so the setup
+ * steps can say "3 of 5 rooms" and, at the cap, explain instead of
+ * offering an Add that fails. Unmanaged organizations see none of it.
  */
 
 const TOOL = {
@@ -43,12 +49,14 @@ const TOOL = {
 };
 
 export default function EditorPage() {
-  const { org, organizationId } = useOrg();
+  const { org, organizationId, entitlements } = useOrg();
   const { user, booting, isAuthenticated } = useAuth();
   const { floorId } = useParams();
   const navigate = useNavigate();
 
   const [buildings, setBuildings] = useState(null);
+  /** Plan usage, for a managed organization's limits; null when unlimited. */
+  const [usage, setUsage] = useState(null);
   const [buildingOverride, setBuildingOverride] = useState(null);
   const [data, setData] = useState(null);
   const layoutRequest = useRef(0);
@@ -87,6 +95,16 @@ export default function EditorPage() {
   }, [organizationId]);
   useEffect(loadSpaces, [loadSpaces]);
 
+  const limited = isSuperadmin && Boolean(entitlements?.managed);
+  const loadUsage = useCallback(() => {
+    if (!limited) return;
+    api
+      .getSpaceUsage()
+      .then((result) => setUsage(result.usage))
+      .catch(() => setUsage(null));
+  }, [limited]);
+  useEffect(loadUsage, [loadUsage]);
+
   // Open the first floor when none is in the address.
   useEffect(() => {
     if (!buildings || floorId) return;
@@ -123,6 +141,7 @@ export default function EditorPage() {
   const reloadAll = () => {
     loadSpaces();
     load();
+    loadUsage();
   };
 
   // Staff never get the structural tools.
@@ -174,6 +193,7 @@ export default function EditorPage() {
       await action();
       if (successMessage) setNotice(successMessage);
       load();
+      loadUsage();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -247,13 +267,23 @@ export default function EditorPage() {
   const setUnitState = (patch, message) =>
     act(() => api.adminSetUnit(selectedUnit.resourceId, selectedUnit.unitLabel, patch), message);
 
+  const siblings = allBuildings.filter((candidate) => !candidate.unassigned && candidate.siteId === building?.siteId);
+  const limits = {
+    buildings: readLimit(entitlements, usage, "buildings"),
+    floors: readLimit(entitlements, usage, "floors"),
+    rooms: readLimit(entitlements, usage, "rooms"),
+  };
+  const unitLimit = readLimit(entitlements, usage, "resources", `bookable ${resourceNoun}`);
+
   const tools = [
     { value: TOOL.AVAILABILITY, label: "Availability", icon: CircleCheck },
     ...(isSuperadmin
       ? [
           { value: TOOL.PLACE, label: `Place ${resourceNoun}`, icon: MousePointerClick },
           { value: TOOL.REMOVE, label: "Remove", icon: Trash2 },
-          ...(canDraw ? [{ value: TOOL.ROOM, label: "Room", icon: DoorOpen }] : []),
+          // A NEW room needs a building and room left on the plan; drawing
+          // another level of an existing room still works (from its settings).
+          ...(canDraw && !limits.rooms?.blocked ? [{ value: TOOL.ROOM, label: "Room", icon: DoorOpen }] : []),
           { value: TOOL.ZONE, label: "Zone", icon: Layers },
           { value: TOOL.LABEL, label: "Label", icon: Tag },
         ]
@@ -273,7 +303,6 @@ export default function EditorPage() {
     [TOOL.LABEL]: "Click the map to position the label, then add it.",
   }[tool];
 
-  const siblings = allBuildings.filter((candidate) => !candidate.unassigned && candidate.siteId === building?.siteId);
 
   return (
     <Page>
@@ -306,10 +335,18 @@ export default function EditorPage() {
               <p className="min-w-0 flex-1 text-sm">
                 <span className="font-medium">{group.name}</span> has {group.floors.length}{" "}
                 {group.floors.length === 1 ? "floor" : "floors"} that {group.floors.length === 1 ? "isn't" : "aren't"} in a
-                building yet. Set one up to draw rooms there — nothing on {group.floors.length === 1 ? "it" : "them"} changes.
+                building yet.{" "}
+                {limits.buildings?.blocked
+                  ? "Your plan's buildings are all in use, so setting one up waits until the limit is raised."
+                  : `Set one up to draw rooms there — nothing on ${group.floors.length === 1 ? "it" : "them"} changes.`}
               </p>
-              <Button size="sm" variant="primary" icon={Building2} onClick={() => openBuilding(group)}>
-                Set up building
+              <Button
+                size="sm"
+                variant={limits.buildings?.blocked ? "secondary" : "primary"}
+                icon={Building2}
+                onClick={() => openBuilding(group)}
+              >
+                {limits.buildings?.blocked ? `Open ${group.name}` : "Set up building"}
               </Button>
             </div>
           ))}
@@ -321,6 +358,7 @@ export default function EditorPage() {
           floor={floor}
           resourceNoun={resourceNoun}
           drawing={tool === TOOL.ROOM}
+          limits={limits}
           onBuilding={openBuilding}
           onFloor={openFloor}
           onAddBuilding={() => setBuildingDialog({ siteId: building?.siteId || visible?.floor.site.id })}
@@ -365,17 +403,27 @@ export default function EditorPage() {
       </p>
 
       {tool === TOOL.PLACE && visible && (
-        <div className="mt-3">
-          <Segmented
-            className="catalog"
-            size="sm"
-            value={typeKey}
-            onChange={setTypeKey}
-            options={visible.resourceTypes.map((type) => ({
-              value: type.key,
-              label: `${type.label} · ${type.footprint.w}×${type.footprint.h} · ${type.seatCount}`,
-            }))}
-          />
+        <div className="mt-3 space-y-3">
+          {unitLimit && (
+            <div className="max-w-md">
+              <Usage {...unitLimit} />
+            </div>
+          )}
+          {/* At the cap the catalog gives way to the reason. Short of it, a
+              piece with more seats than are left is refused by the server
+              with the same explanation. */}
+          {!unitLimit?.blocked && (
+            <Segmented
+              className="catalog"
+              size="sm"
+              value={typeKey}
+              onChange={setTypeKey}
+              options={visible.resourceTypes.map((type) => ({
+                value: type.key,
+                label: `${type.label} · ${type.footprint.w}×${type.footprint.h} · ${type.seatCount}`,
+              }))}
+            />
+          )}
         </div>
       )}
 
@@ -519,6 +567,7 @@ export default function EditorPage() {
           draft={roomDraft}
           floors={building?.floors || []}
           resourceNoun={resourceNoun}
+          wholeRoomAllowed={entitlements?.hasFeature("wholeRoomBooking") ?? true}
           onClose={() => setRoomDraft(null)}
           onSaved={reloadAll}
           onDraw={drawRoom}
@@ -544,6 +593,7 @@ export default function EditorPage() {
           onClose={() => setAddingFloor(false)}
           onCreated={(created) => {
             loadSpaces();
+            loadUsage();
             if (created?.floor?.id) navigate(`/editor/${created.floor.id}`);
           }}
         />

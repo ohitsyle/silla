@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { CalendarCheck, CircleCheck, Clock, LoaderCircle } from "lucide-react";
 import { api } from "../lib/api.js";
 import { formatSpan } from "../lib/bookingWindow.js";
+import { memberReason } from "../lib/rooms.js";
 import { Badge, Button, Notice, PinField } from "./ui/index.jsx";
 import WhenFields from "./WhenFields.jsx";
 
@@ -85,7 +86,7 @@ export default function ReservePanel({ target, booking, resourceNoun = "resource
     }
     setPinError(null);
     if (booking.problem) return setError(booking.problem);
-    if (availability?.bookable === false) return setError(availability.error);
+    if (availability?.bookable === false) return setError(memberReason(availability));
 
     setBusy(true);
     try {
@@ -100,7 +101,7 @@ export default function ReservePanel({ target, booking, resourceNoun = "resource
       onReserved?.(created.reservation);
     } catch (err) {
       if (err.status === 401) setPinError(err.message);
-      else setError(err.message);
+      else setError(memberReason({ code: err.body?.code, error: err.message }));
     } finally {
       setBusy(false);
     }
@@ -160,7 +161,7 @@ function AvailabilityLine({ checking, availability }) {
       </p>
     );
   }
-  return <Notice tone="error">{availability.error}</Notice>;
+  return <Notice tone="error">{memberReason(availability)}</Notice>;
 }
 
 /**

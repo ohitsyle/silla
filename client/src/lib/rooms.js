@@ -112,3 +112,47 @@ export function listNames(names) {
   if (names.length <= 1) return names[0] || "";
   return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
+
+/* ─────────────────────────────── plan limits ─────────────────────────────── */
+
+/** The map's plan limits, in the words the editor uses for them. */
+const LIMIT_WORDS = {
+  buildings: ["building", "buildings"],
+  floors: ["floor", "floors"],
+  rooms: ["room", "rooms"],
+};
+
+/**
+ * One limit, read for the editor: "3 of 5 rooms", and — at the cap — the
+ * sentence that replaces the Add button. Null when the plan sets no limit
+ * (every unmanaged organization), so nothing is shown at all.
+ *
+ * The server is the control (services/entitlements.js); this only lets
+ * the editor explain a limit before someone runs into it.
+ */
+export function readLimit(entitlements, usage, key, noun) {
+  const max = entitlements?.limitOf(key);
+  if (max === null || max === undefined || !usage || usage[key] === undefined) return null;
+  const [one, many] = LIMIT_WORDS[key] || [noun, plural(noun)];
+  const used = usage[key];
+  const words = max === 1 ? one : many;
+  return {
+    used,
+    max,
+    noun: words,
+    blocked: used >= max,
+    blockedReason:
+      `Your plan includes ${max} ${words}${max === 1 ? ", and it's" : `, and all ${max} are`} already in use. ` +
+      "Ask SILLA to raise the limit, or to move you to a larger plan, to add more.",
+  };
+}
+
+/**
+ * Why something can't be booked, said to a MEMBER. The server's plan
+ * refusal speaks to an administrator ("ask SILLA to add it"), which a
+ * member can do nothing about; everything else is already theirs to read.
+ */
+export function memberReason(answer) {
+  if (answer?.code === "PLAN_FEATURE") return "Booking a whole room isn't available here at the moment.";
+  return answer?.error;
+}

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, Check, DoorOpen, Grid2x2, Layers, X } from "lucide-react";
 import { api } from "../lib/api.js";
-import { levelName, listNames, plural, withArticle } from "../lib/rooms.js";
+import { levelName, listNames, memberReason, plural, withArticle } from "../lib/rooms.js";
 import { Notice, Segmented, Skeleton } from "./ui/index.jsx";
 import WhenFields from "./WhenFields.jsx";
 
@@ -188,7 +188,7 @@ function WholeRoomOption({ room, answer, loading, waitingForTime, onChoose }) {
           </span>
         </button>
       ) : (
-        <Refusal reason={answer?.error} />
+        <Refusal reason={memberReason(answer)} />
       )}
     </OptionCard>
   );
