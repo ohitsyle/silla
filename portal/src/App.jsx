@@ -199,7 +199,7 @@ function Routed() {
     }
     // Staff arriving at their own door while signed in go straight to work.
     if (route.name === "staffSignIn" && isSignedIn && isSilla && !booting) {
-      navigate(ROUTES.staff, { replace: true });
+      navigate(ROUTES.queue, { replace: true }); // the console is still being built
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route.name, booting]);

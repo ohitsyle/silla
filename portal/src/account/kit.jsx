@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  Check, ChevronDown, CreditCard, Eye, EyeOff, LayoutDashboard, LogOut, MessagesSquare, Receipt, ShieldCheck, UserRound,
+  Check, ChevronDown, Eye, EyeOff, ListChecks, LogOut, Receipt, ShieldCheck, UserRound,
 } from "lucide-react";
 
 import { initialsOf, useAccount } from "../lib/AccountContext.jsx";
@@ -417,9 +417,10 @@ export function AccountMenu({ navigate, tone = "light" }) {
   const items = [
     { icon: UserRound, label: "Profile", to: ROUTES.account },
     { icon: Receipt, label: "My orders", to: ROUTES.orders },
-    !isSilla && { icon: CreditCard, label: "Billing", to: ROUTES.billing },
-    !isSilla && { icon: MessagesSquare, label: "Messages", to: ROUTES.messages },
-    isSilla && { icon: LayoutDashboard, label: "Staff console", to: ROUTES.staff },
+    // Billing (#/billing), Messages (#/messages) and the staff console
+    // (#/staff) exist as routes but are still being built, so they are not
+    // linked yet. Link them here when they land.
+    isSilla && { icon: ListChecks, label: "Order queue", to: ROUTES.queue },
   ].filter(Boolean);
 
   return (

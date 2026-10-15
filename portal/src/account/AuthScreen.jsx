@@ -38,7 +38,8 @@ function destinationFor(account, redirectTo) {
   if (hasPending() || peekIntent()) return ROUTES.configure;
   if (redirectTo) return redirectTo;
   // SILLA staff start at their work; everyone else goes home.
-  return account?.role === "silla" ? ROUTES.staff : ROUTES.home;
+  // The staff console (#/staff) is still being built; staff work from the queue until it lands.
+  return account?.role === "silla" ? ROUTES.queue : ROUTES.home;
 }
 
 /* ─────────────────────────────── sign in ─────────────────────────────── */

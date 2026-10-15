@@ -45,7 +45,7 @@ export default function StaffSignIn({ navigate }) {
         setPassword("");
         return;
       }
-      navigate(ROUTES.staff, { replace: true });
+      navigate(ROUTES.queue, { replace: true }); // the console is still being built
     } catch (err) {
       setError(err.message);
       setPassword("");
@@ -135,7 +135,7 @@ export default function StaffSignIn({ navigate }) {
         initialEmail={email}
         onSignedIn={(account) => {
           setForgot(false);
-          if (account?.role === "silla") navigate(ROUTES.staff, { replace: true });
+          if (account?.role === "silla") navigate(ROUTES.queue, { replace: true }); // the console is still being built
           else {
             signOut();
             setError("This entrance is for SILLA staff. Customers sign in from the storefront.");
