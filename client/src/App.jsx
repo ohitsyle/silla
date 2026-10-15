@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-route
 import { OrgProvider } from "./lib/OrgContext.jsx";
 import { AuthProvider, useAuth } from "./lib/AuthContext.jsx";
 import { resolveAddress } from "./lib/orgAddress.js";
+import { bindOrganization } from "./lib/api.js";
 import { applyOrgTheme } from "./theme/applyOrgTheme.js";
 import StarterPage from "./pages/StarterPage.jsx";
 import MapPage from "./pages/MapPage.jsx";
@@ -87,8 +88,13 @@ export default function App() {
     resolveAddress({ pathname, search, hash }, DEFAULT_ORGANIZATION_ID).then((result) => {
       if (!current) return;
       if (result.replaceWith) window.history.replaceState(null, "", result.replaceWith);
-      // Before the first paint of the app, so it never shows unbranded.
-      if (result.org) applyOrgTheme(result.org);
+      if (result.org) {
+        // Every request from here on carries this organization's session
+        // and no other (lib/session.js).
+        bindOrganization(result.org._id);
+        // Before the first paint of the app, so it never shows unbranded.
+        applyOrgTheme(result.org);
+      }
       setBoot(result);
     });
     return () => {

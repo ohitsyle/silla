@@ -1,7 +1,20 @@
+import { adoptLegacyToken, readToken } from "./session.js";
+
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:4000";
 
+/**
+ * The organization this page serves, set once at boot (App.jsx) — one
+ * page load serves exactly one organization. Requests carry THAT
+ * organization's session and no other (lib/session.js).
+ */
+let sessionOrganizationId = null;
+export function bindOrganization(organizationId) {
+  sessionOrganizationId = organizationId ? String(organizationId) : null;
+  adoptLegacyToken(sessionOrganizationId);
+}
+
 async function request(path, options = {}) {
-  const token = localStorage.getItem("silla_token"); // fine for a dev scaffold; revisit for production auth storage
+  const token = readToken(sessionOrganizationId);
   const res = await fetch(`${BASE_URL}${path}`, {
     ...options,
     headers: {

@@ -16,7 +16,7 @@ import { Button, Card, Field, Loading, Notice, PinField } from "../components/ui
  * means distinguishing "wrong PIN" from "locked" from "slow down".
  */
 export default function LoginPage() {
-  const { org, organizationId } = useOrg();
+  const { org } = useOrg();
   const { login, isAuthenticated, requiresTermsAcceptance, mustChangePin, booting } = useAuth();
   const navigate = useNavigate();
 
@@ -32,7 +32,7 @@ export default function LoginPage() {
     setError(null);
     setSubmitting(true);
     try {
-      const user = await login(organizationId, email.trim(), pin);
+      const user = await login(email.trim(), pin);
       // The gates run in order: PIN change (ADM-4), then terms (AUTH-3).
       if (user.mustChangePin) navigate("/change-pin");
       else navigate(user.requiresTermsAcceptance ? "/terms" : "/map");
