@@ -4,7 +4,7 @@
  * it is tested under genuine concurrency rather than in sequence.
  */
 import {
-  req, auth, makeMember, window, firstFloor, layoutOf, availableUnits,
+  req, auth, makeMember, window, nowWindow, clearOfMidnight, firstFloor, layoutOf, availableUnits,
   adminToken, withOpenHours, ORG,
 } from "./helpers.mjs";
 
@@ -93,16 +93,19 @@ export async function run(check) {
   check("RES-7", "A window outside operating hours is rejected", outside.status === 400, outside.body?.error);
 
   /* ── OCC-1/3/6 and OCC-2: the physical loop, which needs "now" ── */
+  // Seconds before midnight there is no same-day window left to book, so
+  // the block waits for the date to turn rather than fail on a correct rule.
+  await clearOfMidnight();
   const admin = await adminToken();
   const restore = await withOpenHours(admin);
   try {
     const bob = await makeMember("bob");
     const spot = free[10];
-    const now = new Date();
+    // Started a minute ago so the tap lands inside the grace period; ends
+    // within today, because a booking may not span two days.
     const booked = await req("/api/reservations", { method: "POST", headers: auth(bob.token),
       body: JSON.stringify({ resourceId: spot.resourceId, unitLabel: spot.unitLabel,
-        startTime: new Date(now.getTime() - 60_000).toISOString(),
-        endTime: new Date(now.getTime() + 3600_000).toISOString(), pin: bob.pin }) });
+        ...nowWindow(), pin: bob.pin }) });
     check("RES-1", "Booked a now-window for the tap test", booked.status === 201, booked.body?.error || "");
 
     const tapIn = await req("/api/checkin/tap", { method: "POST",

@@ -114,9 +114,14 @@ export const api = {
   deleteFloor: (id) => request(`/api/floors/${id}`, { method: "DELETE" }),
 
   reservationAvailability: (resourceId, unitLabel, startTime, endTime) => request(`/api/reservations/availability?${new URLSearchParams({ resourceId, unitLabel, startTime, endTime })}`),
+  // A room's whole-room and per-unit availability for one window, in one request.
+  roomOptions: (roomId, startTime, endTime) =>
+    request(`/api/reservations/rooms/${roomId}/options?${new URLSearchParams({ startTime, endTime })}`),
 
   // Buildings organize floors; rooms define shared booking boundaries.
   getSpaces: (orgId) => request(`/api/spaces?organizationId=${orgId}`),
+  // How much of each map limit the plan allows is in use (superadmin).
+  getSpaceUsage: () => request(`/api/spaces/usage`),
   createBuilding: (payload) => request(`/api/spaces/buildings`, { method: "POST", body: JSON.stringify(payload) }),
   updateBuilding: (id, patch) => request(`/api/spaces/buildings/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteBuilding: (id) => request(`/api/spaces/buildings/${id}`, { method: "DELETE" }),

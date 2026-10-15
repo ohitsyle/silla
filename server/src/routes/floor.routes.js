@@ -14,6 +14,7 @@ import Reservation from "../models/Reservation.js";
 import User from "../models/User.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { LIVE_STATUSES } from "../services/reservations/availability.js";
+import { EntitlementError, assertWithinLimit } from "../services/entitlements.js";
 
 const router = Router();
 
@@ -210,7 +211,7 @@ async function ownedFloor(id, orgId, session) {
   return { floor, site };
 }
 router.post("/", requireAuth, requireRole("superadmin"), asyncHandler(async (req, res) => {
-  const result = await withSpaceTransaction(req.user.organizationId, async (session) => {
+  const result = await withSpaceTransaction(req.user.organizationId, async (session, org) => {
     const { siteId, buildingId, name, order, grid } = req.body || {};
     if (typeof name !== "string" || !name.trim()) throw bad("A floor name is required");
     const cols = grid?.cols ?? 20, rows = grid?.rows ?? 12;
@@ -222,6 +223,8 @@ router.post("/", requireAuth, requireRole("superadmin"), asyncHandler(async (req
     const building = await Building.findOne({ organization: req.user.organizationId, ...(buildingId ? { _id: buildingId } : { site: site._id }) }).session(session);
     if (buildingId && !building) throw bad("Building not found", 404);
     if (building) site = await Site.findById(building.site).session(session);
+    // The plan's floor limit, checked inside the transaction like every create.
+    await assertWithinLimit(org, "floors");
     const count = await Floor.countDocuments({ site: site._id, building: building?._id || null }).session(session);
     const [floor] = await Floor.create([{ site: site._id, building: building?._id || null, name: name.trim().slice(0, 120), order: Number.isInteger(order) ? order : count, grid: { cols, rows } }], { session });
     return floorShape(floor, site);
@@ -266,7 +269,16 @@ router.delete("/:id", requireAuth, requireRole("superadmin"), asyncHandler(async
   });
   res.json({ ok: true });
 }));
-router.use((err, req, res, next) => err.status ? res.status(err.status).json({ error: err.message, ...(err.outside ? { outside: err.outside } : {}) }) : next(err));
+// Plan refusals go on to app.js, which answers them with their full detail
+// (limit, max, used); everything else with a status is this router's own.
+router.use((err, req, res, next) => {
+  if (err instanceof EntitlementError || !err.status) return next(err);
+  res.status(err.status).json({
+    error: err.message,
+    ...(err.code ? { code: err.code } : {}),
+    ...(err.outside ? { outside: err.outside } : {}),
+  });
+});
 
 /** Pieces, zones or labels that would fall outside a proposed grid. */
 async function findOutsideGrid(floorId, cols, rows, session) {

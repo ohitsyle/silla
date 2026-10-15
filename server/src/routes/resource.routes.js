@@ -11,6 +11,7 @@ import { withSpaceTransaction, intersects, contains } from "../services/spaces.j
 import Site from "../models/Site.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { LIVE_STATUSES } from "../services/reservations/availability.js";
+import { EntitlementError, assertWithinLimit } from "../services/entitlements.js";
 
 const router = Router();
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -104,7 +105,7 @@ async function findOverlap({ floorId, col, row, w, h, excludeResourceId = null }
 router.post("/", asyncHandler(async (req, res) => {
   const { floorId, resourceTypeKey, col, row } = req.body || {};
   if (!mongoose.isValidObjectId(floorId) || !Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0) return res.status(400).json({ error: "Choose a floor and an integer grid position." });
-  const resource = await withSpaceTransaction(req.user.organizationId, async (session) => {
+  const resource = await withSpaceTransaction(req.user.organizationId, async (session, org) => {
     const floor = await Floor.findById(floorId).session(session);
     const site = floor && await Site.findOne({ _id: floor.site, organization: req.user.organizationId }).session(session);
     if (!site) throw Object.assign(new Error("Floor not found"), { status: 404 });
@@ -119,6 +120,10 @@ router.post("/", asyncHandler(async (req, res) => {
       if (intersects(level.bounds, { col, row, w, h }) && !contains(level.bounds, { col, row, w, h })) throw Object.assign(new Error("Place the entire item inside or outside the room boundary."), { status: 409 });
       if (contains(level.bounds, { col, row, w, h }) && await Reservation.exists({ resource: room.resource, status: { $in: LIVE_STATUSES } }).session(session)) throw Object.assign(new Error("This room has a live reservation. Cancel it before changing its contents."), { status: 409 });
     }
+    // The plan counts bookable units, so a piece adds its seats; one that
+    // is not bookable (a shelf) adds none and is never refused for it.
+    const adding = type.reservable === false ? 0 : Math.max(1, type.seatCount ?? 1);
+    if (adding) await assertWithinLimit(org, "resources", adding);
     const [r] = await Resource.create([{ organization: req.user.organizationId, floor: floorId, resourceType: type._id, position: { col, row }, units: Array.from({ length: type.seatCount }, (_, i) => ({ label: String(i + 1) })) }], { session });
     return r;
   });
@@ -245,5 +250,9 @@ router.delete(
   })
 );
 
-router.use((err, req, res, next) => err.status ? res.status(err.status).json({ error: err.message }) : next(err));
+// Plan refusals go on to app.js, which answers them with their full detail.
+router.use((err, req, res, next) => {
+  if (err instanceof EntitlementError || !err.status) return next(err);
+  res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+});
 export default router;
