@@ -29,8 +29,24 @@ const conversationSchema = new mongoose.Schema(
       buyerAt: { type: Date, default: null },
       staffAt: { type: Date, default: null },
     },
+
+    /**
+     * The newest message each side could see, for the notification job.
+     * PUBLIC messages only: an internal note moves neither, so it can
+     * never be what makes a buyer's email fire. (`lastMessage*` above is
+     * public-only for the same reason — the buyer's list shows its preview.)
+     */
+    lastBuyerMessageAt: { type: Date, default: null },
+    lastStaffMessageAt: { type: Date, default: null },
+
+    /** Who started it — a buyer from their account, or staff reaching out first. */
+    startedBy: { type: String, enum: ["buyer", "staff"], default: "buyer" },
+    closedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );
+
+/** The inbox: open threads, busiest first. */
+conversationSchema.index({ status: 1, lastMessageAt: -1 });
 
 export default mongoose.model("Conversation", conversationSchema);
