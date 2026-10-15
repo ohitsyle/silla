@@ -98,6 +98,8 @@ export const api = {
     request(`/api/auth/reset-pin`, { method: "POST", body: JSON.stringify({ organizationId, email, code, newPin }) }),
 
   // ADM-1..ADM-5, RPT-1 — the admin surface.
+  // What the plan allows and how much of it is in use (staff and superadmin).
+  adminPlan: () => request(`/api/admin/plan`),
   adminDashboard: (floorId) => request(`/api/admin/dashboard${floorId ? `?floorId=${floorId}` : ""}`),
   adminResources: (floorId) => request(`/api/admin/resources${floorId ? `?floorId=${floorId}` : ""}`),
   adminResourceHistory: (id) => request(`/api/admin/resources/${id}/history`),

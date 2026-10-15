@@ -9,6 +9,7 @@ import {
 import { api } from "../lib/api.js";
 import { DEFAULT_ADMIN_SECTION, sectionsFor } from "../lib/adminSections.js";
 import HourHistogram from "../components/HourHistogram.jsx";
+import PlanUsage from "../components/PlanUsage.jsx";
 import SpaceMap from "../components/SpaceMap.jsx";
 import { resolveStatePalette } from "../theme/applyOrgTheme.js";
 import { useOrg } from "../lib/OrgContext.jsx";
@@ -71,6 +72,7 @@ export default function AdminPage() {
       {active === "staff" && isSuperadmin && <Staff />}
       {active === "settings" && isSuperadmin && <Settings />}
       {active === "reports" && <Reports />}
+      {active === "plan" && <PlanUsage />}
     </Page>
   );
 }

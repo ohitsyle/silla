@@ -1,4 +1,4 @@
-import { BarChart3, LayoutDashboard, Settings as SettingsIcon, ShieldCheck, Users, Wrench } from "lucide-react";
+import { BarChart3, Gauge, LayoutDashboard, Settings as SettingsIcon, ShieldCheck, Users, Wrench } from "lucide-react";
 
 /**
  * The console's sections, shared by the page that renders them and the
@@ -21,6 +21,9 @@ export const ADMIN_SECTIONS = [
   { key: "staff", label: "Staff", Icon: ShieldCheck, story: "ADM-4", superadminOnly: true },
   { key: "settings", label: "Settings", Icon: SettingsIcon, story: "ADM-5", superadminOnly: true },
   { key: "reports", label: "Reports", Icon: BarChart3, story: "RPT-1" },
+  // What the plan allows and how much of it is used (docs/control-plane.md
+  // §2). Staff see it too: they meet the limits as well, and should know why.
+  { key: "plan", label: "Plan & usage", Icon: Gauge, story: "PLAN" },
 ];
 
 export const DEFAULT_ADMIN_SECTION = "dashboard";

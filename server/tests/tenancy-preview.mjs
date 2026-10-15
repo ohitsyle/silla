@@ -54,6 +54,10 @@ const DAY = 86_400_000;
  */
 function harborviewPlan(status = "active") {
   const now = Date.now();
+  // Dates as the control plane would leave them: an overdue period has
+  // already ended and its grace is running; a paused one's grace is over.
+  const periodEnd = { trialing: 9, active: 18, past_due: -2, suspended: -9, cancelled: -30 }[status] ?? 18;
+  const graceEnd = { past_due: 5, suspended: -2 }[status];
   return {
     managed: true,
     plan: "team",
@@ -61,8 +65,8 @@ function harborviewPlan(status = "active") {
     status,
     features: { kiosk: false, reports: false, customBranding: false, wholeRoomBooking: true, emailReminders: true },
     limits: { buildings: 1, floors: 3, rooms: 6, resources: 80, members: 40, staff: 2 },
-    currentPeriodEnd: new Date(now + (status === "trialing" ? 9 : 18) * DAY).toISOString(),
-    graceEndsAt: status === "past_due" ? new Date(now + 6 * DAY).toISOString() : null,
+    currentPeriodEnd: new Date(now + periodEnd * DAY).toISOString(),
+    graceEndsAt: graceEnd === undefined ? null : new Date(now + graceEnd * DAY).toISOString(),
     notice: {
       past_due: "Your October invoice is overdue. Pay by bank transfer or GCash and reply to the invoice email, and we'll confirm it the same day.",
       suspended: "Paused for an unpaid invoice. Everything is kept — pay it and Harborview reopens within the hour.",
