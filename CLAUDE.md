@@ -633,8 +633,9 @@ are built by `tests/clock.mjs`, never "now + 1h", which crossed midnight.
 has two buildings, set up from the live editor on 15 Oct — "Building 1"
 holding all nine of its floors, and an empty "Main Building" — and no
 rooms yet. Every live floor is still a full rectangle (no outline saved).
-Five of its floors are leftovers from earlier testing (faevea, qbkjwnq,
-sghdjfh, Test Floor, Test Ground for Org B).
+Its floors are First Floor, Second Floor, Third and SILLA MAP; five
+leftover test floors were removed on 16 Oct through the API (their pieces
+first — nothing had a live booking).
 
 ## Work in progress — tenancy, billing, staff console
 
