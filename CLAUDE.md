@@ -575,11 +575,36 @@ Existing floors remain readable under an unassigned building. **Set up building*
 adopts them explicitly while preserving IDs and layout. No read reseeds or
 migrates live data. See `docs/spatial-map.md` for the workflow and constraints.
 
-`npm run test:spaces` runs 41 named spatial checks in a temporary replica set;
+`npm run test:spaces` runs 73 named spatial checks in a temporary replica set;
 `npm run test:isolated` runs the existing 117 checks in another temporary
 database, including literal-code checks with console email. Neither reads live
 credentials or touches Atlas. `test:spaces -- --serve` keeps disposable fixture
 data on :4010 for the :5175 browser preview documented there.
+
+Members read the map as building › floor › room: a breadcrumb, a building
+switcher (only when there is more than one), floor tabs, a row of the
+floor's rooms saying what each offers, and a room panel that answers "Book
+the whole room" and/or "Pick a <resourceNoun> inside" for the chosen time.
+Superadmins get the editor as three numbered steps (building, floors,
+rooms). The scheduler's state moves are CONDITIONAL
+(`services/reservations/lifecycle.js`): a stale decision can never
+overwrite a newer one — a member who tapped in at the last second used to
+be marked a no-show. Every suite now passes at any time of day; windows
+are built by `tests/clock.mjs`, never "now + 1h", which crossed midnight.
+
+**Live (deployed 15 Oct 2026):** the demo organization's floors sit under
+an unassigned "Main Campus" building until a superadmin presses "Set up
+building", and it has no rooms yet. Five of its floors are leftovers from
+earlier testing (faevea, qbkjwnq, sghdjfh, Test Floor, Test Ground for
+Org B).
+
+## Work in progress — tenancy, billing, staff console
+
+`docs/control-plane.md` is the design. Its foundation is on main (commit
+313eb03); the routes `#/staff`, `#/billing`, `#/messages` exist but are
+deliberately UNLINKED until built. Unfinished work is saved on branches
+`worktree-wf_5e3385eb-597-{1,3,4}` (tenancy + plan enforcement, billing,
+staff console) as WIP commits — not reviewed or tested yet.
 
 ## Role model (spec §14)
 Who may do what to the map — enforced on the server, mirrored in the UI:
