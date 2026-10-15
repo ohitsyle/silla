@@ -173,7 +173,7 @@ export default function KioskPage() {
   // be refused, so the kiosk says so instead of inviting one
   // (docs/control-plane.md §2).
   if (!entitlements.operational) {
-    return <KioskClosed org={org} />;
+    return <KioskClosed org={org} ended={entitlements.status === "cancelled"} />;
   }
   if (!entitlements.hasFeature("kiosk")) {
     return (
@@ -292,13 +292,14 @@ export default function KioskPage() {
  * same header, the same large type for reading at arm's length — so a wall
  * screen reads as a device waiting, not one that has crashed.
  *
- *   paused      the organization is suspended or cancelled. It comes back
- *               by itself: OrgProvider asks again every minute while paused.
+ *   paused      the organization is suspended. It comes back by itself:
+ *               OrgProvider asks again every minute while paused.
+ *   ended       cancelled: the same screen, without the promise to reopen.
  *   notInPlan   the plan has no kiosk. Whoever is here is pointed to the
  *               web sign-in; staff and superadmins also to the plan page,
  *               since they are the ones who can ask for it.
  */
-function KioskClosed({ org, notInPlan = false, admin = false, resourceNoun = "resource" }) {
+function KioskClosed({ org, notInPlan = false, ended = false, admin = false, resourceNoun = "resource" }) {
   const name = org?.name || "This organization";
   return (
     <div className="min-h-screen px-6 py-10 max-w-3xl mx-auto text-ink-primary flex flex-col justify-center">
@@ -317,14 +318,14 @@ function KioskClosed({ org, notInPlan = false, admin = false, resourceNoun = "re
           {notInPlan ? <CircleSlash size={64} strokeWidth={1.6} /> : <CirclePause size={64} strokeWidth={1.6} />}
         </div>
         <h1 className="text-4xl sm:text-5xl font-semibold tracking-tight">
-          {notInPlan ? "Kiosk check-in isn't available" : "Check-in is paused"}
+          {notInPlan ? "Kiosk check-in isn't available" : ended ? "Check-in has closed" : "Check-in is paused"}
         </h1>
         <p className="text-lg sm:text-xl text-ink-secondary mt-4 max-w-xl leading-relaxed">
           {notInPlan
             ? admin
               ? "Kiosk check-in and self-registration aren't part of your plan. Ask SILLA to add them."
               : `${name} doesn't check in at a kiosk. Sign in on the web to book a ${resourceNoun}.`
-            : `${name} isn't taking check-ins or registrations right now. Please ask a member of staff.`}
+            : `${name} ${ended ? "is no longer taking" : "isn't taking"} check-ins or registrations${ended ? "" : " right now"}. Please ask a member of staff.`}
         </p>
         {notInPlan ? (
           <Link
@@ -335,7 +336,7 @@ function KioskClosed({ org, notInPlan = false, admin = false, resourceNoun = "re
             {admin ? "See plan & usage" : "Sign in"}
             <ArrowRight size={16} />
           </Link>
-        ) : (
+        ) : ended ? null : (
           <p className="mt-12 text-sm text-ink-muted">This screen reopens by itself when check-in is back.</p>
         )}
       </div>

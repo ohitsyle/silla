@@ -256,7 +256,9 @@ export default function StarterPage() {
             title={paused ? "See the floor plan" : `Find ${article(resourceNoun)} ${resourceNoun}`}
             body={
               paused
-                ? `What's free and what's in use, live. Booking is paused for now.`
+                ? entitlements.status === "cancelled"
+                  ? "What's free and what's in use, live. Booking has closed."
+                  : "What's free and what's in use, live. Booking is paused for now."
                 : `See the live floor plan and reserve ${article(resourceNoun)} ${resourceNoun} for later.`
             }
           />
