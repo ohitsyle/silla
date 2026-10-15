@@ -55,6 +55,7 @@ const {
   startScheduler, releaseExpiredGraceHolds, releaseOverstayedSessions, refreshDueHolds, sendStartingSoonReminders,
 } = await import("../src/workers/scheduler.js");
 const { clearOfMidnight, endOfDay, MINUTE, HOUR } = await import("./helpers.mjs");
+const { cellKey, contains, floorCells } = await import("../src/lib/cells.js");
 
 let passed = 0;
 function check(name, value) {
@@ -865,10 +866,57 @@ try {
 
   // Reset to a rectangle: the whole grid is floor again, stored as nothing.
   const reset = (await call("/api/floors/" + tFloor.id, "PATCH", { shape: null })).floor;
+  const besideStem = await place(tFloor.id, "desk", 1, 6);
   check(
     "resetting to a rectangle makes the whole grid floor again",
-    reset.shape.areas.length === 0 && (await Floor.findById(tFloor.id)).shape?.areas === undefined &&
-      Boolean((await place(tFloor.id, "desk", 1, 6)).id)
+    reset.shape.areas.length === 0 && (await Floor.findById(tFloor.id)).shape?.areas === undefined && Boolean(besideStem.id)
+  );
+  // ...and the T comes back only once nothing stands beside its stem.
+  const tAgain = await req("/api/floors/" + tFloor.id, "PATCH", { shape: { areas: T_SHAPE } });
+  await call("/api/resources/" + besideStem.id, "DELETE");
+  const restored = (await call("/api/floors/" + tFloor.id, "PATCH", { shape: { areas: T_SHAPE } })).floor;
+  check(
+    "a T redrawn over a desk is refused until the desk goes",
+    tAgain.status === 409 && JSON.stringify(restored.shape.areas) === JSON.stringify(T_SHAPE)
+  );
+
+  const listed = await call("/api/spaces?organizationId=" + org._id);
+  const floorList = await call("/api/floors?organizationId=" + org._id);
+  check(
+    "the hierarchy and the floor list carry each floor's outline",
+    listed.buildings.find((b) => b.id === shaped.id).floors.find((f) => f.id === tFloor.id).shape.areas.length === 2 &&
+      floorList.floors.find((f) => f.id === lFloor.id).shape.areas.length === 2
+  );
+
+  // Racing a reshape against placements in the part it cuts. Every one of
+  // them writes the organization's space revision first, so whichever goes
+  // second sees the other: never a piece, zone or label left off the floor.
+  const RACE_CUT = [{ col: 0, row: 0, w: 8, h: 3 }, { col: 0, row: 3, w: 4, h: 3 }];
+  const outcomes = new Set();
+  let stranded = 0;
+  for (let round = 0; round < 4; round += 1) {
+    const arena = (await newFloor(`Race ${round}`, { cols: 8, rows: 6 })).body.floor;
+    const racing = [
+      req("/api/floors/" + arena.id, "PATCH", { shape: { areas: RACE_CUT } }),
+      req("/api/resources", "POST", { floorId: arena.id, resourceTypeKey: "desk", col: 5, row: 4 }),
+      req("/api/resources/zones", "POST", { floorId: arena.id, name: "Corner", areas: [{ col: 4, row: 3, w: 4, h: 3 }] }),
+      req("/api/resources/labels", "POST", { floorId: arena.id, text: "Corner", col: 6, row: 5 }),
+    ];
+    const [cut] = await Promise.all(racing);
+    outcomes.add(cut.status);
+    const after = await call("/api/floors/" + arena.id + "/layout");
+    const cells = floorCells(after.floor);
+    const footprint = (piece) => after.resourceTypes.find((type) => type.id === piece.resourceType).footprint;
+    stranded +=
+      after.layout.resources.filter((piece) => !contains(cells, { ...piece.position, ...footprint(piece) })).length +
+      after.layout.zones.filter((zone) => !contains(cells, zone.areas)).length +
+      after.layout.labels.filter((label) => !cells.has(cellKey(label.position.col, label.position.row))).length;
+    for (const piece of after.layout.resources) await call("/api/resources/" + piece.id, "DELETE");
+    await call("/api/floors/" + arena.id, "DELETE");
+  }
+  check(
+    "racing a reshape against placements never leaves anything off the floor",
+    stranded === 0 && [...outcomes].every((status) => status === 200 || status === 409)
   );
 
   /* ──────────────────── documents written before shapes ──────────────────── */
