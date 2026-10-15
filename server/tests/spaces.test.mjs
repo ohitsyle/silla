@@ -39,6 +39,7 @@ const { default: ResourceType } = await import("../src/models/ResourceType.js");
 const { default: Resource } = await import("../src/models/Resource.js");
 const { default: Reservation } = await import("../src/models/Reservation.js");
 const { default: Room } = await import("../src/models/Room.js");
+const { default: Zone } = await import("../src/models/Zone.js");
 const {
   ReservationError, cancelReservation, claimReservation, reservationAvailability, roomBookingOptions,
   syncUnitStatus, transact,
@@ -696,6 +697,223 @@ try {
   const after = await call("/api/floors/" + floor2.id + "/layout");
   check("removing a room preserves its furniture", after.layout.rooms.length === 0 && after.layout.resources.length === 1);
   check("room history survives removal of its map boundary", Boolean(await Reservation.findById(apiBooked.reservation.id)));
+
+  /* ─────────────────────────────── shapes ─────────────────────────────── */
+
+  // A building that is not a rectangle. The L floor, 12 by 10 cells:
+  //
+  //     cols 0–11, rows 0–3   the bar
+  //     cols 0–4,  rows 4–9   the stem          the rest of the grid is not floor
+  //
+  // with an L-shaped room around its inside corner, desks in both arms of
+  // the room and one outside it, an L-shaped zone and a label.
+  const shaped = (await call("/api/spaces/buildings", "POST", { name: "Shaped building" }, 201)).building;
+  const newFloor = (name, grid, shape) => req("/api/floors", "POST", { name, buildingId: shaped.id, grid, ...(shape === undefined ? {} : { shape }) });
+  const outlineRefusals = await Promise.all([
+    newFloor("Fractions", { cols: 12, rows: 10 }, { areas: [{ col: 0, row: 0, w: 1.5, h: 2 }] }),
+    newFloor("Past the edge", { cols: 12, rows: 10 }, { areas: [{ col: 10, row: 0, w: 3, h: 2 }] }),
+    newFloor("Not a shape", { cols: 12, rows: 10 }, "L"),
+    newFloor("Too intricate", { cols: 12, rows: 10 }, { areas: Array.from({ length: 201 }, () => ({ col: 0, row: 0, w: 1, h: 1 })) }),
+  ]);
+  check("a floor outline must be whole cells inside the grid, in at most 200 rectangles", outlineRefusals.every((r) => r.status === 400));
+
+  const L_SHAPE = [{ col: 0, row: 0, w: 12, h: 4 }, { col: 0, row: 4, w: 5, h: 6 }];
+  const lFloor = (await newFloor("L wing", { cols: 12, rows: 10 }, { areas: L_SHAPE })).body.floor;
+  check("an L-shaped floor stores its two rectangles", JSON.stringify(lFloor.shape.areas) === JSON.stringify(L_SHAPE));
+  const plain = (await newFloor("Plain", { cols: 6, rows: 4 }, { areas: [{ col: 0, row: 0, w: 3, h: 4 }, { col: 3, row: 0, w: 3, h: 4 }] })).body.floor;
+  check(
+    "an outline that covers the whole grid is stored as a plain floor",
+    plain.shape.areas.length === 0 && (await Floor.findById(plain.id)).shape?.areas === undefined
+  );
+  await call("/api/floors/" + plain.id, "DELETE");
+
+  // Nothing goes in the missing corner, or across the inside corner.
+  const corner = await Promise.all([
+    req("/api/resources", "POST", { floorId: lFloor.id, resourceTypeKey: "desk", col: 8, row: 6 }),
+    req("/api/resources", "POST", { floorId: lFloor.id, resourceTypeKey: "desk", col: 4, row: 5 }),
+    req("/api/resources/zones", "POST", { floorId: lFloor.id, name: "Spill", areas: [{ col: 6, row: 3, w: 3, h: 3 }] }),
+    req("/api/resources/labels", "POST", { floorId: lFloor.id, text: "Nowhere", col: 9, row: 8 }),
+    req("/api/spaces/rooms", "POST", {
+      name: "Spill", buildingId: shaped.id, bookingMode: "individual",
+      levels: [{ floorId: lFloor.id, areas: [{ col: 3, row: 3, w: 4, h: 4 }] }],
+    }),
+  ]);
+  check("a piece, zone, label or room outside the floor's outline is refused", corner.every((r) => r.status === 400));
+  check("the refusal says it is the outline", /outline/.test(corner[0].body.error) && /outline/.test(corner[4].body.error));
+
+  const roomDesk = await place(lFloor.id, "desk", 2, 1); // the room's bar
+  const stemDesk = await place(lFloor.id, "desk", 1, 7); // the room's stem
+  const barDesk = await place(lFloor.id, "desk", 8, 1); // outside the room
+  const zone = (await call("/api/resources/zones", "POST", {
+    floorId: lFloor.id, name: "Quiet corner", areas: [{ col: 6, row: 0, w: 6, h: 2 }, { col: 10, row: 2, w: 2, h: 2 }],
+  }, 201)).zone;
+  check("an L-shaped zone keeps its shape and its bounding box", zone.areas.length === 2 && zone.bounds.w === 6 && zone.bounds.h === 4);
+  const sign = (await call("/api/resources/labels", "POST", { floorId: lFloor.id, text: "Lifts", col: 4, row: 9 }, 201)).label;
+
+  const L_ROOM = [{ col: 0, row: 0, w: 6, h: 4 }, { col: 0, row: 4, w: 4, h: 5 }];
+  const lRoom = (await call("/api/spaces/rooms", "POST", {
+    name: "Reading room", buildingId: shaped.id, bookingMode: "either", levels: [{ floorId: lFloor.id, areas: L_ROOM }],
+  }, 201)).room;
+  check(
+    "an L-shaped room is one room with both rectangles",
+    JSON.stringify(lRoom.levels[0].areas) === JSON.stringify(L_ROOM) &&
+      JSON.stringify(lRoom.levels[0].bounds) === JSON.stringify({ col: 0, row: 0, w: 6, h: 9 })
+  );
+  const sharesOneCell = await req("/api/spaces/rooms", "POST", {
+    name: "Neighbour", buildingId: shaped.id, bookingMode: "individual", levels: [{ floorId: lFloor.id, areas: [{ col: 3, row: 8, w: 2, h: 2 }] }],
+  });
+  check("two rooms may not share even one cell", sharesOneCell.status === 409);
+  const throughDesk = await req("/api/spaces/rooms", "POST", {
+    name: "Cutting", buildingId: shaped.id, bookingMode: "individual",
+    levels: [{ floorId: lFloor.id, areas: [{ col: 6, row: 2, w: 3, h: 2 }, { col: 9, row: 0, w: 3, h: 4 }] }],
+  });
+  check("a shaped room may not cut through a piece", throughDesk.status === 409 && /cuts through/.test(throughDesk.body.error));
+
+  const lLayout = await call("/api/floors/" + lFloor.id + "/layout");
+  const roomOf = (piece) => lLayout.layout.resources.find((r) => r.id === piece.id)?.roomId;
+  check(
+    "a piece in either arm of an L-shaped room belongs to it, and one beside it does not",
+    roomOf(roomDesk) === lRoom.id && roomOf(stemDesk) === lRoom.id && roomOf(barDesk) === null
+  );
+  check(
+    "the layout carries the floor's outline and the zone's shape",
+    JSON.stringify(lLayout.floor.shape.areas) === JSON.stringify(L_SHAPE) && lLayout.layout.zones[0].areas.length === 2
+  );
+  const lOptions = await roomBookingOptions({ organizationId: org._id, roomId: lRoom.id, ...window });
+  check(
+    "the room panel offers the desks in both arms",
+    new Set(lOptions.units.map((unit) => unit.resourceId)).size === 2 && lOptions.units.length === 4 && lOptions.whole?.bookable
+  );
+  const grouped = (await call("/api/admin/resources?floorId=" + lFloor.id, "GET", null, 200, staff)).groups;
+  check(
+    "the console groups by the room's and the zone's shapes",
+    grouped.find((g) => g.zoneId === lRoom.id)?.resources.length === 2 &&
+      grouped.find((g) => g.zoneId === zone.id)?.resources.map((r) => r.id).join() === barDesk.id
+  );
+
+  // Whole-room booking covers both arms.
+  const [reader, other] = await Promise.all([makeUser("member", 40), makeUser("member", 41)]);
+  const inStem = await claim(reader, stemDesk.id);
+  await rejected(() => claim(other, lRoom.resourceId, "room"), "CONFLICT");
+  await cancelReservation({ reservationId: inStem._id });
+  const wholeL = await claim(other, lRoom.resourceId, "room");
+  await rejected(() => claim(reader, roomDesk.id), "CONFLICT");
+  await rejected(() => claim(reader, stemDesk.id, "2"), "CONFLICT");
+  const outsideRoom = await claim(reader, barDesk.id);
+  check("a whole-room booking of an L takes both arms and nothing beyond them", Boolean(outsideRoom._id));
+  await cancelReservation({ reservationId: wholeL._id });
+  await cancelReservation({ reservationId: outsideRoom._id });
+
+  // Reshaping the floor: refused while anything would be left outside.
+  const cutStem = await req("/api/floors/" + lFloor.id, "PATCH", { shape: { areas: [{ col: 0, row: 0, w: 12, h: 4 }] } });
+  check(
+    "cutting away the stem is refused, naming what stands in it",
+    cutStem.status === 409 &&
+      cutStem.body.error === "1 piece, the room “Reading room” and the label “Lifts” are in the part you're removing. Move or remove them first." &&
+      ["room", "resource", "label"].every((kind) => cutStem.body.outside.some((item) => item.kind === kind)) &&
+      cutStem.body.outside.find((item) => item.kind === "resource").id === stemDesk.id
+  );
+  check("a refused reshape changes nothing", JSON.stringify((await call("/api/floors/" + lFloor.id + "/layout")).floor.shape.areas) === JSON.stringify(L_SHAPE));
+  const trimmed = await call("/api/floors/" + lFloor.id, "PATCH", {
+    shape: { areas: [...L_SHAPE.slice(0, 1), { col: 0, row: 4, w: 5, h: 5 }, { col: 4, row: 9, w: 1, h: 1 }] },
+  });
+  check(
+    "cutting away an empty part is allowed, and stored canonically",
+    JSON.stringify(trimmed.floor.shape.areas) ===
+      JSON.stringify([{ col: 0, row: 0, w: 12, h: 4 }, { col: 0, row: 4, w: 5, h: 5 }, { col: 4, row: 9, w: 1, h: 1 }])
+  );
+
+  // Resizing the grid keeps the outline inside it.
+  const shorter = await req("/api/floors/" + lFloor.id, "PATCH", { grid: { cols: 12, rows: 9 } });
+  check("a smaller grid is refused while it would cut off a label", shorter.status === 409 && /label “Lifts”/.test(shorter.body.error));
+  await call("/api/resources/labels/" + sign.id, "DELETE");
+  const trimmedGrid = (await call("/api/floors/" + lFloor.id, "PATCH", { grid: { cols: 12, rows: 9 } })).floor;
+  check(
+    "a smaller grid trims a shaped floor's outline to the new edge",
+    JSON.stringify(trimmedGrid.shape.areas) === JSON.stringify([{ col: 0, row: 0, w: 12, h: 4 }, { col: 0, row: 4, w: 5, h: 5 }])
+  );
+  const wider = (await call("/api/floors/" + lFloor.id, "PATCH", { grid: { cols: 14, rows: 9 } })).floor;
+  check(
+    "a larger grid leaves a shaped floor's outline as it was",
+    wider.grid.cols === 14 && JSON.stringify(wider.shape.areas) === JSON.stringify(trimmedGrid.shape.areas) &&
+      (await req("/api/resources", "POST", { floorId: lFloor.id, resourceTypeKey: "equipment", col: 13, row: 0 })).status === 400
+  );
+  const island = (await newFloor("Island", { cols: 10, rows: 10 }, { areas: [{ col: 6, row: 6, w: 4, h: 4 }] })).body.floor;
+  check(
+    "a grid too small to keep any of the outline is refused",
+    (await req("/api/floors/" + island.id, "PATCH", { grid: { cols: 5, rows: 5 } })).status === 409
+  );
+  await call("/api/floors/" + island.id, "DELETE");
+
+  // Zones reshape under the same rules as everything else.
+  const zoneOut = await req("/api/resources/zones/" + zone.id, "PATCH", { areas: [{ col: 4, row: 3, w: 4, h: 3 }] });
+  const zoneIn = await call("/api/resources/zones/" + zone.id, "PATCH", { areas: [{ col: 6, row: 0, w: 6, h: 4 }] });
+  check("a zone can be reshaped inside the outline, but not past it", zoneOut.status === 400 && zoneIn.zone.areas.length === 1);
+
+  // A T, the other shape the owner asked about.
+  const T_SHAPE = [{ col: 0, row: 0, w: 15, h: 3 }, { col: 5, row: 3, w: 5, h: 7 }];
+  const tFloor = (await newFloor("T hall", { cols: 15, rows: 10 }, { areas: T_SHAPE })).body.floor;
+  const tDesk = await place(tFloor.id, "desk", 6, 6);
+  check(
+    "a T-shaped floor takes pieces in its stem and refuses them beside it",
+    Boolean(tDesk.id) && (await req("/api/resources", "POST", { floorId: tFloor.id, resourceTypeKey: "desk", col: 1, row: 6 })).status === 400
+  );
+
+  // Reset to a rectangle: the whole grid is floor again, stored as nothing.
+  const reset = (await call("/api/floors/" + tFloor.id, "PATCH", { shape: null })).floor;
+  check(
+    "resetting to a rectangle makes the whole grid floor again",
+    reset.shape.areas.length === 0 && (await Floor.findById(tFloor.id)).shape?.areas === undefined &&
+      Boolean((await place(tFloor.id, "desk", 1, 6)).id)
+  );
+
+  /* ──────────────────── documents written before shapes ──────────────────── */
+
+  // Written as rooms, zones and floors were before shapes existed: a floor
+  // with no outline, a room level and a zone with one `bounds` and no
+  // `areas`. Nothing migrates them; they must read and behave as before.
+  const legacyFloor = (await newFloor("Before shapes", { cols: 10, rows: 8 })).body.floor;
+  const legacyRoom = (await call("/api/spaces/rooms", "POST", {
+    name: "Old room", buildingId: shaped.id, bookingMode: "either",
+    levels: [{ floorId: legacyFloor.id, bounds: { col: 1, row: 1, w: 5, h: 4 } }],
+  }, 201)).room;
+  const legacyZone = (await call("/api/resources/zones", "POST", {
+    floorId: legacyFloor.id, name: "Old zone", col: 6, row: 1, w: 4, h: 4,
+  }, 201)).zone;
+  await Room.collection.updateOne({ _id: new mongoose.Types.ObjectId(legacyRoom.id) }, { $unset: { "levels.$[].areas": "" } });
+  await Zone.collection.updateOne({ _id: new mongoose.Types.ObjectId(legacyZone.id) }, { $unset: { areas: "" } });
+  const stored = await Room.collection.findOne({ _id: new mongoose.Types.ObjectId(legacyRoom.id) });
+  const storedFloor = await Floor.collection.findOne({ _id: new mongoose.Types.ObjectId(legacyFloor.id) });
+  check("the legacy fixtures really have no shape fields", !("areas" in stored.levels[0]) && !("shape" in storedFloor));
+
+  const oldDesk = await place(legacyFloor.id, "desk", 2, 2);
+  const oldCorner = await place(legacyFloor.id, "desk", 8, 7);
+  const oldLayout = await call("/api/floors/" + legacyFloor.id + "/layout");
+  check(
+    "an old floor, room and zone read as their one rectangle",
+    oldLayout.floor.shape.areas.length === 0 &&
+      JSON.stringify(oldLayout.layout.rooms[0].levels[0].areas) === JSON.stringify([{ col: 1, row: 1, w: 5, h: 4 }]) &&
+      JSON.stringify(oldLayout.layout.zones[0].areas) === JSON.stringify([{ col: 6, row: 1, w: 4, h: 4 }])
+  );
+  check(
+    "an old room's membership is its rectangle, and the whole grid is floor",
+    oldLayout.layout.resources.find((r) => r.id === oldDesk.id)?.roomId === legacyRoom.id &&
+      oldLayout.layout.resources.find((r) => r.id === oldCorner.id)?.roomId === null
+  );
+  const oldSeat = await claim(reader, oldDesk.id);
+  await rejected(() => claim(other, legacyRoom.resourceId, "room"), "CONFLICT");
+  await cancelReservation({ reservationId: oldSeat._id });
+  const renamedOld = await call("/api/spaces/rooms/" + legacyRoom.id, "PATCH", { name: "Old room, renamed" });
+  check(
+    "an old room renames without being redrawn or rewritten",
+    renamedOld.room.levels[0].areas.length === 1 && renamedOld.room.name === "Old room, renamed" &&
+      !("areas" in (await Room.collection.findOne({ _id: new mongoose.Types.ObjectId(legacyRoom.id) })).levels[0])
+  );
+  await call("/api/floors/" + legacyFloor.id, "PATCH", { grid: { cols: 9, rows: 8 } }, 409); // the corner desk
+  check(
+    "an old floor still resizes as a plain grid",
+    (await call("/api/floors/" + legacyFloor.id, "PATCH", { grid: { cols: 12, rows: 9 } })).floor.shape.areas.length === 0
+  );
 
   console.log(`\n${passed} spatial checks passed; ${SERVE ? "isolated database kept for preview." : "isolated database discarded."}`);
 

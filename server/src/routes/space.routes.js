@@ -44,7 +44,7 @@ import { announceUnitStatus } from "../services/reservations/index.js";
 import {
   SpaceError, pieceBounds, roomContents, shapeRoom, withSpaceTransaction,
 } from "../services/spaces.js";
-import { boundingBox, contains, intersects, normaliseAreas, plainAreas, regionAreas } from "../lib/cells.js";
+import { boundingBox, contains, floorCells, intersects, normaliseAreas, plainAreas, regionAreas } from "../lib/cells.js";
 
 const router = Router();
 const run = (handler) => (req, res, next) => Promise.resolve(handler(req, res)).catch(next);
@@ -177,11 +177,11 @@ router.delete("/buildings/:id", ...superadmin, run(async (req, res) => {
  * Each level is a shape of whole cells on a different floor of the room's
  * own building: `areas`, a list of rectangles whose union is the room
  * there (an L-shaped room is two), or the single `bounds` rectangle a
- * client that predates shapes sends. It must fit the floor, must not share
- * a cell with another room on that floor, and must not cut through a
- * placed piece — a piece is either wholly inside a room or wholly outside
- * it, which is what lets membership be derived from position instead of
- * stored.
+ * client that predates shapes sends. It must lie on the floor (inside its
+ * outline, not just its grid), must not share a cell with another room on
+ * that floor, and must not cut through a placed piece — a piece is either
+ * wholly inside a room or wholly outside it, which is what lets membership
+ * be derived from position instead of stored.
  *
  * Stored, a level always has `areas` (canonical: the same shape always
  * stores the same rectangles) and `bounds`, their bounding box, so a
@@ -213,6 +213,9 @@ async function validateLevels(input, building, excludeRoomId, session) {
     const drawn = Array.isArray(item.areas) && item.areas.length ? item.areas : item.bounds ? [item.bounds] : item.areas;
     const { areas, cells, error } = normaliseAreas(drawn, floor.grid, { noun: "room" });
     if (error) throw new SpaceError(error);
+    // Inside the building, not just the grid: an L-shaped floor's missing
+    // corner is in the grid but is not floor.
+    if (!contains(floorCells(floor), cells)) throw new SpaceError("That room reaches outside the floor's outline.");
 
     // Sharing a single cell is an overlap: rooms tile a floor, never stack.
     const overlapping = otherRooms.some((room) =>
