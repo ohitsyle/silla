@@ -593,10 +593,16 @@ export function EmptyState({ icon: Icon, title, body, action, className }) {
   );
 }
 
-/** Standard page container — one width and rhythm for every screen. */
+/**
+ * Standard page container — one width and rhythm for every screen.
+ *
+ * The top padding puts a page's title level with the organization's name
+ * in the sidebar. It used to be zero — left over from when a top bar sat
+ * above every page — so each title was pressed against the window's edge.
+ */
 export function Page({ children, width = "wide", className }) {
   const widths = { narrow: "max-w-sm", medium: "max-w-3xl", wide: "max-w-6xl" };
-  return <div className={cx("px-6 pb-14 mx-auto text-ink-primary", widths[width], className)}>{children}</div>;
+  return <div className={cx("px-6 pt-5 pb-14 mx-auto text-ink-primary", widths[width], className)}>{children}</div>;
 }
 
 /** Re-exported so screens animate lists without importing motion twice. */
