@@ -37,6 +37,34 @@ export function OrgProvider({ initialOrg, children }) {
     }
   }, [organizationId]);
 
+  const operational = entitlementsOf(org).operational;
+
+  /**
+   * A paused organization is asked again every minute, so a kiosk or a
+   * map left open on the paused state comes back by itself once the
+   * subscription is sorted out — nobody should have to know to reload a
+   * wall screen. A working organization is only re-read when the page
+   * returns from the background after a while; polling it would cost
+   * every open tab a request a minute for news that is almost always
+   * "nothing".
+   */
+  useEffect(() => {
+    if (operational) return undefined;
+    const timer = setInterval(reload, 60_000);
+    return () => clearInterval(timer);
+  }, [operational, reload]);
+
+  useEffect(() => {
+    let last = Date.now();
+    const onVisible = () => {
+      if (document.visibilityState !== "visible" || Date.now() - last < 60_000) return;
+      last = Date.now();
+      reload();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [reload]);
+
   const value = useMemo(
     () => ({
       org,

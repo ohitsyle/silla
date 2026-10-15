@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  CircleCheck, ContactRound, CreditCard, DoorOpen, LoaderCircle, MailCheck,
+  CircleCheck, CirclePause, ContactRound, CreditCard, DoorOpen, LoaderCircle, MailCheck,
   RotateCcw, TriangleAlert, UserX,
 } from "lucide-react";
 import { api } from "../lib/api.js";
@@ -46,7 +46,7 @@ const STEP = {
 const AUTO_RESET_MS = 12_000;
 
 export default function KioskPage() {
-  const { org, organizationId } = useOrg();
+  const { org, organizationId, entitlements, reload } = useOrg();
 
   const [requirements, setRequirements] = useState(null);
   const [step, setStep] = useState(STEP.TAP);
@@ -129,6 +129,11 @@ export default function KioskPage() {
         if (err.body?.next === "see-staff") {
           setResult({ kind: "see-staff" });
           setStep(STEP.RESULT);
+        } else if (err.body?.code === "ORG_SUSPENDED") {
+          // Paused since this screen loaded. The server's sentence is for
+          // administrators; re-reading the organization swaps this screen
+          // for the paused one, which is written for whoever is at it.
+          reload();
         } else {
           setError(err.message);
         }
@@ -136,8 +141,14 @@ export default function KioskPage() {
         setBusy(false);
       }
     },
-    [organizationId, busy, requirements]
+    [organizationId, busy, requirements, reload]
   );
+
+  // Suspended or cancelled: every tap would be refused, so the kiosk says
+  // so instead of inviting one (docs/control-plane.md §2).
+  if (!entitlements.operational) {
+    return <KioskClosed org={org} />;
+  }
 
   return (
     <div className="min-h-screen px-6 py-10 max-w-3xl mx-auto text-ink-primary flex flex-col justify-center">
@@ -239,6 +250,40 @@ export default function KioskPage() {
 }
 
 /* ---------------------------------------------------------------- */
+
+/**
+ * The kiosk while the organization is paused. Shaped like the tap screen —
+ * the same header, the same large type for reading at arm's length — so a
+ * wall screen reads as a device waiting, not one that has crashed. It
+ * comes back by itself: OrgProvider asks again every minute while paused.
+ */
+function KioskClosed({ org }) {
+  return (
+    <div className="min-h-screen px-6 py-10 max-w-3xl mx-auto text-ink-primary flex flex-col justify-center">
+      <header className="flex items-center gap-3 mb-8">
+        <div
+          className="w-11 h-11 rounded-xl flex items-center justify-center"
+          style={{ background: "var(--color-accent)", color: "var(--color-accent-ink)" }}
+        >
+          <ContactRound size={22} />
+        </div>
+        <div className="text-lg font-semibold">{org?.name || "Kiosk"}</div>
+      </header>
+
+      <div className="flex flex-col items-center justify-center text-center py-6 sm:py-10">
+        <div className="w-36 h-36 sm:w-44 sm:h-44 rounded-[2rem] flex items-center justify-center mb-9 bg-bg-panel border border-line/10 text-ink-secondary">
+          <CirclePause size={64} strokeWidth={1.6} />
+        </div>
+        <h1 className="text-4xl sm:text-5xl font-semibold tracking-tight">Check-in is paused</h1>
+        <p className="text-lg sm:text-xl text-ink-secondary mt-4 max-w-xl leading-relaxed">
+          {org?.name || "This organization"} isn't taking check-ins or registrations right now. Please ask a member
+          of staff.
+        </p>
+        <p className="mt-12 text-sm text-ink-muted">This screen reopens by itself when check-in is back.</p>
+      </div>
+    </div>
+  );
+}
 
 function Stepper({ step }) {
   const steps = [

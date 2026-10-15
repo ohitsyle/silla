@@ -8,6 +8,7 @@ import { useAuth } from "../lib/AuthContext.jsx";
 import { sectionsFor } from "../lib/adminSections.js";
 import { useOrg } from "../lib/OrgContext.jsx";
 import { DURATION, EASE_OUT, prefersReducedMotion } from "../lib/motion.js";
+import OrgStatusBanner from "./OrgStatusBanner.jsx";
 
 /**
  * The application shell.
@@ -259,6 +260,10 @@ export default function AppShell({ children, fill = false }) {
           <OrgMark org={org} />
           <span className="min-w-0 truncate font-semibold">{org?.name}</span>
         </div>
+
+        {/* Overdue, paused or ended — on every screen in the shell, above
+            the page, so nobody meets it first as a button that fails. */}
+        <OrgStatusBanner />
 
         <main className={fill ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-y-auto"}>
           {children}
