@@ -69,6 +69,10 @@
   /* ---- Map chrome (spec §12's grid, zones and labels) ---- */
   --color-map-grid: rgb(var(--c-line) / 0.07);
   --color-map-outline: rgb(var(--c-line) / 0.16);
+  /* The floor itself (only the cells inside its outline) and the wall
+     drawn along that outline. */
+  --color-map-floor: rgb(var(--c-line) / 0.025);
+  --color-map-wall: rgb(var(--c-line) / 0.26);
   --color-map-piece-fill: rgb(var(--c-line) / 0.05);
   --color-map-piece-stroke: rgb(var(--c-line) / 0.14);
   --color-map-zone-fill: rgb(var(--c-line) / 0.035);

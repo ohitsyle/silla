@@ -2,6 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Ban, Check, Clock, DoorOpen, Maximize, TriangleAlert, User, Wrench, ZoomIn, ZoomOut } from "lucide-react";
 import { effectiveStatus, roomMode, roomUnit } from "../lib/rooms.js";
+import {
+  boundingBox, cellKey, cellsOf, difference, floorAreas, isRectangle, largestRect, regionAreas, union,
+} from "../lib/cells.js";
+import { outlinePath } from "../lib/shapePath.js";
 
 /**
  * SpaceMap — the read-only grid renderer (MAP-1, spec §12).
@@ -10,13 +14,20 @@ import { effectiveStatus, roomMode, roomUnit } from "../lib/rooms.js";
  * the admin editor (MAP-3) — this component owns only the *reading* half.
  * It draws spec §12's three layers, back to front:
  *
- *   zones     — admin-drawn named rectangles; membership is derived from
+ *   floor     — the building's outline: only the cells that ARE the floor
+ *               get the grid, with a wall around them. An L-shaped floor's
+ *               missing corner is empty page, not more floor
+ *   zones     — admin-drawn named areas; membership is derived from
  *               position, so a zone is purely a backdrop here
  *   rooms     — booking boundaries: an outline with the room's name and
  *               what it lets you book, or its state when booked or closed
  *   resources — catalog pieces on the integer cell grid, each showing its
  *               reservable units by colour AND icon (MAP-1 AC)
  *   labels    — free-typed orientation text; not reservable, no analytics
+ *
+ * Floors, rooms and zones are SHAPES — sets of grid cells (lib/cells.js) —
+ * drawn as their outlines (lib/shapePath.js). A rectangle is just the
+ * simplest one, so nothing here special-cases it.
  *
  * `layout` and `status` are separate props on purpose, mirroring the
  * split in GET /api/floors/:id/layout: layout is fetched once and rarely
@@ -68,6 +79,18 @@ const truncate = (text, chars) => (text.length <= chars ? text : `${text.slice(0
 
 /** Average advance of a glyph, as a fraction of the font size — enough to fit labels without measuring. */
 const GLYPH = 0.6;
+
+/** Corner rounding, in SVG units: a room's outline, a zone's, the floor's walls. */
+const ROOM_RADIUS = 10;
+const ZONE_RADIUS = 8;
+const WALL_RADIUS = 4;
+
+/**
+ * Where a shape's name goes: its largest rectangle, measured the way a line
+ * of text uses space (width, and height only up to two cells), so a T's
+ * name sits in its bar rather than down its stem.
+ */
+const labelSpot = (cells) => largestRect(cells, { usefulHeight: 2 });
 
 /** How a room reads when its own state is not "free". */
 const ROOM_STATE = {
@@ -204,6 +227,24 @@ export default function SpaceMap({
    */
   regionMode = false,
   onRegionSelect,
+  /**
+   * A shape being edited, drawn live as the drag goes (the editor's Shape
+   * tool, and a room's "Add to room" / "Cut from room"):
+   *
+   *   { target: "floor", areas, mode }           the floor's draft outline
+   *   { target: "room", roomId?, areas, mode }   one room level's draft
+   *
+   * `mode` is "add" or "cut": a drag is previewed as the shape it would
+   * leave, before onRegionSelect hands the rectangle over. Editing the
+   * floor also shows the whole grid faintly, since that is where floor can
+   * be added.
+   */
+  shapeEdit = null,
+  /**
+   * Ids of pieces, rooms, zones and labels to point at — what stood in the
+   * way of a refused reshape (the server lists them).
+   */
+  flagged = null,
   editing = false,
   fill = false,
   className = "",
@@ -216,14 +257,38 @@ export default function SpaceMap({
   const grid = floor?.grid || { cols: 0, rows: 0 };
 
   const rooms = layout?.rooms || [];
-  const focusedLevel = rooms.find((r) => r.id === focusedRoomId)?.levels.find((l) => l.floorId === floor?.id);
+  const levelHere = (room) => room.levels.find((level) => level.floorId === floor?.id) || null;
+  const focusedRoom = rooms.find((room) => room.id === focusedRoomId);
+  const focusedLevel = focusedRoom ? levelHere(focusedRoom) : null;
 
+  /**
+   * The floor's cells: its outline, or the whole grid when it has none
+   * (every floor drawn before outlines existed). While the outline itself
+   * is being edited, the draft is drawn instead.
+   */
+  const editingFloor = shapeEdit?.target === "floor";
+  const floorShape = editingFloor ? shapeEdit.areas : floorAreas(floor);
+  const floorShapeKey = JSON.stringify(floorShape);
+  const floorCells = useMemo(() => cellsOf(floorShape), [floorShapeKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
+   * What the map is framed on: the floor's own extent, so a building whose
+   * outline does not reach every edge of its grid is still centred — or,
+   * while the outline is being edited, the whole grid, which is where it
+   * can grow. A room in focus frames on that room.
+   */
+  const gridBox = { col: 0, row: 0, w: grid.cols, h: grid.rows };
+  const focusBox = focusedLevel ? boundingBox(regionAreas(focusedLevel)) : null;
+  const extent = editingFloor ? gridBox : boundingBox(floorCells) || gridBox;
+  const frame = focusBox || extent;
   const baseView = useMemo(
-    () => focusedLevel ? ({
-      x: (focusedLevel.bounds.col - PAD) * CELL, y: (focusedLevel.bounds.row - PAD) * CELL,
-      w: (focusedLevel.bounds.w + PAD * 2) * CELL, h: (focusedLevel.bounds.h + PAD * 2) * CELL,
-    }) : ({ x: -PAD * CELL, y: -PAD * CELL, w: (grid.cols + PAD * 2) * CELL, h: (grid.rows + PAD * 2) * CELL }),
-    [grid.cols, grid.rows, floor?.id, focusedRoomId, focusedLevel?.bounds.col, focusedLevel?.bounds.row, focusedLevel?.bounds.w, focusedLevel?.bounds.h]
+    () => ({
+      x: (frame.col - PAD) * CELL,
+      y: (frame.row - PAD) * CELL,
+      w: (frame.w + PAD * 2) * CELL,
+      h: (frame.h + PAD * 2) * CELL,
+    }),
+    [floor?.id, focusedRoomId, frame.col, frame.row, frame.w, frame.h] // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   const [view, setView] = useState(baseView);
@@ -304,6 +369,8 @@ export default function SpaceMap({
 
   /** Movement (px) before a press is treated as a drag rather than a click. */
   const DRAG_THRESHOLD = 4;
+  /** Movement (px) a drag inside one cell needs before it counts as drawing that cell. */
+  const SINGLE_CELL_DRAG = 12;
 
   /**
    * setPointerCapture throws (NotFoundError) if the browser does not
@@ -379,7 +446,7 @@ export default function SpaceMap({
       // the pointer leaving the SVG mid-drag.
       const start = cellAt(e.clientX, e.clientY);
       capture(e.pointerId);
-      updateRegion({ start, end: start, pointerId: e.pointerId });
+      updateRegion({ start, end: start, pointerId: e.pointerId, x: e.clientX, y: e.clientY, travelled: 0 });
       return;
     }
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY, moved: 0, captured: false });
@@ -388,7 +455,13 @@ export default function SpaceMap({
   const handlePointerMove = (e) => {
     const drawing = regionRef.current;
     if (drawing && drawing.pointerId === e.pointerId) {
-      updateRegion({ ...drawing, end: cellAt(e.clientX, e.clientY) });
+      updateRegion({
+        ...drawing,
+        end: cellAt(e.clientX, e.clientY),
+        x: e.clientX,
+        y: e.clientY,
+        travelled: drawing.travelled + Math.hypot(e.clientX - drawing.x, e.clientY - drawing.y),
+      });
       return;
     }
 
@@ -448,9 +521,11 @@ export default function SpaceMap({
       release(e.pointerId);
       const rect = normalise(drawn.start, drawn.end);
       updateRegion(null);
-      // A single cell is almost always a misfire — a click that moved a
-      // pixel — so it is dropped rather than creating a 1x1 room.
-      if (rect.w > 1 || rect.h > 1) onRegionSelect?.(rect);
+      // A single cell from a press that barely moved is a misfire — a
+      // click, or a tap's wobble — and is dropped rather than creating a
+      // 1x1 room. A drag that wanders inside one cell is deliberate:
+      // cutting a notch for a pillar is a real edit.
+      if (rect.w > 1 || rect.h > 1 || drawn.travelled > SINGLE_CELL_DRAG) onRegionSelect?.(rect);
       // Suppress the click that follows this drag, or the grid's own
       // cell handler would also fire at the release point.
       lastTravel.current = DRAG_THRESHOLD + 1;
@@ -477,15 +552,94 @@ export default function SpaceMap({
   const isSelected = (resourceId, unitLabel) =>
     selectedUnit?.resourceId === resourceId && selectedUnit?.unitLabel === unitLabel;
 
+  /**
+   * The rooms drawn on this floor with their cells here, and which room
+   * covers each cell — how a click finds the room under it.
+   *
+   * By cell rather than by the drawn outline: the outline is inset and its
+   * corners rounded, but the room is its cells. It also lets a click in the
+   * editor pass through a room to the cell beneath, to place a piece there,
+   * instead of stopping at the room's fill.
+   */
+  const roomsHere = useMemo(
+    () =>
+      rooms
+        .filter((room) => !focusedRoomId || room.id === focusedRoomId)
+        .map((room) => ({ room, level: levelHere(room) }))
+        .filter(({ level }) => level)
+        .map(({ room, level }) => ({ room, cells: cellsOf(regionAreas(level)) })),
+    [rooms, floor?.id, focusedRoomId] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const roomAtCell = useMemo(() => {
+    const byCell = new Map();
+    for (const { room, cells } of roomsHere) for (const key of cells) byCell.set(key, room);
+    return byCell;
+  }, [roomsHere]);
+  const zonesHere = useMemo(
+    () => (layout?.zones || []).map((zone) => ({ zone, cells: cellsOf(regionAreas(zone)) })),
+    [layout?.zones]
+  );
+
+  /**
+   * The shape being edited as it would be if the drag in progress ended
+   * now — added to or cut from. Seeing that before letting go is the
+   * point of the tool.
+   */
+  const editKey = JSON.stringify(shapeEdit?.areas || null);
+  const editCells = useMemo(() => (shapeEdit ? cellsOf(shapeEdit.areas) : null), [editKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const dragged = region ? normalise(region.start, region.end) : null;
+  const previewCells = !editCells
+    ? null
+    : !dragged
+      ? editCells
+      : shapeEdit.mode === "cut"
+        ? difference(editCells, [dragged])
+        : union(editCells, [dragged]);
+
+  /** Whether a room can be chosen from the map, and what choosing it does. */
+  const roomIsInteractive = (room) =>
+    !editing && !regionMode && Boolean(onSelectRoom || (!management && room.bookingMode !== "individual" && onSelectUnit));
+  const chooseRoom = (room) => {
+    if (onSelectRoom) onSelectRoom(room);
+    else if (!management && room.bookingMode !== "individual") onSelectUnit?.(roomUnit(room, status));
+  };
+
+  /**
+   * A click that reached the map itself rather than a piece (pieces stop
+   * theirs): in the editor, the cell for the tool in hand; otherwise the
+   * room covering that cell. Off the floor — the missing corner of an L —
+   * there is nothing to click.
+   */
+  const handleMapClick = (e) => {
+    if (regionMode || wasDrag()) return;
+    const { x, y } = clientToSvg(svgRef.current.getBoundingClientRect(), view, e.clientX, e.clientY);
+    const col = Math.floor(x / CELL);
+    const row = Math.floor(y / CELL);
+    const key = cellKey(col, row);
+    if (!floorCells.has(key)) return;
+    if (editing) {
+      onCellClick?.(col, row);
+      return;
+    }
+    const room = roomAtCell.get(key);
+    if (room && roomIsInteractive(room)) chooseRoom(room);
+  };
+
   if (!floor || !layout) return null;
 
   const gridW = grid.cols * CELL;
   const gridH = grid.rows * CELL;
 
+  // While the outline is edited, the floor is drawn as the draft would be.
+  const plate = editingFloor ? previewCells : floorCells;
+  const platePath = outlinePath(plate, { cell: CELL, radius: WALL_RADIUS });
+  const plainFloor = isRectangle(floorCells) && floorCells.size === grid.cols * grid.rows;
+  const editTone = shapeEdit?.mode === "cut" ? "var(--color-state-unavailable)" : "var(--color-accent)";
+
   return (
     // Two sizing modes.
     //
-    // Default: the box takes the grid's own aspect ratio so the SVG
+    // Default: the box takes the floor's own aspect ratio so the SVG
     // fills it rather than letterboxing — a fixed height would shrink a
     // 20x12 floor into a sliver on a phone, which is exactly where
     // pan/zoom matters most. maxHeight keeps a tall floor from running
@@ -501,7 +655,7 @@ export default function SpaceMap({
         fill
           ? undefined
           : {
-              aspectRatio: `${grid.cols + PAD * 2} / ${grid.rows + PAD * 2}`,
+              aspectRatio: `${extent.w + PAD * 2} / ${extent.h + PAD * 2}`,
               maxHeight: "68vh",
               minHeight: 260,
             }
@@ -512,14 +666,18 @@ export default function SpaceMap({
         viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
         preserveAspectRatio="xMidYMid meet"
         className="w-full h-full select-none"
-        style={{ touchAction: "none", cursor: "grab" }}
+        style={{ touchAction: "none", cursor: regionMode ? "crosshair" : editing && onCellClick ? "copy" : "grab" }}
         role="img"
-        aria-label={`Map of ${floor.name}: ${layout.resources.length} pieces on a ${grid.cols} by ${grid.rows} grid`}
+        aria-label={
+          `Map of ${floor.name}: ${layout.resources.length} pieces on ` +
+          (plainFloor ? `a ${grid.cols} by ${grid.rows} grid` : `a shaped floor within a ${grid.cols} by ${grid.rows} grid`)
+        }
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={endPointer}
         onPointerCancel={endPointer}
         onPointerLeave={endPointer}
+        onClick={handleMapClick}
       >
         <style>{`
           .silla-unit { cursor: pointer; outline: none; }
@@ -542,108 +700,71 @@ export default function SpaceMap({
           </pattern>
         </defs>
 
-        {/* ---- Grid ----
-             In editing mode the grid itself is clickable, so an empty
-             cell can receive a placement (MAP-3). It sits behind every
-             other layer, so a click that lands on a piece hits the piece
-             instead — which is what the remove tool needs. */}
-        <rect
-          x="0"
-          y="0"
-          width={gridW}
-          height={gridH}
-          fill="url(#silla-grid)"
-          style={
-            regionMode
-              ? { cursor: "crosshair" }
-              : editing && onCellClick
-                ? { cursor: "copy" }
-                : undefined
-          }
-          onClick={(e) => {
-            if (!editing || !onCellClick) return;
-            const rect = svgRef.current.getBoundingClientRect();
-            const { x, y } = clientToSvg(rect, view, e.clientX, e.clientY);
-            const col = Math.floor(x / CELL);
-            const row = Math.floor(y / CELL);
-            if (col < 0 || row < 0 || col >= grid.cols || row >= grid.rows) return;
-            onCellClick(col, row);
-          }}
-        />
-        <rect
-          x="0"
-          y="0"
-          width={gridW}
-          height={gridH}
-          fill="none"
-          style={{ stroke: "var(--color-map-outline)" }}
-          strokeWidth="1.5"
-          rx="4"
-        />
+        {/* ---- The whole grid, faintly, while the outline is edited ----
+             Floor can only be added inside the grid, so show where that is. */}
+        {editingFloor && (
+          <g pointerEvents="none">
+            <rect x="0" y="0" width={gridW} height={gridH} fill="url(#silla-grid)" opacity="0.6" />
+            <rect
+              x="0"
+              y="0"
+              width={gridW}
+              height={gridH}
+              fill="none"
+              rx="4"
+              style={{ stroke: "var(--color-map-outline)", strokeWidth: 1.5, strokeDasharray: "5 6" }}
+            />
+          </g>
+        )}
 
-        {/* ---- Layer: zones (spec §12) ---- */}
-        <g>
-          {layout.zones.map((zone) => (
-            <g key={zone.id}>
-              <rect
-                x={zone.bounds.col * CELL}
-                y={zone.bounds.row * CELL}
-                width={zone.bounds.w * CELL}
-                height={zone.bounds.h * CELL}
-                style={{ fill: "var(--color-map-zone-fill)", stroke: "var(--color-map-zone-stroke)" }}
-                strokeWidth="1.5"
-                strokeDasharray="6 5"
-                rx="8"
-              />
-              <text
-                x={zone.bounds.col * CELL + 10}
-                y={zone.bounds.row * CELL + 18}
-                fontSize="11"
-                fontWeight="600"
-                letterSpacing="1.2"
-                // Two `style` attributes: JSX kept the LAST one, so the
-                // fill was silently discarded and zone names painted in
-                // the SVG default (black) on a dark map. Merged.
-                style={{ fill: "var(--color-ink-muted)", textTransform: "uppercase" }}
-              >
-                {zone.name}
-              </text>
-            </g>
+        {/* ---- Layer: the floor ----
+             Only the floor's own cells get a surface and the grid, and the
+             wall runs along their outline: the missing corner of an L is
+             empty page, not floor nobody may use. Clicks are resolved by
+             cell on the <svg> (handleMapClick), so nothing here listens. */}
+        <g pointerEvents="none">
+          <path d={platePath} fillRule="evenodd" style={{ fill: "var(--color-map-floor)" }} />
+          <path d={platePath} fillRule="evenodd" fill="url(#silla-grid)" />
+          <path
+            d={platePath}
+            fillRule="evenodd"
+            fill="none"
+            strokeLinejoin="round"
+            style={{ stroke: editingFloor ? editTone : "var(--color-map-wall)", strokeWidth: editingFloor ? 2.5 : 3 }}
+          />
+        </g>
+
+        {/* ---- Layer: zones (spec §12) ---- a backdrop, so it takes no clicks */}
+        <g pointerEvents="none">
+          {zonesHere.map(({ zone, cells }) => (
+            <ZoneShape key={zone.id} zone={zone} cells={cells} flagged={Boolean(flagged?.has(zone.id))} />
           ))}
         </g>
 
         {/* ---- Layer: rooms ----
-             A room is drawn per floor (each of its levels is a rectangle on
-             one floor) and sits under the furniture, so its contents stay
-             clickable. Clicking the room itself opens what it offers. */}
+             A room is drawn per floor (each of its levels is a shape on one
+             floor) and sits under the furniture, so its contents stay
+             clickable. Clicking the room itself opens what it offers. A
+             room whose shape is being edited is drawn by the edit layer
+             instead, as the draft. */}
         <g>
-          {rooms
-            .filter((room) => !focusedRoomId || room.id === focusedRoomId)
-            .map((room) => {
-              const level = room.levels.find((candidate) => candidate.floorId === floor.id);
-              if (!level) return null;
-              const select = () => {
-                if (editing || regionMode || wasDrag()) return;
-                if (onSelectRoom) onSelectRoom(room);
-                else if (!management && room.bookingMode !== "individual") onSelectUnit?.(roomUnit(room, status));
-              };
-              const interactive =
-                !editing && !regionMode && Boolean(onSelectRoom || (!management && room.bookingMode !== "individual" && onSelectUnit));
-              return (
-                <RoomShape
-                  key={room.id}
-                  room={room}
-                  bounds={level.bounds}
-                  state={status[room.resourceId]?.[0]?.status || "available"}
-                  palette={palette}
-                  focused={room.id === focusedRoomId}
-                  pxPerUnit={pxPerUnit}
-                  resourceNoun={resourceNoun}
-                  interactive={interactive}
-                  onSelect={select}
-                />
-              );
-            })}
+          {roomsHere.map(({ room, cells }) =>
+            shapeEdit?.target === "room" && shapeEdit.roomId === room.id ? null : (
+              <RoomShape
+                key={room.id}
+                room={room}
+                cells={cells}
+                state={status[room.resourceId]?.[0]?.status || "available"}
+                palette={palette}
+                focused={room.id === focusedRoomId}
+                flagged={Boolean(flagged?.has(room.id))}
+                pxPerUnit={pxPerUnit}
+                resourceNoun={resourceNoun}
+                interactive={roomIsInteractive(room)}
+                onSelect={() => chooseRoom(room)}
+              />
+            )
+          )}
         </g>
         {/* ---- Layer: resources (spec §12) ---- */}
         <g>
@@ -663,6 +784,10 @@ export default function SpaceMap({
                 animate={{ opacity: 1, scale: 1 }}
                 transition={{ duration: 0.25, delay: Math.min(pieceIndex * 0.012, 0.3) }}
                 style={{ transformOrigin: `${x + (type.footprint.w * CELL) / 2}px ${y + (type.footprint.h * CELL) / 2}px` }}
+                // A click on furniture is never a click on the cell beneath
+                // it: the map's own handler would otherwise open the room
+                // behind it, or try to place a second piece on top.
+                onClick={(e) => e.stopPropagation()}
               >
                 {/* The piece's physical body — the furniture, not the unit */}
                 <rect
@@ -674,6 +799,7 @@ export default function SpaceMap({
                   strokeWidth="1"
                   rx="7"
                 />
+                {flagged?.has(resource.id) && <Flag x={x} y={y} w={type.footprint.w * CELL} h={type.footprint.h * CELL} />}
 
                 {resource.units.map((unit, unitIndex) => {
                   const unitStatus = management
@@ -845,57 +971,66 @@ export default function SpaceMap({
         </g>
 
         {/* ---- Layer: labels (spec §12) ---- */}
-        <g>
+        <g pointerEvents="none">
           {layout.labels.map((label) => (
-            <text
-              key={label.id}
-              x={label.position.col * CELL + CELL / 2}
-              y={label.position.row * CELL + CELL / 2 + 4}
-              textAnchor="middle"
-              fontSize="11"
-              fontWeight="500"
-              letterSpacing="0.6"
-              style={{ fill: "var(--color-ink-secondary)", pointerEvents: "none" }}
-            >
-              {label.text}
-            </text>
-          ))}
-        </g>
-        {/* ---- Layer: the rectangle being dragged out ---- */}
-        {region && (() => {
-          const r = normalise(region.start, region.end);
-          return (
-            <g pointerEvents="none">
-              <rect
-                x={r.col * CELL}
-                y={r.row * CELL}
-                width={r.w * CELL}
-                height={r.h * CELL}
-                rx="6"
-                style={{
-                  fill: "var(--color-accent)",
-                  fillOpacity: 0.14,
-                  stroke: "var(--color-accent)",
-                }}
-                strokeWidth="2"
-                strokeDasharray="6 4"
-              />
-              {/* The size, stated while you draw it — the number is the
-                  thing the old form was asking you to know in advance. */}
+            <g key={label.id}>
+              {flagged?.has(label.id) && <Flag x={label.position.col * CELL} y={label.position.row * CELL} w={CELL} h={CELL} />}
               <text
-                x={r.col * CELL + (r.w * CELL) / 2}
-                y={r.row * CELL + (r.h * CELL) / 2 + 5}
+                x={label.position.col * CELL + CELL / 2}
+                y={label.position.row * CELL + CELL / 2 + 4}
                 textAnchor="middle"
-                fontSize="14"
-                fontWeight="700"
-                style={{ fill: "var(--color-accent)" }}
+                fontSize="11"
+                fontWeight="500"
+                letterSpacing="0.6"
+                style={{ fill: "var(--color-ink-secondary)" }}
               >
-                {r.w} × {r.h}
+                {label.text}
               </text>
             </g>
-          );
-        })()}
+          ))}
+        </g>
 
+        {/* ---- Layer: a room's shape being edited ----
+             The draft, as the drag in progress would leave it. */}
+        {shapeEdit?.target === "room" && previewCells?.size > 0 && (
+          <path
+            d={outlinePath(previewCells, { cell: CELL, inset: 1, radius: ROOM_RADIUS })}
+            fillRule="evenodd"
+            pointerEvents="none"
+            style={{ fill: "var(--color-accent)", fillOpacity: 0.1, stroke: "var(--color-accent)", strokeWidth: 2.5 }}
+          />
+        )}
+
+        {/* ---- Layer: the rectangle being dragged out ----
+             In the accent when it draws or adds, in the "unavailable" tone
+             when it cuts — and signed, so the two read apart without colour. */}
+        {dragged && (
+          <g pointerEvents="none">
+            <rect
+              x={dragged.col * CELL}
+              y={dragged.row * CELL}
+              width={dragged.w * CELL}
+              height={dragged.h * CELL}
+              rx="6"
+              style={{ fill: editTone, fillOpacity: shapeEdit?.mode === "cut" ? 0.18 : 0.14, stroke: editTone }}
+              strokeWidth="2"
+              strokeDasharray="6 4"
+            />
+            {/* The size, stated while you draw it — the number is the
+                thing the old form was asking you to know in advance. */}
+            <text
+              x={dragged.col * CELL + (dragged.w * CELL) / 2}
+              y={dragged.row * CELL + (dragged.h * CELL) / 2 + 5}
+              textAnchor="middle"
+              fontSize="14"
+              fontWeight="700"
+              style={{ fill: editTone }}
+            >
+              {shapeEdit?.mode === "cut" ? "− " : shapeEdit?.mode === "add" ? "+ " : ""}
+              {dragged.w} × {dragged.h}
+            </text>
+          </g>
+        )}
       </svg>
 
       {/* Pan/zoom controls — the pointer gestures cover touch, these
@@ -939,19 +1074,30 @@ export default function SpaceMap({
  * that state as a coloured pill with an icon (colour is never the only
  * signal).
  *
+ * The outline is the room's shape on this floor, whatever it is: an
+ * L-shaped room is one outline, not two boxes. It is inset a unit from the
+ * room's cells so two rooms sharing a wall keep a hairline between them.
+ * The name sits in the room's largest rectangle (labelSpot), which is
+ * where it reads.
+ *
  * The outline is neutral while the room is free. Painting every free room
  * green made it read as one huge "available" unit, which is not what a
  * room in the individual mode is. The focused room takes the accent.
  *
  * Label sizes come from `pxPerUnit` so they hold about 13px on screen at
- * any zoom, and are cut to fit the room's width — a long name in a narrow
- * room is truncated rather than spilling over its neighbour.
+ * any zoom, and are cut to fit the width they sit in — a long name in a
+ * narrow room is truncated rather than spilling over its neighbour.
+ *
+ * Clicks are not handled here: the map resolves them by cell, so a click
+ * anywhere in the room's cells chooses it. The keyboard is.
  */
-function RoomShape({ room, bounds, state, palette, focused, pxPerUnit, resourceNoun, interactive, onSelect }) {
-  const x = bounds.col * CELL;
-  const y = bounds.row * CELL;
-  const w = bounds.w * CELL;
-  const h = bounds.h * CELL;
+function RoomShape({ room, cells, state, palette, focused, flagged, pxPerUnit, resourceNoun, interactive, onSelect }) {
+  const outline = useMemo(() => outlinePath(cells, { cell: CELL, inset: 1, radius: ROOM_RADIUS }), [cells]);
+  const spot = useMemo(() => labelSpot(cells), [cells]);
+  const x = spot.col * CELL;
+  const y = spot.row * CELL;
+  const w = spot.w * CELL;
+  const h = spot.h * CELL;
 
   const busy = ROOM_STATE[state] ? state : null;
   const tone = busy ? palette[busy] || palette.unavailable : null;
@@ -980,7 +1126,6 @@ function RoomShape({ room, bounds, state, palette, focused, pxPerUnit, resourceN
       role={interactive ? "button" : undefined}
       tabIndex={interactive ? 0 : -1}
       aria-label={interactive ? description : undefined}
-      onClick={interactive ? onSelect : undefined}
       onKeyDown={
         interactive
           ? (e) => {
@@ -992,19 +1137,24 @@ function RoomShape({ room, bounds, state, palette, focused, pxPerUnit, resourceN
       }
     >
       <title>{description}</title>
-      <rect
+      <path
         className="silla-room-body"
-        x={x + 1}
-        y={y + 1}
-        width={w - 2}
-        height={h - 2}
-        rx="10"
+        d={outline}
+        fillRule="evenodd"
         style={{
           fill: tone ? tone.color : "rgb(var(--c-line) / 0.03)",
           fillOpacity: tone ? 0.08 : 1,
-          stroke: focused ? "var(--color-accent)" : tone ? tone.color : "rgb(var(--c-line) / 0.5)",
-          strokeOpacity: focused || tone ? 1 : 0.75,
-          strokeWidth: focused ? 2.5 : 2,
+          stroke: flagged
+            ? "var(--color-state-unavailable)"
+            : focused
+              ? "var(--color-accent)"
+              : tone
+                ? tone.color
+                : "rgb(var(--c-line) / 0.5)",
+          strokeOpacity: focused || tone || flagged ? 1 : 0.75,
+          strokeWidth: focused || flagged ? 2.5 : 2,
+          strokeDasharray: flagged ? "8 5" : undefined,
+          strokeLinejoin: "round",
         }}
       />
       <text
@@ -1038,6 +1188,67 @@ function RoomShape({ room, bounds, state, palette, focused, pxPerUnit, resourceN
           </text>
         ))}
     </g>
+  );
+}
+
+/**
+ * A zone: a dashed outline of its shape, and its name in capitals in the
+ * shape's largest rectangle. A backdrop that groups pieces, never a target.
+ */
+function ZoneShape({ zone, cells, flagged }) {
+  const outline = useMemo(() => outlinePath(cells, { cell: CELL, inset: 1, radius: ZONE_RADIUS }), [cells]);
+  const spot = useMemo(() => labelSpot(cells), [cells]);
+  return (
+    <g>
+      <path
+        d={outline}
+        fillRule="evenodd"
+        style={{
+          fill: "var(--color-map-zone-fill)",
+          stroke: flagged ? "var(--color-state-unavailable)" : "var(--color-map-zone-stroke)",
+          strokeWidth: flagged ? 2.5 : 1.5,
+          strokeDasharray: "6 5",
+          strokeLinejoin: "round",
+        }}
+      />
+      <text
+        x={spot.col * CELL + 10}
+        y={spot.row * CELL + 18}
+        fontSize="11"
+        fontWeight="600"
+        letterSpacing="1.2"
+        // Two `style` attributes: JSX kept the LAST one, so the
+        // fill was silently discarded and zone names painted in
+        // the SVG default (black) on a dark map. Merged.
+        style={{ fill: "var(--color-ink-muted)", textTransform: "uppercase" }}
+      >
+        {zone.name}
+      </text>
+    </g>
+  );
+}
+
+/**
+ * A dashed ring in the "unavailable" tone around something in the way —
+ * a piece, a label — measured in screen pixels so it reads at any zoom.
+ */
+function Flag({ x, y, w, h }) {
+  return (
+    <rect
+      x={x - 3}
+      y={y - 3}
+      width={w + 6}
+      height={h + 6}
+      rx="9"
+      pointerEvents="none"
+      style={{
+        fill: "none",
+        stroke: "var(--color-state-unavailable)",
+        strokeWidth: 2.5,
+        strokeDasharray: "6 4",
+        vectorEffect: "non-scaling-stroke",
+      }}
+    />
   );
 }
 
