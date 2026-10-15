@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Building2, DoorOpen, Pencil, Plus, SquareDashedMousePointer, Trash2 } from "lucide-react";
 import { api } from "../lib/api.js";
-import { ROOM_MODES } from "../lib/rooms.js";
+import { ROOM_MODE_ORDER, roomMode } from "../lib/rooms.js";
 import { Badge, Button, EmptyState, Field, Modal, Notice, Panel, Segmented, Select } from "./ui/index.jsx";
 
 export function RoomDialog({ draft, floors, onClose, onSaved, onDraw }) {
@@ -26,8 +26,8 @@ export function RoomDialog({ draft, floors, onClose, onSaved, onDraw }) {
     <form onSubmit={save} className="space-y-5">
       <Field label="Room name" required data-autofocus value={name} onChange={(e) => setName(e.target.value)} maxLength={120} placeholder="Meeting room, reading room, equipment lab…" />
       <div><p className="mb-2 text-sm font-medium text-ink-secondary">What can be reserved?</p>
-        <Segmented value={mode} onChange={setMode} options={Object.entries(ROOM_MODES).map(([value, info]) => ({ value, label: info.label }))} />
-        <p className="mt-2 text-xs leading-relaxed text-ink-muted">{ROOM_MODES[mode].description}</p>
+        <Segmented value={mode} onChange={setMode} options={ROOM_MODE_ORDER.map((value) => ({ value, label: roomMode(value).label }))} />
+        <p className="mt-2 text-xs leading-relaxed text-ink-muted">{roomMode(mode).admin}</p>
       </div>
       <div><div className="mb-2 flex items-center justify-between"><p className="text-sm font-medium text-ink-secondary">Room levels</p><Badge>{levels.length} level{levels.length === 1 ? "" : "s"}</Badge></div>
         <p className="mb-3 text-xs text-ink-muted">All levels belong to the same room. Booking it as a whole includes every level.</p>
@@ -62,7 +62,7 @@ export default function RoomManager({ rooms = [], floor, building, floors, statu
     {!rooms.length ? <EmptyState title="Define the rooms on this floor" body={building && !building.unassigned ? "Choose the Room tool, then drag a boundary around a space. Existing pieces inside become part of the room." : "Set up a building first, then draw rooms on its floors."} /> : <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{rooms.map((room) => {
       const state = status[room.resourceId]?.[0]?.status || "available";
       return <div key={room.id} className="rounded-lg border border-line/10 bg-bg-panel/40 p-4">
-        <div className="flex items-start justify-between gap-2"><div><p className="font-semibold">{room.name}</p><p className="mt-1 text-xs text-ink-muted">{ROOM_MODES[room.bookingMode]?.label} · {room.levels.length} level{room.levels.length > 1 ? "s" : ""}</p></div><Badge tone={state}>{state}</Badge></div>
+        <div className="flex items-start justify-between gap-2"><div><p className="font-semibold">{room.name}</p><p className="mt-1 text-xs text-ink-muted">{roomMode(room.bookingMode).label} · {room.levels.length} level{room.levels.length > 1 ? "s" : ""}</p></div><Badge tone={state}>{state}</Badge></div>
         <div className="mt-4 flex flex-wrap gap-2">
           <Button size="sm" disabled={busy || ["reserved", "occupied"].includes(state)} onClick={async () => { setBusy(true); try { await api.setRoomAvailability(room.id, state === "unavailable" ? "available" : "unavailable"); onSaved(); } catch (e) { onError(e.message); } finally { setBusy(false); } }}>{state === "unavailable" ? "Reopen room" : "Close room"}</Button>
           <Button size="sm" onClick={() => setHistoryRoom(room)}>Schedule</Button>

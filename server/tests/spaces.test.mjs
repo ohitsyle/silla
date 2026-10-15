@@ -613,10 +613,12 @@ try {
     const workshop = (await call("/api/floors", "POST", {
       name: "Workshop floor", buildingId: secondBuilding.id, grid: { cols: 14, rows: 10 },
     }, 201)).floor;
-    for (const col of [3, 5, 7]) await place(workshop.id, "equipment", col, 3);
+    for (const col of [3, 5, 7]) await place(workshop.id, "solo", col, 3);
+    for (const col of [3, 5, 7]) await place(workshop.id, "solo", col, 6);
+    await place(workshop.id, "equipment", 12, 8);
     await call("/api/spaces/rooms", "POST", {
-      name: "Equipment studio", buildingId: secondBuilding.id, bookingMode: "individual",
-      levels: [{ floorId: workshop.id, bounds: { col: 1, row: 1, w: 10, h: 8 } }],
+      name: "Focus studio", buildingId: secondBuilding.id, bookingMode: "individual",
+      levels: [{ floorId: workshop.id, bounds: { col: 1, row: 1, w: 9, h: 7 } }],
     }, 201);
 
     // Somebody at a desk, a desk held for now, and one closed by staff.

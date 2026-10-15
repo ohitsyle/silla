@@ -1,7 +1,7 @@
-import { effectiveStatus, roomUnit } from "../lib/rooms.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Ban, Check, Clock, Maximize, TriangleAlert, User, Wrench, ZoomIn, ZoomOut } from "lucide-react";
+import { Ban, Check, Clock, DoorOpen, Maximize, TriangleAlert, User, Wrench, ZoomIn, ZoomOut } from "lucide-react";
+import { effectiveStatus, roomMode, roomUnit } from "../lib/rooms.js";
 
 /**
  * SpaceMap — the read-only grid renderer (MAP-1, spec §12).
@@ -12,6 +12,8 @@ import { Ban, Check, Clock, Maximize, TriangleAlert, User, Wrench, ZoomIn, ZoomO
  *
  *   zones     — admin-drawn named rectangles; membership is derived from
  *               position, so a zone is purely a backdrop here
+ *   rooms     — booking boundaries: an outline with the room's name and
+ *               what it lets you book, or its state when booked or closed
  *   resources — catalog pieces on the integer cell grid, each showing its
  *               reservable units by colour AND icon (MAP-1 AC)
  *   labels    — free-typed orientation text; not reservable, no analytics
@@ -60,6 +62,19 @@ export const SERVICE_META = { label: "Out of service", Icon: Wrench };
 export const STATUS_ORDER = ["available", "reserved", "occupied", "unavailable"];
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+/** Cuts `text` to `chars` characters with an ellipsis. SVG text cannot do this itself. */
+const truncate = (text, chars) => (text.length <= chars ? text : `${text.slice(0, Math.max(1, chars - 1))}…`);
+
+/** Average advance of a glyph, as a fraction of the font size — enough to fit labels without measuring. */
+const GLYPH = 0.6;
+
+/** How a room reads when its own state is not "free". */
+const ROOM_STATE = {
+  reserved: { label: "Booked now", Icon: Clock },
+  occupied: { label: "In use now", Icon: User },
+  unavailable: { label: "Closed", Icon: Ban },
+};
 
 /**
  * Exact client-pixel → SVG-user-unit conversion. The SVG letterboxes
@@ -218,6 +233,27 @@ export default function SpaceMap({
   useEffect(() => setView(baseView), [baseView]);
 
   const zoomLimits = useMemo(() => ({ min: baseView.w / 8, max: baseView.w * 2 }), [baseView.w]);
+
+  /**
+   * Screen pixels per SVG unit, kept current as the box resizes.
+   *
+   * Room names are sized from this so they read at about the same size on
+   * a phone as on a monitor. Drawn at a fixed 11 units, a whole floor
+   * squeezed into a 400px-wide screen put them at under 5px — the rooms
+   * were there, but you could not tell which was which.
+   */
+  const [box, setBox] = useState({ width: 0, height: 0 });
+  const drawn = Boolean(floor && layout);
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(([entry]) => {
+      setBox({ width: entry.contentRect.width, height: entry.contentRect.height });
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [drawn]);
+  const pxPerUnit = box.width && box.height ? Math.min(box.width / view.w, box.height / view.h) : 1;
 
   const typeById = useMemo(() => new Map(resourceTypes.map((t) => [t.id, t])), [resourceTypes]);
 
@@ -436,8 +472,10 @@ export default function SpaceMap({
    */
   const wasDrag = () => lastTravel.current > DRAG_THRESHOLD;
 
-  const isSelected = (resourceId, unitIndex) =>
-    selectedUnit?.resourceId === resourceId && selectedUnit?.unitIndex === unitIndex;
+  // By label, not index: a unit chosen from a list rather than the map
+  // knows its label, and the label is what identifies it everywhere else.
+  const isSelected = (resourceId, unitLabel) =>
+    selectedUnit?.resourceId === resourceId && selectedUnit?.unitLabel === unitLabel;
 
   if (!floor || !layout) return null;
 
@@ -487,6 +525,10 @@ export default function SpaceMap({
           .silla-unit { cursor: pointer; outline: none; }
           .silla-unit:focus-visible .silla-unit-body { stroke: var(--color-accent); stroke-width: 3; }
           .silla-unit:hover .silla-unit-body { filter: brightness(1.18); }
+          .silla-room { cursor: pointer; outline: none; }
+          .silla-room .silla-room-body { transition: stroke-opacity var(--dur-fast) var(--ease-out); }
+          .silla-room:hover .silla-room-body { stroke-opacity: 1; }
+          .silla-room:focus-visible .silla-room-body { stroke: var(--color-accent); stroke-width: 3; }
         `}</style>
 
         <defs>
@@ -570,28 +612,38 @@ export default function SpaceMap({
           ))}
         </g>
 
-        {/* Rooms have their own booking identity; their shapes are per floor. */}
+        {/* ---- Layer: rooms ----
+             A room is drawn per floor (each of its levels is a rectangle on
+             one floor) and sits under the furniture, so its contents stay
+             clickable. Clicking the room itself opens what it offers. */}
         <g>
-          {rooms.filter((r) => !focusedRoomId || r.id === focusedRoomId).map((room) => {
-            const level = room.levels.find((l) => l.floorId === floor.id);
-            if (!level) return null;
-            const { col, row, w, h } = level.bounds;
-            const state = status[room.resourceId]?.[0]?.status || "available";
-            const tone = palette[state] || palette.available;
-            const select = () => {
-              if (editing || regionMode || wasDrag()) return;
-              if (onSelectRoom) onSelectRoom(room);
-              else if (!management && room.bookingMode !== "individual") onSelectUnit?.(roomUnit(room, status));
-            };
-            return <g key={room.id} role="button" tabIndex={editing || regionMode ? -1 : 0}
-              aria-label={`${room.name}, ${room.bookingMode === "individual" ? "individual resources" : "room booking"}, ${state}`}
-              onClick={select} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(); } }}>
-              <title>{room.name} · {room.levels.length} level{room.levels.length > 1 ? "s" : ""} · {state}</title>
-              <rect x={col * CELL + 1} y={row * CELL + 1} width={w * CELL - 2} height={h * CELL - 2} rx="8"
-                fill={tone.color} fillOpacity={0.07} stroke={tone.color} strokeOpacity={0.7} strokeWidth="2" />
-              <text x={col * CELL + 10} y={row * CELL + 17} fontSize="11" fontWeight="600" style={{ fill: "var(--color-ink-primary)" }}>{room.name.slice(0, Math.max(8, w * 6))}</text>
-            </g>;
-          })}
+          {rooms
+            .filter((room) => !focusedRoomId || room.id === focusedRoomId)
+            .map((room) => {
+              const level = room.levels.find((candidate) => candidate.floorId === floor.id);
+              if (!level) return null;
+              const select = () => {
+                if (editing || regionMode || wasDrag()) return;
+                if (onSelectRoom) onSelectRoom(room);
+                else if (!management && room.bookingMode !== "individual") onSelectUnit?.(roomUnit(room, status));
+              };
+              const interactive =
+                !editing && !regionMode && Boolean(onSelectRoom || (!management && room.bookingMode !== "individual" && onSelectUnit));
+              return (
+                <RoomShape
+                  key={room.id}
+                  room={room}
+                  bounds={level.bounds}
+                  state={status[room.resourceId]?.[0]?.status || "available"}
+                  palette={palette}
+                  focused={room.id === focusedRoomId}
+                  pxPerUnit={pxPerUnit}
+                  resourceNoun={resourceNoun}
+                  interactive={interactive}
+                  onSelect={select}
+                />
+              );
+            })}
         </g>
         {/* ---- Layer: resources (spec §12) ---- */}
         <g>
@@ -624,10 +676,83 @@ export default function SpaceMap({
                 />
 
                 {resource.units.map((unit, unitIndex) => {
-                  const unitStatus = management ? unitStatuses[unitIndex] : effectiveStatus(resource, unitStatuses[unitIndex], rooms, status);
+                  const unitStatus = management
+                    ? unitStatuses[unitIndex]
+                    : effectiveStatus(resource, unitStatuses[unitIndex], rooms, status);
+                  const r = rects[unitIndex];
+                  const room = unitStatus?.roomBlocked ? rooms.find((candidate) => candidate.id === resource.roomId) : null;
+                  // A unit blocked by its room opens the room: that is where
+                  // the booking that matters is made (or why it can't be).
+                  const choose = () => {
+                    if (room && !management) {
+                      onSelectRoom?.(room);
+                      return;
+                    }
+                    onSelectUnit?.({
+                      resourceId: resource.id,
+                      unitIndex,
+                      unitLabel: unit.label,
+                      type,
+                      position: resource.position,
+                      roomId: resource.roomId || null,
+                      status: unitStatus,
+                      statusLabel: resolveUnitAppearance(unitStatus, palette).statusLabel,
+                      overstay: Boolean(showOverstay && unitStatus?.overstay),
+                    });
+                  };
+                  const handlers = {
+                    onClick: () => {
+                      if (!wasDrag()) choose();
+                    },
+                    onKeyDown: (e) => {
+                      if (e.key !== "Enter" && e.key !== " ") return;
+                      e.preventDefault();
+                      choose();
+                    },
+                  };
+
+                  // Furniture in a room booked only as a whole is not a unit
+                  // anyone books alone. Drawn as part of the room — neutral,
+                  // with the room's door — rather than as a row of red
+                  // "unavailable" seats that make a free room look broken.
+                  if (unitStatus?.includedInRoom && !management) {
+                    const description = `${type.label} · ${unit.label} — comes with ${room?.name || "its room"}`;
+                    const iconSize = clamp(Math.min(r.w, r.h) * 0.45, 8, 16);
+                    return (
+                      <g
+                        key={`${resource.id}-${unitIndex}`}
+                        className="silla-unit"
+                        role="button"
+                        tabIndex={0}
+                        aria-label={description}
+                        {...handlers}
+                      >
+                        <title>{description}</title>
+                        <rect
+                          className="silla-unit-body"
+                          x={x + r.x}
+                          y={y + r.y}
+                          width={r.w}
+                          height={r.h}
+                          rx="5"
+                          style={{ fill: "rgb(var(--c-line) / 0.13)", stroke: "rgb(var(--c-line) / 0.18)", strokeWidth: 1 }}
+                        />
+                        {Math.min(r.w, r.h) >= 14 && (
+                          <DoorOpen
+                            x={x + r.x + r.w / 2 - iconSize / 2}
+                            y={y + r.y + r.h / 2 - iconSize / 2}
+                            width={iconSize}
+                            height={iconSize}
+                            strokeWidth={2}
+                            style={{ color: "var(--color-ink-muted)", pointerEvents: "none" }}
+                          />
+                        )}
+                      </g>
+                    );
+                  }
+
                   const appearance = resolveUnitAppearance(unitStatus, palette);
                   const overstayed = showOverstay && unitStatus?.overstay;
-                  const r = rects[unitIndex];
                   const cx = x + r.x + r.w / 2;
                   const cy = y + r.y + r.h / 2;
 
@@ -638,12 +763,13 @@ export default function SpaceMap({
                   const Icon = overstayed ? OVERSTAY_META.Icon : appearance.Icon;
                   const fill = overstayed ? overstayTone.color : appearance.color;
                   const ink = overstayed ? overstayTone.ink : appearance.ink;
-                  const selected = isSelected(resource.id, unitIndex);
+                  const selected = isSelected(resource.id, unit.label);
                   const isHighlighted = highlighted.has(`${resource.id}:${unit.label}`);
 
                   const description =
                     `${type.label} · ${resourceNoun} ${unit.label} — ${appearance.statusLabel}` +
-                    (overstayed ? ` · ${OVERSTAY_META.label}` : "");
+                    (overstayed ? ` · ${OVERSTAY_META.label}` : "") +
+                    (room ? ` (${room.name})` : "");
 
                   return (
                     <g
@@ -652,35 +778,8 @@ export default function SpaceMap({
                       role="button"
                       tabIndex={0}
                       aria-label={description}
-                      onClick={(e) => {
-                        if (wasDrag()) return;
-                        if (unitStatus?.roomBlocked && !management) { onSelectRoom?.(rooms.find((r) => r.id === resource.roomId)); return; }
-                        onSelectUnit?.({
-                          resourceId: resource.id,
-                          unitIndex,
-                          unitLabel: unit.label,
-                          type,
-                          position: resource.position,
-                          status: unitStatus,
-                          statusLabel: appearance.statusLabel,
-                          overstay: Boolean(overstayed),
-                        });
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key !== "Enter" && e.key !== " ") return;
-                        e.preventDefault();
-                        if (unitStatus?.roomBlocked && !management) { onSelectRoom?.(rooms.find((r) => r.id === resource.roomId)); return; }
-                        onSelectUnit?.({
-                          resourceId: resource.id,
-                          unitIndex,
-                          unitLabel: unit.label,
-                          type,
-                          position: resource.position,
-                          status: unitStatus,
-                          statusLabel: appearance.statusLabel,
-                          overstay: Boolean(overstayed),
-                        });
-                      }}
+                      aria-pressed={selected || undefined}
+                      {...handlers}
                     >
                       <title>{description}</title>
                       {/* Motion animates the fill, so a status change
@@ -696,11 +795,19 @@ export default function SpaceMap({
                         initial={false}
                         animate={{ fill }}
                         transition={{ duration: 0.35 }}
+                        // Selection outlines are measured in screen pixels
+                        // (non-scaling), not map units: a whole floor on a
+                        // phone shrank a 3-unit outline to one faint pixel.
                         style={
                           selected
-                            ? { stroke: "var(--color-accent)", strokeWidth: 3 }
+                            ? { stroke: "var(--color-accent)", strokeWidth: 3, vectorEffect: "non-scaling-stroke" }
                             : isHighlighted
-                              ? { stroke: "var(--color-accent)", strokeWidth: 2, strokeDasharray: "4 3" }
+                              ? {
+                                  stroke: "var(--color-accent)",
+                                  strokeWidth: 2.5,
+                                  strokeDasharray: "5 3",
+                                  vectorEffect: "non-scaling-stroke",
+                                }
                               : { stroke: "rgb(var(--c-bg-page) / 0.45)", strokeWidth: 1 }
                         }
                       />
@@ -823,5 +930,130 @@ export default function SpaceMap({
         ))}
       </div>
     </div>
+  );
+}
+
+/**
+ * One level of a room: its outline, its name, and a second line saying
+ * what it lets you book — or, when the room itself is booked or closed,
+ * that state as a coloured pill with an icon (colour is never the only
+ * signal).
+ *
+ * The outline is neutral while the room is free. Painting every free room
+ * green made it read as one huge "available" unit, which is not what a
+ * room in the individual mode is. The focused room takes the accent.
+ *
+ * Label sizes come from `pxPerUnit` so they hold about 13px on screen at
+ * any zoom, and are cut to fit the room's width — a long name in a narrow
+ * room is truncated rather than spilling over its neighbour.
+ */
+function RoomShape({ room, bounds, state, palette, focused, pxPerUnit, resourceNoun, interactive, onSelect }) {
+  const x = bounds.col * CELL;
+  const y = bounds.row * CELL;
+  const w = bounds.w * CELL;
+  const h = bounds.h * CELL;
+
+  const busy = ROOM_STATE[state] ? state : null;
+  const tone = busy ? palette[busy] || palette.unavailable : null;
+
+  const font = clamp(13 / pxPerUnit, 10, 52);
+  const small = font * 0.84;
+  const inset = clamp(font * 0.75, 8, 24);
+  const fit = (size) => Math.max(1, Math.floor((w - inset * 2) / (size * GLYPH)));
+  const name = truncate(room.name, fit(font));
+
+  // The second line only at roughly natural size. When the labels are
+  // being enlarged to stay readable — a whole floor on a phone — two lines
+  // run into the furniture, and the room row above the map already says
+  // what each room offers.
+  const enlarged = font > 16;
+  const showDetail = !enlarged && h >= font * 3.6 + inset;
+  const detail = busy ? ROOM_STATE[busy].label : roomMode(room.bookingMode, resourceNoun).short;
+  const detailY = y + inset + font * 0.9 + small * 1.45;
+
+  const description =
+    `${room.name}: ${roomMode(room.bookingMode, resourceNoun).short}` + (busy ? `, ${ROOM_STATE[busy].label.toLowerCase()}` : "");
+
+  return (
+    <g
+      className={interactive ? "silla-room" : undefined}
+      role={interactive ? "button" : undefined}
+      tabIndex={interactive ? 0 : -1}
+      aria-label={interactive ? description : undefined}
+      onClick={interactive ? onSelect : undefined}
+      onKeyDown={
+        interactive
+          ? (e) => {
+              if (e.key !== "Enter" && e.key !== " ") return;
+              e.preventDefault();
+              onSelect();
+            }
+          : undefined
+      }
+    >
+      <title>{description}</title>
+      <rect
+        className="silla-room-body"
+        x={x + 1}
+        y={y + 1}
+        width={w - 2}
+        height={h - 2}
+        rx="10"
+        style={{
+          fill: tone ? tone.color : "rgb(var(--c-line) / 0.03)",
+          fillOpacity: tone ? 0.08 : 1,
+          stroke: focused ? "var(--color-accent)" : tone ? tone.color : "rgb(var(--c-line) / 0.5)",
+          strokeOpacity: focused || tone ? 1 : 0.75,
+          strokeWidth: focused ? 2.5 : 2,
+        }}
+      />
+      <text
+        x={x + inset}
+        y={y + inset + font * 0.9}
+        fontSize={font}
+        fontWeight="650"
+        style={{ fill: "var(--color-ink-primary)", pointerEvents: "none" }}
+      >
+        {name}
+      </text>
+      {showDetail &&
+        (busy ? (
+          <RoomStatePill
+            x={x + inset}
+            y={detailY - small}
+            size={small}
+            tone={tone}
+            Icon={ROOM_STATE[busy].Icon}
+            label={truncate(detail, fit(small) - 2)}
+          />
+        ) : (
+          <text
+            x={x + inset}
+            y={detailY}
+            fontSize={small}
+            fontWeight="500"
+            style={{ fill: "var(--color-ink-muted)", pointerEvents: "none" }}
+          >
+            {truncate(detail, fit(small))}
+          </text>
+        ))}
+    </g>
+  );
+}
+
+/** "Booked now" on the room's own colour, with its icon. */
+function RoomStatePill({ x, y, size, tone, Icon, label }) {
+  const height = size * 1.7;
+  const icon = size * 1.05;
+  const pad = size * 0.55;
+  const width = pad * 2 + icon + size * 0.4 + label.length * size * GLYPH;
+  return (
+    <g style={{ pointerEvents: "none" }}>
+      <rect x={x} y={y - size * 0.35} width={width} height={height} rx={height / 2} fill={tone.color} />
+      <Icon x={x + pad} y={y - size * 0.35 + (height - icon) / 2} width={icon} height={icon} color={tone.ink} strokeWidth={2.5} />
+      <text x={x + pad + icon + size * 0.4} y={y - size * 0.35 + height / 2 + size * 0.36} fontSize={size} fontWeight="600" fill={tone.ink}>
+        {label}
+      </text>
+    </g>
   );
 }

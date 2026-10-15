@@ -1,100 +1,121 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { motion } from "framer-motion";
-import { Layers, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { api } from "../lib/api.js";
 import { useOrg } from "../lib/OrgContext.jsx";
-import { resolveStatePalette } from "../theme/applyOrgTheme.js";
 import { useFloorSocket } from "../lib/useFloorSocket.js";
+import { useBookingWindow } from "../lib/bookingWindow.js";
+import { effectiveStatus, levelName, listNames, roomMode } from "../lib/rooms.js";
+import { resolveStatePalette } from "../theme/applyOrgTheme.js";
 import SpaceNavigator from "../components/SpaceNavigator.jsx";
-import { ROOM_MODES, roomUnit, effectiveStatus } from "../lib/rooms.js";
-import ReservePanel from "../components/ReservePanel.jsx";
+import SpaceMap, { STATUS_ORDER } from "../components/SpaceMap.jsx";
+import MapLegend from "../components/MapLegend.jsx";
 import Inspector from "../components/Inspector.jsx";
-import SpaceMap, { OVERSTAY_META, SERVICE_META, STATUS_META, STATUS_ORDER } from "../components/SpaceMap.jsx";
-import {
-  Badge, Button, Card, Notice, Page, PageHeader, Segmented, Select, Skeleton, StatusDot, pageEnter,
-} from "../components/ui/index.jsx";
+import RoomPanel from "../components/RoomPanel.jsx";
+import ReservePanel, { MyReservation } from "../components/ReservePanel.jsx";
+import { Button, Notice, Page, Skeleton } from "../components/ui/index.jsx";
 
 /**
- * MapPage — the member-facing live map screen (MAP-1).
+ * MapPage — the member-facing live map (MAP-1, MAP-2, RES-1, RES-3).
  *
- * Owns the data: the floor list that feeds the switcher, and the layout
- * for whichever floor is selected. SpaceMap owns the drawing and knows
- * nothing about fetching.
+ * The page reads the space the way it is built: building → floor → room
+ * → what to book. The header names each level and lets you change it
+ * (SpaceNavigator); the floor plan draws rooms as outlined, named areas
+ * with their furniture inside; choosing a room opens what it offers for
+ * the time you have chosen (RoomPanel); choosing a unit or the whole room
+ * asks for your PIN (ReservePanel).
  *
- * `layout` and `status` are held in separate state deliberately. Both
- * arrive from one REST read, but MAP-2's Socket.io stream only ever
- * touches `status` — see the subscription below.
+ * Where you are lives in the URL — /map/<floor>?room=<room> — so a room
+ * can be linked to. What you have picked to book does not: it is a step
+ * in a form, not a place.
+ *
+ * `layout` and `status` are held separately on purpose. Both arrive from
+ * one REST read, but MAP-2's Socket.io stream only ever touches `status`.
  */
 export default function MapPage() {
   const { org, organizationId, error: orgError } = useOrg();
   const { floorId } = useParams();
-  const navigate = useNavigate();
   const [search] = useSearchParams();
   const roomId = search.get("room");
-  const [buildings, setBuildings] = useState([]);
+  const navigate = useNavigate();
 
-  const [floors, setFloors] = useState([]);
+  /** null until the hierarchy has loaded — distinct from "loaded, and empty". */
+  const [buildings, setBuildings] = useState(null);
   const [layoutData, setLayoutData] = useState(null);
   const [status, setStatus] = useState({});
-  const [selectedUnit, setSelectedUnit] = useState(null);
+  const [statusVersion, setStatusVersion] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
-  const [myReservation, setMyReservation] = useState(null);
   const [live, setLive] = useState(false);
-  const [inspectorDismissed, setInspectorDismissed] = useState(false);
+  const [myReservation, setMyReservation] = useState(null);
+  /** What the member has picked to book: one unit, or a room as a whole. */
+  const [selection, setSelection] = useState(null);
+  const [hovered, setHovered] = useState(null);
+  const [dismissed, setDismissed] = useState(false);
   const layoutRequest = useRef(0);
 
-  // The state colours come from the org's branding (spec §16), not from
-  // constants in the renderer — see theme/applyOrgTheme.js.
+  // State colours come from the organization's branding (spec §16).
   const palette = useMemo(() => resolveStatePalette(org), [org]);
   const resourceNoun = org?.terminology?.resourceNoun || "resource";
-  const facilityLabel = org?.terminology?.facilityLabel || "facility";
+  const booking = useBookingWindow(org?.policy);
 
-  // ---- Floor list (the switcher's data source) ----
+  /* ───────────────────────────── loading ───────────────────────────── */
+
+  const loadSpaces = useCallback(() => {
+    if (!organizationId) return;
+    api
+      .getSpaces(organizationId)
+      .then((spaces) => setBuildings(spaces.buildings))
+      .catch((err) => {
+        setError(err.message);
+        setLoading(false);
+      });
+  }, [organizationId]);
+
   useEffect(() => {
     if (!organizationId) {
       setError("This service isn't configured yet. Please ask a member of staff.");
       setLoading(false);
       return;
     }
-    Promise.all([api.getFloors(organizationId), api.getSpaces(organizationId)])
-      .then(([data, spaces]) => {
-        setBuildings(spaces.buildings);
-        setFloors(data.floors);
-        if (!data.floors.length) {
-          // Same rule as StarterPage's error: whoever reads this is a
-          // member standing at a screen, not the engineer who seeds it.
-          setError("No floors have been set up yet. Please ask a member of staff.");
-          setLoading(false);
-        } else if (!floorId) {
-          // Land on the first floor by order, and put it in the URL so
-          // the view is linkable.
-          navigate(`/map/${data.floors[0].id}`, { replace: true });
-        }
-      })
-      .catch((err) => {
-        setError(err.message);
-        setLoading(false);
-      });
-  }, [organizationId, floorId, navigate]);
+    loadSpaces();
+  }, [organizationId, loadSpaces]);
 
-  // ---- Layout + initial status snapshot for the selected floor ----
+  // Land on the first floor when none (or one that no longer exists) is
+  // in the address — and put it there, so the view is linkable.
+  useEffect(() => {
+    if (!buildings) return;
+    const floors = buildings.flatMap((building) => building.floors);
+    if (!floors.length) {
+      // Whoever reads this is a member standing at a screen, not the
+      // engineer who sets the map up.
+      setError("No floors have been set up yet. Please ask a member of staff.");
+      setLoading(false);
+    } else if (!floorId || !floors.some((candidate) => candidate.id === floorId)) {
+      navigate(`/map/${floors[0].id}`, { replace: true });
+    }
+  }, [buildings, floorId, navigate]);
+
   const loadLayout = useCallback((id, { silent = false } = {}) => {
     if (!id) return;
     const request = ++layoutRequest.current;
     if (silent) setRefreshing(true);
-    else { setLoading(true); setLayoutData(null); setStatus({}); }
+    else {
+      setLoading(true);
+      setLayoutData(null);
+      setStatus({});
+    }
     api
       .getFloorLayout(id)
       .then((data) => {
         if (request !== layoutRequest.current) return;
         setLayoutData(data);
         setStatus(data.status);
+        setStatusVersion((n) => n + 1);
         setError(null);
       })
-      .catch((err) => { if (request === layoutRequest.current) setError(err.message); })
+      .catch((err) => request === layoutRequest.current && setError(err.message))
       .finally(() => {
         if (request !== layoutRequest.current) return;
         setLoading(false);
@@ -103,116 +124,183 @@ export default function MapPage() {
   }, []);
 
   useEffect(() => {
-    setSelectedUnit(null);
     setLive(false);
+    setHovered(null);
+    // A choice made on another floor survives the move only if it is ON
+    // the floor being opened — picking a desk on a room's balcony takes
+    // you there with the desk still chosen.
+    setSelection((current) => (current && current.floorId === floorId ? current : null));
     loadLayout(floorId);
-    return () => { layoutRequest.current++; };
+    return () => {
+      layoutRequest.current += 1;
+    };
   }, [floorId, loadLayout]);
 
-  // ---- MAP-2: live status over Socket.io (spec §12, §17) ----
-  // Only `status` is patched. The layout was fetched once and is never
-  // re-sent — that split is the whole point of the payload shape.
+  // MAP-2: only `status` is patched; the layout is never re-sent.
   const applyStatus = useCallback((resourceId, units) => {
     setStatus((current) => ({ ...current, [resourceId]: units }));
+    setStatusVersion((n) => n + 1);
     setLive(true);
   }, []);
   useFloorSocket(floorId, applyStatus);
 
-  // ---- The caller's own reservation (RES-3: at most one) ----
+  // RES-3: the member's one live reservation.
   const loadMine = useCallback(() => {
-    api.myReservations().then((d) => setMyReservation(d.live)).catch(() => setMyReservation(null));
+    api.myReservations().then((data) => setMyReservation(data.live)).catch(() => setMyReservation(null));
   }, []);
   useEffect(loadMine, [loadMine]);
 
-  // ---- Occupancy summary, derived from the live status half ----
-  const summary = useMemo(() => {
-    const counts = Object.fromEntries(STATUS_ORDER.map((s) => [s, 0]));
-    let total = 0;
-    let overstays = 0;
-    let outOfService = 0;
-    for (const resource of layoutData?.layout.resources || []) {
-      for (const original of status[resource.id] || []) {
-        const unit = effectiveStatus(resource, original, layoutData?.layout.rooms || [], status);
-        total += 1;
-        if (counts[unit.status] !== undefined) counts[unit.status] += 1;
-        if (unit.overstay) overstays += 1;
-        if (unit.serviceStatus === "out_of_service") outOfService += 1;
-      }
-    }
-    return { counts, total, overstays, outOfService };
-  }, [status, layoutData]);
+  /* ───────────────────────────── where we are ───────────────────────────── */
 
-  const currentBuilding = buildings.find((b) => b.floors.some((f) => f.id === floorId));
-  const focusedRoom = layoutData && layoutData.floor.id === floorId ? layoutData.layout.rooms?.find((r) => r.id === roomId) : null;
-  const openFloor = (id) => { setSelectedUnit(null); navigate(`/map/${id}`); };
-  const openRoom = (room, id = floorId) => { setSelectedUnit(null); setInspectorDismissed(false); navigate(`/map/${id}?room=${room.id}`); };
+  const building = buildings?.find((candidate) => candidate.floors.some((floor) => floor.id === floorId));
+  const floor = building?.floors.find((candidate) => candidate.id === floorId);
+  const current = layoutData?.floor.id === floorId ? layoutData : null;
+  const rooms = current?.layout.rooms || [];
+  const focusedRoom = rooms.find((room) => room.id === roomId) || null;
+
+  const summary = useMemo(() => summarise(current, status), [current, status]);
+
+  /* ───────────────────────────── moving around ───────────────────────────── */
+
+  const openFloor = (id) => {
+    setDismissed(false);
+    navigate(`/map/${id}`);
+  };
+  const showFloorPlan = () => {
+    setSelection(null);
+    navigate(`/map/${floorId}`);
+  };
+  const openRoom = (room, onFloor = floorId) => {
+    setSelection(null);
+    setDismissed(false);
+    navigate(`/map/${onFloor}?room=${room.id}`);
+  };
+
+  /** A unit tapped on the map. Inside a room, the room comes into focus with it. */
+  const pickFromMap = (unit) => {
+    setDismissed(false);
+    setSelection({
+      kind: "unit",
+      resourceId: unit.resourceId,
+      unitLabel: unit.unitLabel,
+      floorId,
+      roomId: unit.roomId,
+      typeLabel: unit.type.label,
+    });
+    if (unit.roomId && unit.roomId !== roomId) navigate(`/map/${floorId}?room=${unit.roomId}`);
+  };
+
+  /** A unit chosen from the room panel's list — possibly on another of the room's floors. */
+  const pickFromRoom = (unit) => {
+    setDismissed(false);
+    setSelection({
+      kind: "unit",
+      resourceId: unit.resourceId,
+      unitLabel: unit.unitLabel,
+      floorId: unit.floorId,
+      roomId: focusedRoom.id,
+      typeLabel: unit.typeLabel,
+    });
+    setHovered(null);
+    if (unit.floorId !== floorId) navigate(`/map/${unit.floorId}?room=${focusedRoom.id}`);
+  };
+
+  const bookWholeRoom = () =>
+    setSelection({
+      kind: "room",
+      resourceId: focusedRoom.resourceId,
+      unitLabel: "room",
+      floorId,
+      roomId: focusedRoom.id,
+      typeLabel: focusedRoom.name,
+    });
+
+  const refresh = () => {
+    loadLayout(floorId, { silent: true });
+    loadSpaces();
+    loadMine();
+  };
+
+  /* ───────────────────────────── the panel ───────────────────────────── */
+
+  const target = selection && {
+    ...selection,
+    // The live state of a unit on this floor, for "out of service" and the like.
+    status: selection.kind === "unit" ? liveUnitStatus(current, status, selection) : status[selection.resourceId]?.[0],
+  };
+  const selectionRoom = selection?.roomId ? rooms.find((room) => room.id === selection.roomId) : null;
+  const panelOpen = !dismissed && Boolean(selection || focusedRoom || myReservation);
+
+  let title = "Your reservation";
+  let subtitle;
+  if (selection?.kind === "room") {
+    title = "Book the whole room";
+    subtitle = selectionRoom && selectionRoom.levels.length > 1
+      ? `Everything in ${selection.typeLabel}, on ${listNames(selectionRoom.levels.map((level) => levelName(level, building?.floors)))}`
+      : `${selection.typeLabel} and everything in it`;
+  } else if (selection) {
+    title = `${selection.typeLabel} · ${selection.unitLabel}`;
+    subtitle = selectionRoom ? `In ${selectionRoom.name}, ${floor?.name}` : floor ? `On ${floor.name}` : undefined;
+  } else if (focusedRoom) {
+    title = focusedRoom.name;
+    subtitle = roomMode(focusedRoom.bookingMode, resourceNoun).member;
+  }
 
   if (orgError) {
     return (
       <Page>
-        <Notice tone="error">Couldn't load organization config: {orgError}</Notice>
+        <Notice tone="error">Couldn't load this organization: {orgError}</Notice>
       </Page>
     );
   }
 
-
-
   return (
-    // Fill layout: a compact toolbar, the map taking every remaining
-    // pixel, and the inspector as a COLUMN beside it. Nothing here
-    // grows the page — selecting a seat cannot move the map, which was
-    // the whole complaint about the old stacked version.
-    <div className="flex h-full min-h-0">
-      <SpaceNavigator buildings={buildings} floorId={floorId} roomId={roomId} onFloor={openFloor} onRoom={openRoom} />
-      <div className="flex min-w-0 flex-1 flex-col">
-        {/* Toolbar — one row, fixed height, never scrolls away. */}
-        <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-line/10 px-4 py-3">
-          <div className="min-w-0">
-            <h1 className="truncate font-semibold leading-tight">
-              {layoutData ? layoutData.floor.name : `Live ${facilityLabel.toLowerCase()} map`}
-            </h1>
-            <p className="truncate text-xs text-ink-muted">
-              {layoutData ? layoutData.floor.site.name : "Loading…"}
-            </p>
-          </div>
-
-          <div className="flex flex-wrap gap-2 lg:hidden">
-            <Select label="Building" value={currentBuilding?.id || ""} onChange={(e) => { const first = buildings.find((b) => b.id === e.target.value)?.floors[0]; if (first) openFloor(first.id); }} >{buildings.filter((b) => b.floors.length).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}</Select>
-            <Select label="Floor" value={floorId || ""} onChange={(e) => openFloor(e.target.value)} >{(currentBuilding?.floors || []).map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}</Select>
-          </div>
-          {focusedRoom && <Button size="sm" onClick={() => openFloor(floorId)}>All rooms</Button>}
-          {inspectorDismissed && (focusedRoom || myReservation) && <Button size="sm" onClick={() => setInspectorDismissed(false)}>{focusedRoom ? "Room details" : "Your reservation"}</Button>}
-
-          <div className="ml-auto flex items-center gap-3">
-            {live && (
-              <span
-                className="hidden sm:flex items-center gap-1.5 text-xs text-ink-muted"
-                title="Receiving live status updates"
-              >
-                <span className="relative flex h-2 w-2">
-                  <span className="absolute inline-flex h-full w-full rounded-full bg-state-available opacity-70 animate-ping" />
-                  <span className="relative inline-flex h-2 w-2 rounded-full bg-state-available" />
+    // Map column plus the panel: beside it on a wide screen, docked under
+    // it on a phone. Nothing here grows the page — choosing something
+    // cannot scroll the map away from you.
+    <div className="flex h-full min-h-0 flex-col lg:flex-row">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <SpaceNavigator
+          buildings={buildings || []}
+          floorId={floorId}
+          rooms={rooms}
+          roomId={focusedRoom?.id || null}
+          status={status}
+          resourceNoun={resourceNoun}
+          focused={panelOpen && Boolean(focusedRoom || selection)}
+          onFloor={openFloor}
+          onRoom={openRoom}
+          onFloorView={showFloorPlan}
+          actions={
+            <>
+              {live && (
+                <span className="hidden items-center gap-1.5 text-xs text-ink-muted sm:flex" title="Receiving live updates">
+                  <span className="relative flex h-2 w-2">
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-state-available opacity-70" />
+                    <span className="relative inline-flex h-2 w-2 rounded-full bg-state-available" />
+                  </span>
+                  Live
                 </span>
-                Live
-              </span>
-            )}
-            <Button
-              size="sm"
-              icon={RefreshCw}
-              onClick={() => {
-                loadLayout(floorId, { silent: true });
-                Promise.all([api.getFloors(organizationId), api.getSpaces(organizationId)]).then(([data, spaces]) => {
-                  setFloors(data.floors); setBuildings(spaces.buildings);
-                  if (data.floors.length && !data.floors.some((f) => f.id === floorId)) navigate(`/map/${data.floors[0].id}`, { replace: true });
-                }).catch((err) => setError(err.message));
-              }}
-              disabled={!floorId || refreshing}
-              className={refreshing ? "[&>svg]:animate-spin" : undefined}
-            >
-              Refresh
-            </Button>
-          </div>
-        </div>
+              )}
+              {dismissed && (focusedRoom || myReservation) && (
+                <Button size="sm" onClick={() => setDismissed(false)}>
+                  {focusedRoom ? "What can I book?" : "My reservation"}
+                </Button>
+              )}
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={RefreshCw}
+                onClick={refresh}
+                disabled={!floorId || refreshing}
+                aria-label="Refresh the map"
+                className={refreshing ? "[&>svg]:animate-spin" : undefined}
+              >
+                <span className="hidden sm:inline">Refresh</span>
+              </Button>
+            </>
+          }
+        />
 
         {error && (
           <div className="shrink-0 px-4 pt-3">
@@ -220,110 +308,132 @@ export default function MapPage() {
           </div>
         )}
 
-        <div className="flex shrink-0 items-center gap-1.5 border-b border-line/5 px-4 py-2 text-xs text-ink-muted" aria-label="Current map location">
-          <span>{currentBuilding?.name || layoutData?.floor.site.name}</span><span>›</span>
-          <button className="hover:text-accent" onClick={() => openFloor(floorId)}>{layoutData?.floor.name}</button>
-          {focusedRoom && <><span>›</span><span className="font-medium text-ink-primary">{focusedRoom.name}</span></>}
-        </div>
-        {!focusedRoom && Boolean(layoutData?.layout.rooms?.length) && <div className="flex shrink-0 gap-2 overflow-x-auto px-4 py-2 lg:hidden">
-          {layoutData.layout.rooms.map((r) => <Button key={r.id} size="sm" onClick={() => openRoom(r)}>{r.name}</Button>)}
-        </div>}
-        {/* The map — everything that is left. */}
-        <div className="min-h-0 flex-1 p-3">
-          {loading && !layoutData ? (
-            <Skeleton className="h-full w-full" rounded="rounded-md" />
-          ) : layoutData ? (
+        <div className="relative min-h-[11rem] flex-1 p-3">
+          {current ? (
             <SpaceMap
               fill
-              floor={layoutData.floor}
-              layout={layoutData.layout}
-              resourceTypes={layoutData.resourceTypes}
+              floor={current.floor}
+              layout={current.layout}
+              resourceTypes={current.resourceTypes}
               status={status}
               resourceNoun={resourceNoun}
-              showOverstay={layoutData.viewerIsStaff}
-              selectedUnit={selectedUnit}
-              onSelectUnit={(unit) => { setSelectedUnit(unit); setInspectorDismissed(false); }}
-              onSelectRoom={openRoom}
+              showOverstay={current.viewerIsStaff}
+              selectedUnit={selection?.kind === "unit" ? selection : null}
+              highlight={hovered ? [hovered] : []}
+              onSelectUnit={pickFromMap}
+              onSelectRoom={(room) => openRoom(room)}
               focusedRoomId={focusedRoom?.id}
               palette={palette}
             />
+          ) : loading ? (
+            <Skeleton className="h-full w-full" rounded="rounded-md" />
           ) : (
-            <div className="flex h-full items-center justify-center text-sm text-ink-muted">
-              No floor selected.
-            </div>
+            <div className="flex h-full items-center justify-center text-sm text-ink-muted">No floor selected.</div>
           )}
         </div>
 
-        {/* Legend — a status bar at the foot, where a tool puts it. */}
-        <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-line/10 px-4 py-2.5 text-sm">
-          {layoutData ? (
-            <>
-              <span className="text-ink-secondary">
-                <span className="font-semibold tabular-nums text-ink-primary">{summary.counts.available}</span>{" "}
-                of <span className="tabular-nums">{summary.total}</span> {resourceNoun}s open
-              </span>
-              <span className="hidden h-4 w-px bg-line/10 sm:block" />
-              {STATUS_ORDER.map((key) => (
-                <StatusDot key={key} tone={key} label={STATUS_META[key].label} count={summary.counts[key]} />
-              ))}
-              {summary.outOfService > 0 && (
-                <StatusDot tone="unavailable" label={SERVICE_META.label} count={summary.outOfService} outline />
-              )}
-              {layoutData.viewerIsStaff && summary.overstays > 0 && (
-                <StatusDot tone="overstay" label={OVERSTAY_META.label} count={summary.overstays} />
-              )}
-              <span className="ml-auto hidden text-xs text-ink-muted lg:block">
-                Drag to pan · scroll to zoom · select a room or resource to choose a time
-              </span>
-            </>
-          ) : (
-            <div className="flex gap-4">
-              {Array.from({ length: 4 }, (_, i) => (
-                <Skeleton key={i} className="h-4 w-20" />
-              ))}
-            </div>
-          )}
+        <div className={panelOpen ? "hidden lg:block" : undefined}>
+          <MapLegend
+            summary={summary}
+            resourceNoun={resourceNoun}
+            showOverstay={current?.viewerIsStaff}
+            loading={!current}
+          />
         </div>
       </div>
 
-      {/* ---- RES-1 / RES-3 — reserve, or manage the one you hold ---- */}
       <Inspector
-        open={!inspectorDismissed && (Boolean(selectedUnit) || Boolean(myReservation) || Boolean(focusedRoom))}
-        onClose={() => { setSelectedUnit(null); setInspectorDismissed(true); }}
-        title={selectedUnit ? selectedUnit.kind === "room" ? selectedUnit.type.label : `${selectedUnit.type?.label || resourceNoun} · ${selectedUnit.unitLabel}` : focusedRoom?.name || "Your reservation"}
-        subtitle={
-          selectedUnit
-            ? selectedUnit.kind === "room" ? `Includes all ${selectedUnit.levels.length} room level(s)` : `Cell (${selectedUnit.position?.col}, ${selectedUnit.position?.row})`
-            : undefined
-        }
+        open={panelOpen}
+        onClose={() => {
+          setSelection(null);
+          setDismissed(true);
+        }}
+        title={title}
+        subtitle={subtitle}
+        onBack={selection && focusedRoom ? () => setSelection(null) : undefined}
+        backLabel={focusedRoom?.name}
+        defaultFolded={!selection && !focusedRoom}
       >
-        {focusedRoom && !selectedUnit && <div className="mb-5 space-y-4">
-          <Badge>{ROOM_MODES[focusedRoom.bookingMode]?.label}</Badge>
-          <p className="text-sm leading-relaxed text-ink-secondary">{ROOM_MODES[focusedRoom.bookingMode]?.description}</p>
-          {focusedRoom.levels.length > 1 && <div><p className="mb-2 text-xs text-ink-muted">Room levels · one shared booking</p><Segmented value={floorId} onChange={(id) => openRoom(focusedRoom, id)} options={focusedRoom.levels.map((l) => ({ value: l.floorId, label: l.name || floors.find((f) => f.id === l.floorId)?.name || "Level" }))} /></div>}
-          {focusedRoom.bookingMode !== "individual" && !myReservation && <Button variant="primary" className="w-full" onClick={() => setSelectedUnit(roomUnit(focusedRoom, status))}>Reserve whole room</Button>}
-          {focusedRoom.bookingMode !== "whole" && <p className="text-xs text-ink-muted">Select a resource on the map to reserve it individually.</p>}
-          {focusedRoom.bookingMode === "whole" && <p className="text-xs text-ink-muted">Every level, seat and item inside is included. Individual bookings are disabled.</p>}
-        </div>}
-        {(selectedUnit || myReservation) && <ReservePanel
-          embedded
-          selectedUnit={selectedUnit}
-          resourceNoun={resourceNoun}
-          policy={org?.policy}
-          myReservation={myReservation}
-          onClose={() => setSelectedUnit(null)}
-          onReserved={() => {
-            setInspectorDismissed(false);
-            setSelectedUnit(null);
-            loadMine();
-            loadLayout(floorId, { silent: true });
-          }}
-          onCancelled={() => {
-            loadMine();
-            loadLayout(floorId, { silent: true });
-          }}
-        />}
+        <div className="space-y-5">
+          {myReservation && (
+            <MyReservation
+              reservation={myReservation}
+              resourceNoun={resourceNoun}
+              policy={org?.policy}
+              compact={Boolean(selection || focusedRoom)}
+              onCancelled={() => {
+                loadMine();
+                loadLayout(floorId, { silent: true });
+              }}
+            />
+          )}
+
+          {target ? (
+            <ReservePanel
+              key={`${target.resourceId}:${target.unitLabel}`}
+              target={target}
+              booking={booking}
+              resourceNoun={resourceNoun}
+              policy={org?.policy}
+              holding={Boolean(myReservation)}
+              onReserved={() => {
+                setSelection(null);
+                loadMine();
+                loadLayout(floorId, { silent: true });
+              }}
+            />
+          ) : focusedRoom ? (
+            <RoomPanel
+              room={focusedRoom}
+              floors={building?.floors}
+              floorId={floorId}
+              booking={booking}
+              resourceNoun={resourceNoun}
+              refreshKey={statusVersion}
+              onBookRoom={bookWholeRoom}
+              onPickUnit={pickFromRoom}
+              onHoverUnit={(unit) => setHovered(unit ? { resourceId: unit.resourceId, unitLabel: unit.unitLabel } : null)}
+              onShowLevel={(id) => openRoom(focusedRoom, id)}
+            />
+          ) : null}
+        </div>
       </Inspector>
     </div>
   );
+}
+
+/** The live state of the chosen unit, when it is on the floor in view. */
+function liveUnitStatus(current, status, selection) {
+  const resource = current?.layout.resources.find((candidate) => candidate.id === selection.resourceId);
+  if (!resource) return undefined;
+  const index = resource.units.findIndex((unit) => unit.label === selection.unitLabel);
+  return effectiveStatus(resource, status[resource.id]?.[index], current.layout.rooms || [], status);
+}
+
+/**
+ * The legend's counts, from the live status half. Units that only come
+ * with a room booked whole are counted apart: they are part of that room,
+ * not units anyone can take on their own.
+ */
+function summarise(current, status) {
+  if (!current) return null;
+  const counts = Object.fromEntries(STATUS_ORDER.map((key) => [key, 0]));
+  let total = 0;
+  let overstays = 0;
+  let outOfService = 0;
+  let included = 0;
+  for (const resource of current.layout.resources) {
+    for (const own of status[resource.id] || []) {
+      const unit = effectiveStatus(resource, own, current.layout.rooms || [], status);
+      if (unit?.includedInRoom) {
+        included += 1;
+        continue;
+      }
+      total += 1;
+      if (counts[unit.status] !== undefined) counts[unit.status] += 1;
+      if (unit.overstay) overstays += 1;
+      if (unit.serviceStatus === "out_of_service") outOfService += 1;
+    }
+  }
+  return { counts, total, overstays, outOfService, included, rooms: (current.layout.rooms || []).length };
 }
