@@ -245,5 +245,5 @@ router.delete(
   })
 );
 
-router.use((err, req, res, next) => err.status ? res.status(err.status).json({ error: err.message }) : next(err));
+router.use((err, req, res, next) => err.status ? res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) }) : next(err));
 export default router;

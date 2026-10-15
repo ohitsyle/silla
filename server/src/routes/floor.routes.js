@@ -266,7 +266,7 @@ router.delete("/:id", requireAuth, requireRole("superadmin"), asyncHandler(async
   });
   res.json({ ok: true });
 }));
-router.use((err, req, res, next) => err.status ? res.status(err.status).json({ error: err.message, ...(err.outside ? { outside: err.outside } : {}) }) : next(err));
+router.use((err, req, res, next) => err.status ? res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}), ...(err.outside ? { outside: err.outside } : {}) }) : next(err));
 
 /** Pieces, zones or labels that would fall outside a proposed grid. */
 async function findOutsideGrid(floorId, cols, rows, session) {

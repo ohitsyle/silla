@@ -15,12 +15,16 @@
  * logic had been written inside the resolver, it would all have to be
  * duplicated. Keep it that way.
  */
+import Organization from "../../models/Organization.js";
 import Reservation from "../../models/Reservation.js";
 import Resource from "../../models/Resource.js";
-import { withSpaceTransaction } from "../spaces.js";
-import Organization from "../../models/Organization.js";
-import { ReservationError, syncUnitStatus, claimReservation, assertActivationAvailable } from "./index.js";
-import { assertWithinOperatingHours, LIVE_STATUSES } from "./availability.js";
+import { ReservationError, announceUnitStatus, assertActivationAvailable, claimReservation, transact } from "./index.js";
+import { assertWithinOperatingHours } from "./availability.js";
+
+const MINUTE = 60_000;
+
+/** How early a member may tap in for a booking (OCC-1). */
+const EARLIEST_CHECK_IN_MINUTES = 15;
 
 /**
  * OCC-6 — duplicate taps within 5 seconds are ignored, so an accidental
@@ -71,42 +75,74 @@ export async function getMemberSession(memberId) {
 /**
  * OCC-1 — check in by tap. "Tap resolves via the check-in interface;
  * within grace → occupied; Handled per resource."
+ *
+ * Inside the space transaction, because activating can conflict: someone
+ * arriving early for a whole room must not occupy it while a seat inside
+ * is still in use. A tap after the grace period expires the booking
+ * instead, and that expiry is committed even though the tap is refused.
  */
 export async function checkIn({ organizationId, memberId, io = null }) {
-  const outcome = await withSpaceTransaction(organizationId, async (session, org) => {
-    const held = await Reservation.findOne({ organization: organizationId, member: memberId, status: "held" }).sort({ startTime: 1 }).session(session);
+  const outcome = await transact(organizationId, async (session, org) => {
+    const held = await Reservation.findOne({ organization: organizationId, member: memberId, status: "held" })
+      .sort({ startTime: 1 })
+      .session(session);
     if (!held) throw new ReservationError("No reservation to check in to.", 404, "NO_RESERVATION");
+
     const now = new Date();
     const graceMinutes = org.policy?.gracePeriodMinutes ?? 10;
-    if (now < held.startTime && held.startTime - now > 15 * 60000) throw new ReservationError("You can check in from 15 minutes before the reservation starts.", 409, "TOO_EARLY");
-    if (now > new Date(+held.startTime + graceMinutes * 60000) || now >= held.endTime) {
-      held.status = "expired"; await held.save({ session });
+    if (held.startTime - now > EARLIEST_CHECK_IN_MINUTES * MINUTE) {
+      throw new ReservationError(
+        `You can check in from ${EARLIEST_CHECK_IN_MINUTES} minutes before the reservation starts.`,
+        409,
+        "TOO_EARLY"
+      );
+    }
+
+    const graceEnds = new Date(held.startTime.getTime() + graceMinutes * MINUTE);
+    if (now > graceEnds || now >= held.endTime) {
+      held.status = "expired";
+      await held.save({ session });
       return { reservation: held, expired: true, graceMinutes };
     }
+
     await assertActivationAvailable(held, org, now, session);
-    held.status = "active"; held.checkedInAt = now;
+    held.status = "active";
+    held.checkedInAt = now;
     await held.save({ session });
     return { reservation: held };
   });
-  await syncUnitStatus(outcome.reservation.resource, outcome.reservation.unitLabel, { io });
-  if (outcome.expired) throw new ReservationError("That reservation expired — the " + outcome.graceMinutes + "-minute grace period has passed.", 409, "GRACE_EXPIRED");
+
+  // Committed either way; the map hears about it, but cannot fail the tap.
+  await announceUnitStatus(outcome.reservation.resource, outcome.reservation.unitLabel, { io });
+  if (outcome.expired) {
+    throw new ReservationError(
+      `That reservation expired — the ${outcome.graceMinutes}-minute grace period has passed.`,
+      409,
+      "GRACE_EXPIRED"
+    );
+  }
   return outcome.reservation;
 }
 
 /**
  * OCC-3 — check out by tap. "Tap out frees the resource; Map updates
  * immediately."
+ *
+ * One conditional update rather than read-then-save: the scheduler may be
+ * releasing this very session for overstaying at the same moment, and a
+ * read-then-save on either side would overwrite the other. Whichever lands
+ * first wins; the second finds nothing still active and changes nothing.
  */
 export async function checkOut({ memberId, io = null }) {
-  const active = await Reservation.findOne({ member: memberId, status: "active" });
-  if (!active) throw new ReservationError("You're not checked in anywhere.", 404, "NOT_CHECKED_IN");
+  const completed = await Reservation.findOneAndUpdate(
+    { member: memberId, status: "active" },
+    { $set: { status: "completed", checkedOutAt: new Date() } },
+    { new: true }
+  );
+  if (!completed) throw new ReservationError("You're not checked in anywhere.", 404, "NOT_CHECKED_IN");
 
-  active.status = "completed";
-  active.checkedOutAt = new Date();
-  await active.save();
-
-  await syncUnitStatus(active.resource, active.unitLabel, { io });
-  return active;
+  await announceUnitStatus(completed.resource, completed.unitLabel, { io });
+  return completed;
 }
 
 /**
@@ -128,14 +164,14 @@ export async function assignWalkIn({ organizationId, memberId, resourceId, unitL
   // A walk-in is still a reservation, so it is subject to the same gates
   // a booked one is. Without this, the operating-hours rule applied to
   // RES-1 could be sidestepped entirely by tapping in at the kiosk.
-  const now0 = new Date();
-  const outsideHours = assertWithinOperatingHours(org, now0, now0);
+  const now = new Date();
+  const outsideHours = assertWithinOperatingHours(org, now, now);
   if (outsideHours) throw new ReservationError(outsideHours, 409, "OPERATING_HOURS");
 
-  const session = await getMemberSession(memberId);
-  if (session.kind !== "none") {
+  const standing = await getMemberSession(memberId);
+  if (standing.kind !== "none") {
     throw new ReservationError(
-      session.kind === "active"
+      standing.kind === "active"
         ? "You're already checked in. Tap out first."
         : "You already have a reservation. Check into that instead.",
       409,
@@ -143,27 +179,43 @@ export async function assignWalkIn({ organizationId, memberId, resourceId, unitL
     );
   }
 
+  // A quick answer for the kiosk; the claim below checks everything again.
   const resource = await Resource.findById(resourceId);
   if (!resource) throw new ReservationError("Resource not found", 404);
-  const unit = resource.units.find((u) => u.label === String(unitLabel));
+  const unit = resource.units.find((candidate) => candidate.label === String(unitLabel));
   if (!unit) throw new ReservationError(`No unit "${unitLabel}" on that resource`, 404);
   if (unit.status !== "available") {
     throw new ReservationError("That resource isn't available.", 409, "UNAVAILABLE");
   }
 
-  const now = new Date();
-  // The session runs to the max-stay cap, but never past closing — a
-  // walk-in at 18:00 with a 4-hour cap must not claim a seat until
-  // 22:00 in a building that shuts at 19:00 (spec §10).
-  let end = new Date(now.getTime() + (org.policy?.maxStayHours ?? 4) * 3_600_000);
-  const close = org.policy?.operatingHours?.close;
-  if (close) {
-    const [ch, cm] = String(close).split(":").map(Number);
-    const closesAt = new Date(now);
-    closesAt.setHours(ch, cm || 0, 0, 0);
-    if (closesAt > now && closesAt < end) end = closesAt;
-  }
-
+  const end = walkInEnd(org, now);
   // Walk-ins share the same committed room/unit claim path as online bookings.
-  return claimReservation({ organizationId, memberId, resourceId, unitLabel, startTime: now, endTime: end, activate: true, notify: false, io });
+  return claimReservation({
+    organizationId, memberId, resourceId, unitLabel,
+    startTime: now, endTime: end, activate: true, notify: false, io,
+  });
+}
+
+/**
+ * When a walk-in session starting `now` ends: the maximum stay, but never
+ * past closing — a walk-in at 18:00 with a 4-hour cap must not claim a
+ * seat until 22:00 in a building that shuts at 19:00 (spec §10).
+ *
+ * Inside the closing minute itself the opening-hours check above still
+ * says "open" (it reads whole minutes), but there is nothing left to
+ * book; the max stay would run past midnight and be refused for the
+ * wrong reason. Say what is actually true instead.
+ */
+function walkInEnd(org, now) {
+  const maxStay = new Date(now.getTime() + (org.policy?.maxStayHours ?? 4) * 60 * MINUTE);
+  const close = org.policy?.operatingHours?.close;
+  if (!close) return maxStay;
+
+  const [hours, minutes] = String(close).split(":").map(Number);
+  const closesAt = new Date(now);
+  closesAt.setHours(hours, minutes || 0, 0, 0);
+  if (closesAt <= now) {
+    throw new ReservationError(`Walk-ins have finished for today: we close at ${close}.`, 409, "OPERATING_HOURS");
+  }
+  return closesAt < maxStay ? closesAt : maxStay;
 }

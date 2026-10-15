@@ -12,6 +12,7 @@ import {
   cancelReservation,
   claimReservation,
   reservationAvailability,
+  roomBookingOptions,
 } from "../services/reservations/index.js";
 import { LIVE_STATUSES } from "../services/reservations/availability.js";
 import { SpaceError } from "../services/spaces.js";
@@ -68,11 +69,39 @@ router.post(
   })
 );
 
-// Same rules as the committed claim, without exposing another member's details.
+/**
+ * GET /api/reservations/availability?resourceId&unitLabel&startTime&endTime
+ *
+ * "Could I book this?" for the booking form — the same rules as the
+ * committed claim, answered without revealing who holds what. Guidance
+ * only: the claim checks everything again when it commits.
+ */
 router.get("/availability", requireAuth, asyncHandler(async (req, res) => {
   const { resourceId, unitLabel, startTime, endTime } = req.query;
-  if (typeof resourceId !== "string" || !mongoose.isValidObjectId(resourceId) || typeof unitLabel !== "string") return res.status(400).json({ error: "Choose a valid resource and unit." });
-  res.json(await reservationAvailability({ organizationId: req.user.organizationId, resourceId, unitLabel, startTime, endTime }));
+  if (typeof resourceId !== "string" || !mongoose.isValidObjectId(resourceId) || typeof unitLabel !== "string") {
+    return res.status(400).json({ error: "Choose a valid resource and unit." });
+  }
+  res.json(await reservationAvailability({
+    organizationId: req.user.organizationId, resourceId, unitLabel, startTime, endTime,
+  }));
+}));
+
+/**
+ * GET /api/reservations/rooms/:roomId/options?startTime&endTime
+ *
+ * What one room offers for a window, for the member's room panel: the
+ * room as a whole (null when it is only booked unit by unit) and every
+ * bookable unit inside it on every level, each with whether it is free
+ * and, if not, why. One request instead of one per unit — a room of
+ * twenty desks must not cost twenty round trips. Guidance only, like
+ * /availability above.
+ */
+router.get("/rooms/:roomId/options", requireAuth, asyncHandler(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.roomId)) return res.status(400).json({ error: "Invalid room id" });
+  const { startTime, endTime } = req.query;
+  res.json(await roomBookingOptions({
+    organizationId: req.user.organizationId, roomId: req.params.roomId, startTime, endTime,
+  }));
 }));
 
 /**

@@ -5,7 +5,10 @@ import Reservation from "../models/Reservation.js";
 import Resource from "../models/Resource.js";
 import Floor from "../models/Floor.js";
 import Closure from "../models/Closure.js";
-import { syncUnitStatus } from "../services/reservations/index.js";
+import { announceUnitStatus } from "../services/reservations/index.js";
+// Every state change below is conditional on the state the job read: the
+// holder may have checked in, out or cancelled since. See lifecycle.js.
+import { claimReminder, closeOut, moveReservation } from "../services/reservations/lifecycle.js";
 import { sendEmail } from "../services/email/index.js";
 import {
   closureCancelledEmail,
@@ -25,6 +28,17 @@ import {
  * state that the job itself then changes, so a second pass finds
  * nothing. That matters because a restart mid-tick must not double-email
  * or double-release.
+ *
+ * And every move is CONDITIONAL on the state the job read (lifecycle.js).
+ * A batch is read once and then worked through slowly, emailing as it
+ * goes; a member who taps in, taps out or cancels in the meantime has the
+ * newer word, and the job's stale decision must not be written over it.
+ * A move that finds the reservation already moved on does nothing — no
+ * email, no count, no map update.
+ *
+ * The map refresh after a move uses announceUnitStatus, which logs rather
+ * than throws: the move has already happened, and one failed refresh
+ * must not abandon the rest of the batch until the next tick.
  */
 
 // Socket.io instance, set by server.js so released seats stream to the
@@ -35,27 +49,32 @@ export function startScheduler(io = null) {
   ioRef = io;
 
   const task = cron.schedule("* * * * *", async () => {
-    try {
-      await purgeAbandonedRegistrations();
-      await releaseExpiredGraceHolds();
-      await refreshDueHolds();
-      await releaseOverstayedSessions();
-      await releaseAtClosingTime();
-      await sendStartingSoonReminders();
-      await applyScheduledClosures();
-    } catch (err) {
-      // A throwing job must not kill the cron loop.
-      console.error("[scheduler] job failed:", err.message);
+    // Each job in its own try: a throwing job must not kill the cron loop,
+    // and it must not starve the jobs after it either — a failed reminder
+    // pass is no reason to leave overstays unreleased until it is fixed.
+    for (const job of JOBS) {
+      try {
+        await job();
+      } catch (err) {
+        console.error(`[scheduler] ${job.name} failed:`, err.message);
+      }
     }
   });
   console.log("[scheduler] started");
   return task;
 }
 
-/** MAP-2: future holds become reserved when their start time arrives. */
+/**
+ * MAP-2: a booking made for later turns its unit "reserved" when its
+ * window opens. Nothing else happens at that moment — no request, no
+ * tap — so without this the map would keep showing the unit free until
+ * someone touched it. Only units still showing "available" are visited:
+ * anything else is either already right or set by staff.
+ */
 export async function refreshDueHolds({ io = ioRef } = {}) {
   const now = new Date();
-  const holds = await Reservation.find({ status: "held", startTime: { $lte: now }, endTime: { $gt: now } }).select("resource unitLabel");
+  const holds = await Reservation.find({ status: "held", startTime: { $lte: now }, endTime: { $gt: now } })
+    .select("resource unitLabel");
   let refreshed = 0;
   const visited = new Set();
   for (const hold of holds) {
@@ -63,10 +82,10 @@ export async function refreshDueHolds({ io = ioRef } = {}) {
     if (visited.has(key)) continue;
     visited.add(key);
     const resource = await Resource.findById(hold.resource).select("units");
-    const unit = resource?.units.find((u) => u.label === hold.unitLabel);
+    const unit = resource?.units.find((candidate) => candidate.label === hold.unitLabel);
     if (unit?.status !== "available" || unit.serviceStatus === "out_of_service") continue;
-    await syncUnitStatus(hold.resource, hold.unitLabel, { io });
-    refreshed++;
+    await announceUnitStatus(hold.resource, hold.unitLabel, { io });
+    refreshed += 1;
   }
   return refreshed;
 }
@@ -117,9 +136,9 @@ export async function releaseExpiredGraceHolds() {
     const grace = org?.policy?.gracePeriodMinutes ?? 10;
     if (now < reservation.endTime && now - reservation.startTime < grace * 60_000) continue;
 
-    reservation.status = "expired";
-    await reservation.save();
-    await syncUnitStatus(reservation.resource, reservation.unitLabel, { io: ioRef });
+    // Not if they tapped in since this batch was read.
+    if (!(await moveReservation(reservation, "held", { status: "expired" }))) continue;
+    await announceUnitStatus(reservation.resource, reservation.unitLabel, { io: ioRef });
     released += 1;
 
     const member = await User.findById(reservation.member);
@@ -158,10 +177,9 @@ export async function releaseOverstayedSessions() {
     const maxHours = org?.policy?.maxStayHours ?? 4;
     if (now - reservation.checkedInAt < maxHours * 3_600_000) continue;
 
-    reservation.status = "released";
-    reservation.overstay = true;
-    await reservation.save();
-    await syncUnitStatus(reservation.resource, reservation.unitLabel, { io: ioRef });
+    // Not if they tapped out since this batch was read.
+    if (!(await moveReservation(reservation, "active", { status: "released", overstay: true }))) continue;
+    await announceUnitStatus(reservation.resource, reservation.unitLabel, { io: ioRef });
     released += 1;
 
     const member = await User.findById(reservation.member);
@@ -196,14 +214,16 @@ export async function releaseAtClosingTime() {
     if (nowMinutes !== closeMinutes) continue;
 
     const stillIn = await Reservation.find({ organization: org._id, status: { $in: ["held", "active"] } });
+    let releasedHere = 0;
     for (const reservation of stillIn) {
-      reservation.status = reservation.status === "active" ? "released" : "expired";
-      await reservation.save();
-      await syncUnitStatus(reservation.resource, reservation.unitLabel, { io: ioRef });
-      released += 1;
+      // Released or expired by its status NOW — see closeOut.
+      if (!(await closeOut(reservation))) continue;
+      await announceUnitStatus(reservation.resource, reservation.unitLabel, { io: ioRef });
+      releasedHere += 1;
     }
-    if (stillIn.length) {
-      console.log(`[scheduler] closing time at "${org.name}" — released ${stillIn.length} session(s)`);
+    released += releasedHere;
+    if (releasedHere) {
+      console.log(`[scheduler] closing time at "${org.name}" — released ${releasedHere} session(s)`);
     }
   }
   return released;
@@ -231,6 +251,9 @@ export async function sendStartingSoonReminders() {
   });
 
   for (const reservation of upcoming) {
+    // Claimed before sending: never twice, and never for a booking
+    // cancelled since this batch was read.
+    if (!(await claimReminder(reservation, now))) continue;
     const org = await loadOrg(reservation.organization);
     const member = await User.findById(reservation.member);
     if (member && org) {
@@ -238,8 +261,6 @@ export async function sendStartingSoonReminders() {
         startingSoonEmail({ org, user: member, reservation, resourceLabel: reservation.targetLabel || reservation.unitLabel })
       );
     }
-    reservation.remindedAt = now;
-    await reservation.save();
     sent += 1;
   }
 
@@ -259,6 +280,7 @@ export async function applyScheduledClosures() {
   for (const closure of await Closure.find({ appliedAt: null })) {
     const org = await Organization.findById(closure.organization);
     if (!org) continue;
+    let cancelledHere = 0;
 
     // Site-scoped closures only affect that site's floors.
     let resourceFilter = {};
@@ -277,11 +299,10 @@ export async function applyScheduledClosures() {
     });
 
     for (const reservation of affected) {
-      reservation.status = "cancelled";
-      reservation.cancelReason = closure.reason;
-      await reservation.save();
-      await syncUnitStatus(reservation.resource, reservation.unitLabel, { io: ioRef });
-      cancelled += 1;
+      const changes = { status: "cancelled", cancelReason: closure.reason };
+      if (!(await moveReservation(reservation, ["held", "active"], changes))) continue;
+      await announceUnitStatus(reservation.resource, reservation.unitLabel, { io: ioRef });
+      cancelledHere += 1;
 
       const member = await User.findById(reservation.member);
       if (member) {
@@ -299,12 +320,24 @@ export async function applyScheduledClosures() {
 
     closure.appliedAt = new Date();
     await closure.save();
-    if (affected.length) {
-      console.log(`[scheduler] closure "${closure.reason}" cancelled ${affected.length} reservation(s)`);
+    cancelled += cancelledHere;
+    if (cancelledHere) {
+      console.log(`[scheduler] closure "${closure.reason}" cancelled ${cancelledHere} reservation(s)`);
     }
   }
   return cancelled;
 }
+
+/** One tick, in order. Declarations are hoisted, so the list can sit here. */
+const JOBS = [
+  purgeAbandonedRegistrations,
+  releaseExpiredGraceHolds,
+  refreshDueHolds,
+  releaseOverstayedSessions,
+  releaseAtClosingTime,
+  sendStartingSoonReminders,
+  applyScheduledClosures,
+];
 
 /** Exposed so scripts and tests can drive one pass without cron. */
 export async function runAllJobsOnce(io = null) {
@@ -312,6 +345,7 @@ export async function runAllJobsOnce(io = null) {
   return {
     purged: await purgeAbandonedRegistrations(),
     graceExpired: await releaseExpiredGraceHolds(),
+    dueHolds: await refreshDueHolds({ io }),
     overstayed: await releaseOverstayedSessions(),
     closingReleased: await releaseAtClosingTime(),
     reminded: await sendStartingSoonReminders(),

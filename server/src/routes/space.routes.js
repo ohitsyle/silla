@@ -170,5 +170,5 @@ router.patch("/rooms/:id/availability", requireAuth, requireRole("staff", "super
   await syncUnitStatus(r.resource, "room", { io: req.app.get("io") });
   res.json({ ok: true });
 }));
-router.use((err, req, res, next) => err instanceof SpaceError ? res.status(err.status).json({ error: err.message }) : next(err));
+router.use((err, req, res, next) => err instanceof SpaceError ? res.status(err.status).json({ error: err.message, code: err.code }) : next(err));
 export default router;
