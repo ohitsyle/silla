@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { ChevronDown, ChevronLeft, ChevronUp, X } from "lucide-react";
 import { DURATION, EASE_OUT, prefersReducedMotion } from "../lib/motion.js";
@@ -35,11 +35,16 @@ export default function Inspector({
 }) {
   const reduced = prefersReducedMotion();
   const [folded, setFolded] = useState(defaultFolded);
+  const body = useRef(null);
 
-  // Something new to show arrives in its default state: unfolded, unless
+  // Something new to show arrives in its default state — unfolded, unless
   // it is only a reminder (on a phone, your reservation should not take
-  // half the screen before you have looked at the map).
-  useEffect(() => setFolded(defaultFolded), [title, defaultFolded]);
+  // half the screen before you have looked at the map) — and from its top:
+  // the next step must not open where the last one was scrolled to.
+  useEffect(() => {
+    setFolded(defaultFolded);
+    if (body.current) body.current.scrollTop = 0;
+  }, [title, defaultFolded]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -113,7 +118,9 @@ export default function Inspector({
             </button>
           </div>
 
-          <div className={`min-h-0 flex-1 overflow-y-auto p-4 ${folded ? "hidden lg:block" : ""}`}>{children}</div>
+          <div ref={body} className={`min-h-0 flex-1 overflow-y-auto p-4 ${folded ? "hidden lg:block" : ""}`}>
+            {children}
+          </div>
 
           {footer && (
             <div className={`shrink-0 border-t border-line/10 p-4 ${folded ? "hidden lg:block" : ""}`}>{footer}</div>
