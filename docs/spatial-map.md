@@ -1,130 +1,233 @@
 # Buildings, floors, rooms and resources
 
-SILLA now navigates through **site → building → floor → room → resource**.
-Buildings and floors organize the map. The bookable targets in this release
-are rooms, seats, desks and equipment. Whole buildings and floors are not
-reservation targets.
+SILLA's map follows the space the way it is built: **site → building → floor →
+room → resource**. Buildings and floors organize the map; members book rooms
+(as a whole) and the resources inside them — seats, desks, equipment, in the
+organization's own words. Whole buildings and floors are not bookable.
+
+## What a member sees
+
+The map page reads top to bottom in the same order:
+
+| Row | Shows | Notes |
+| --- | --- | --- |
+| Breadcrumb | `Building › Floor › Room` | The floor steps back out of a room. |
+| Building | A switcher | Only when there is more than one building to choose. |
+| Floor | Tabs | Every floor of the building at once. |
+| Rooms on the floor | One tab per room, plus "All of *floor*" | Each says what it offers — "Whole room only", "Whole room or a desk", "Pick a desk" — or its live state ("Booked now", "In use now", "Closed"). Scrolls sideways when there are many. |
+
+The floor plan draws each room as a named outline with its furniture inside.
+A free room is neutral; a room booked, in use or closed takes that state's
+colour and a pill with an icon (colour is never the only signal). Furniture in
+a room that is only booked whole is drawn as part of the room — neutral, with
+a door icon — rather than as unavailable seats. Room names are sized for the
+screen, so they stay readable when a whole floor fits a phone. The legend at
+the foot explains every mark, including "Room" and "Comes with its room", and
+counts only units a member could book on their own.
+
+Choosing a room (its tab, or its outline) zooms the plan to it and opens the
+**room panel**:
+
+- **When?** — a start and a length. This one window is shared by the whole page:
+  the time chosen here is the time confirmed later.
+- **What would you like to book?** — in plain words, only what the room allows:
+  - *Book the whole room* (whole or either): free for that time, or why not.
+  - *Pick a <resource> inside* (individual or either): "4 of 5 free for this
+    time", then each piece with its units. Hovering a unit outlines it on the map.
+- For a room on several floors, the levels it covers, with a switch to see each.
+
+Availability is answered for the **chosen** time, not for right now, from one
+request for the whole room (`GET /api/reservations/rooms/:id/options`). It is
+re-asked when the time changes and when the map's live status moves. It is
+guidance; the booking checks everything again when it commits.
+
+Picking an option opens the confirmation: the same time, "Free for this time"
+or the reason it is not, the PIN, and *Reserve*. A missing PIN is only pointed
+out when *Reserve* is pressed. A member holding a reservation sees it at the top
+of the panel with *Cancel reservation* (confirmed in a second step); other
+options stay visible but explain that one reservation is the limit.
+
+Status streams live (MAP-2): another member's booking changes the colours, the
+room panel's counts and its answers without a reload.
+
+**On a phone** the panel is a bottom sheet docked under the map — the map
+shrinks rather than being covered — and its handle folds it to its title. While
+a room is open the building, floor and room rows fold away and the breadcrumb
+does the navigating. A reservation reminder arrives folded. Nothing scrolls
+sideways except the room row.
 
 ## Configuring the map
 
-1. Sign in as a superadmin and open **Editor**.
-2. Choose a building, or use **Add building**. Existing installations appear
-   under their site's name with **needs setup**. **Set up building** can move
-   those existing floors into a named building without changing floor IDs,
-   furniture, zones, labels or reservation history.
-3. **Add floor** creates a grid inside the selected building and opens it.
-   A floor can be renamed, resized or moved to another building at the same
-   site. Move or remove its room levels before changing its building.
-4. Select **Room** and drag between two corners. The room dialog asks for a
-   name and its booking mode. Pieces fully inside the boundary become its
-   contents; a boundary cannot cut through a piece or overlap another room.
-5. To give a room a balcony or another level, open **Configure**, choose a
-   building floor under **Draw on floor**, and press **Draw level**. Draw its
-   boundary and save. Drawing on an existing level's floor replaces that
-   level's rectangle; drawing on a different floor adds a level. Every level
-   belongs to the same room and shares one reservation.
-6. Continue placing resources with the existing catalog tools. Membership is
-   derived from full footprint containment, so there is no second membership
-   list to maintain.
+Superadmins open **Editor**. Above the map are three numbered steps; the first
+one still to do is highlighted and says what to do next:
 
-Room levels must use different floors within one building. Rectangles use
-integer cells and must fit their floor's grid. At least one level must remain.
-Shrinking a floor cannot orphan a room, resource, zone or label. Remove rooms
-and pieces before deleting a floor; a site must retain at least one floor.
-An empty building can be removed from its building dialog.
+1. **Building** — the building switcher, *Rename*, *Add building*. Floors that
+   predate buildings appear as "*site* — needs setup": *Set up building* names
+   the building and, with *Move the existing floors into this building*,
+   adopts them without changing floor ids, furniture, zones, labels or booking
+   history. Loose floors anywhere else are announced above the steps with the
+   same action.
+2. **Floors** — the building's floors as tabs, and *Add floor* (a name and a
+   grid you can sketch). The open floor's name, size and building are under
+   **Floor settings** below the map, with *Remove floor*.
+3. **Rooms** — *Draw a room*, then drag a box around it on the map. A dialog asks
+   for its name and **what members can book here**: *One <resource> at a time*,
+   *Whole room*, or *Whole room or one at a time*, each explained in a sentence.
+   Pieces wholly inside the boundary become its contents; a boundary cannot cut
+   through a piece or overlap another room.
+
+A room's **Settings** (from the rooms panel, or by clicking the room on the map)
+change its name and booking mode, name its levels, and *Draw a level on* another
+floor of the building — a balcony shares the room's one booking. Drawing on a
+floor the room already reaches redraws that level. *Remove room* keeps its
+furniture and booking history. The toolbar's other tools place and remove
+furniture, draw zones and add labels as before.
+
+Room levels must use different floors of one building, in whole cells inside
+the floor's grid; at least one level remains. Shrinking a floor cannot orphan a
+room, piece, zone or label, and only an empty floor can be removed (a site keeps
+at least one). An empty building can be removed from its rename dialog.
+
+**Staff** open **Space controls**: the same map with building and floor
+navigation, availability (unavailable, out of service) by clicking a unit, and
+for each room *Close*/*Reopen* and its *Schedule*, where bookings of the room
+and of everything inside it can be cancelled. Staff are not shown the setup
+steps, booking modes or layout tools — the server refuses them regardless.
 
 ## Booking rules
 
 | Room mode | What members can reserve |
 | --- | --- |
-| Individual resources | Seats, desks and equipment inside the room |
-| Whole room | One reservation covering all levels and everything inside |
-| Either | The room or individual resources, with overlapping bookings refused |
+| One at a time (`individual`) | The seats, desks and equipment inside, each on its own |
+| Whole room (`whole`) | One reservation covering all levels and everything inside |
+| Either (`either`) | The room or individual units, with overlapping bookings refused |
 
 A whole-room booking conflicts with **every** live booking inside its levels.
-An individual booking conflicts with its own unit and whole-room bookings.
-Other individual units remain independently bookable. Adjacent time windows
-are allowed. Physically active sessions continue to block arrival until they
-are released, including overstays beyond their scheduled end.
+An individual booking conflicts with its own unit and with whole-room bookings.
+Other units stay independently bookable. Adjacent windows are allowed. A
+session physically in progress blocks arrival until it is released, including
+an overstay past its scheduled end.
 
-The reservation form checks the chosen window before asking the member to
-confirm. That is guidance; the committed claim checks the same rules again.
 Room reservations use the normal PIN confirmation, maximum stay, operating
 hours, closures, check-in, check-out, reminders, cancellation and no-show
-lifecycle. Early room arrival cannot occupy a seat or another room level that
-is still in use.
+lifecycle. Arriving early for a room cannot occupy it while a seat or level
+inside is still in use. Active or upcoming bookings must be cancelled before a
+room is changed or closed, or a booked unit is taken out of use.
 
-Staff open **Space controls** to change resource availability, close/reopen
-rooms and view their schedules. Room schedules include whole-room bookings
-and individual bookings on all levels. Staff cannot redraw boundaries, change
-booking mode or manage buildings/floors. Active or upcoming bookings must be
-cancelled before structural changes or taking a booked resource out of use.
-Cancellation records a reason and is scoped to the staff member's organization.
+## Plan limits
+
+A managed organization's plan (`Organization.entitlements`, see
+`docs/control-plane.md` §2) is enforced on the map only through
+`server/src/services/entitlements.js`, inside the same transaction as the
+creation, so two creations cannot both pass a count of "one left":
+
+| Action | Check | Refusal |
+| --- | --- | --- |
+| Create a building (including *Set up building*) | `assertWithinLimit("buildings")` | 403 `PLAN_LIMIT` |
+| Create a floor | `assertWithinLimit("floors")` | 403 `PLAN_LIMIT` |
+| Draw a room | `assertWithinLimit("rooms")` | 403 `PLAN_LIMIT` |
+| Place a piece | `assertWithinLimit("resources", seats)` — the bookable units it adds; none for a piece nobody books | 403 `PLAN_LIMIT` |
+| Create a room as whole/either, or **change** one to whole/either | `assertFeature("wholeRoomBooking")` | 403 `PLAN_FEATURE` |
+| A new whole-room booking (and its preview) | `assertFeature("wholeRoomBooking")` | 403 `PLAN_FEATURE` |
+
+Refusals carry `limit`, `max`, `used` and `adding` (or `feature`) through
+app.js's error handler. Limits block new things only: a room booked whole before
+a downgrade can still be renamed or redrawn, and its existing bookings checked
+into. Organizations that are not managed — every one that exists today — have
+no limits and every feature.
+
+The editor reads the same entitlements (`useOrg().entitlements`) and the same
+counts (`GET /api/spaces/usage`, superadmin) to show "3 of 5 rooms" in each step
+and "44 of 60 bookable desks" in the place tool. At a cap, the step's Add, the
+Room tool and the loose-floors *Set up building* are replaced by a sentence
+saying why. Without whole-room booking, the room dialog shows the whole-room
+choices but does not offer them, keeping a room's existing choice. Members see
+"Booking a whole room isn't available here at the moment" rather than a message
+addressed to an administrator.
 
 ## Data and concurrency
 
 `Building` owns a site's floors. `Room` stores its building, booking mode and
 level rectangles. Each room has one internal `Resource` booking target with a
-single stable unit named `room`. The existing reservation engine and workers
-therefore operate on it without a parallel occupancy model.
+single unit named `room`, so the reservation engine and workers handle
+whole-room bookings without a parallel occupancy model. The target is excluded
+from furniture, the catalog, plan unit counts and physical-unit counts; its
+status is streamed to every floor the room reaches.
 
-The internal target is excluded from furniture, the placement catalog and
-physical-unit counts. Its status is included on every floor containing a room
-level. Whole-room status changes stream to all those floors. The minute worker
-also turns future holds into reserved status when their start time arrives.
-Room locks are
-composed for display and never overwrite a child's manual availability or
-service status. Releasing the room restores each child's own state.
+Membership is derived from containment, never stored. Room locks are composed
+for display (`effectiveRoomState`, `effectiveStatus`) and never overwrite a
+unit's own availability, so releasing the room restores each unit's state.
 
-Claims, check-in, cancellation, room changes, resource availability and
-structural writes contend on an actual organization revision write inside a
-MongoDB transaction. This prevents write skew across different room/seat IDs
-and enforces one live reservation per member under concurrent requests.
-MongoDB must support transactions (Atlas or a local replica set). Operations
-within one organization serialize; other organizations remain independent.
-If traffic outgrows this guard, partition it only with equivalent concurrency
-checks for every room level and member.
+**Claims, check-in, cancellation, room changes, availability and structural
+writes** contend on an actual write to the organization's `spaceRevision` inside
+a MongoDB transaction (`withSpaceTransaction`). That turns write skew between a
+room and a seat inside it into a write conflict, and enforces one live
+reservation per member under concurrency. A conflict is retried with a short,
+jittered, growing pause, at most `MAX_ATTEMPTS` (10) times; then the request is
+refused with 503 `BUSY` and "A lot is changing on the map right now, so nothing
+was saved. Please try again in a moment." — instead of the driver's two-minute
+retry ending in a driver error. Different organizations never contend.
+MongoDB must support transactions (Atlas or a replica set).
 
-Existing floor documents can have no building. Reading the hierarchy projects
-them into an unassigned building without migrating or deleting anything.
-Adoption is an explicit superadmin action. Removing a room retains furniture
-and reservation history; reservations snapshot the target's display name.
-Seed layout replacement and vertical-profile swapping refuse organizations
-with configured rooms, because reseeding would invalidate their boundaries.
+**The minute worker** (`workers/scheduler.js`) reads a batch and works through
+it, so each move it makes is conditional on the state it read
+(`services/reservations/lifecycle.js`): a member who taps in, taps out or
+cancels after the batch was read keeps their newer state. Closing time picks
+released or expired from the live status in one update, and a reminder's
+sent-once flag is claimed before the email goes. Each job runs in its own try,
+so one failing job does not starve the rest.
+
+**Map status** is derived from reservations and written back; a refresh
+re-derives after writing until two answers agree, so a refresh that read before
+a booking committed cannot leave a stale colour behind. Side effects after a
+commit (the map update, the confirmation email) log instead of failing a
+booking that already exists.
+
+Existing floors can have no building. Reading the hierarchy projects them into
+an unassigned building without migrating anything; adoption is an explicit
+superadmin action. Removing a room keeps its furniture and reservation history
+(reservations snapshot the target's display name). Seed layout replacement and
+vertical-profile swapping refuse organizations with configured rooms, because
+reseeding would invalidate their boundaries.
 
 ## Verification and local preview
 
 From `server/`:
 
 ```sh
-npm run test:spaces
-npm run test:isolated
+npm run test:spaces     # 73 spatial checks
+npm run test:isolated   # the 117 system checks
 ```
 
-The spatial suite uses a disposable MongoDB replica set and does not read
-`.env`. The isolated runner seeds another disposable database and runs the
-existing 117 system checks with email disabled. Neither touches live Atlas.
+Both run on disposable MongoDB replica sets and never read `.env` or touch
+Atlas. The spatial suite covers the hierarchy, room rules, racing claims, the
+retry bound, the scheduler's races (each confirmed to fail against the old
+unconditional saves), room options agreeing unit by unit with the single-unit
+preview, and plan limits against a managed organization written straight into
+the test database.
 
-For an isolated browser preview, start these in separate terminals:
+For a browser preview, start these in separate terminals:
 
 ```sh
 cd server
-npm run test:spaces -- --serve
+npm run test:spaces -- --serve             # add --managed to preview a limited plan
 ```
 
 ```sh
 cd client
-VITE_API_URL=http://localhost:4010 VITE_DEMO_ORG_ID=6abd97aca6022143a42a51d7 npm run dev -- --host 127.0.0.1 --port 5175
+VITE_API_URL=http://localhost:4010 VITE_DEMO_ORG_ID=6abd97aca6022143a42a51d7 npx vite --host 127.0.0.1 --port 5175 --strictPort
 ```
 
-Open `http://127.0.0.1:5175`. Preview accounts are
-`superadmin0@test.silla`, `staff0@test.silla`, and `member0@test.silla`, all
-with PIN `123456`. This test-only database disappears when the preview API
-stops. These accounts are not production credentials.
+Open `http://127.0.0.1:5175`. The preview accounts are
+`superadmin0@test.silla`, `staff0@test.silla` and `member0@test.silla`, all with
+PIN `123456`; they are test-only and the database disappears when the preview
+API stops. The organization calls its units "desks". It has Building 1 (Ground:
+the two-level Commons, whole-or-desk, and a whole-only meeting room with a
+six-seat table; open-plan desks in every state; Upper: the Commons balcony and
+focus desks), Building 2 (a focus studio booked one desk at a time) and a South
+annex site whose floor predates buildings, to show *Set up building*. With
+`--managed` the organization is on a plan with whole-room booking withheld and
+its building and room limits reached.
 
-The preview contains two buildings, a two-level Commons room, a whole-bookable
-meeting room, and an equipment studio with individual booking. Browser verification covered whole-room reservation and
-cancellation, room drawing, adding a level on another floor, creating a
-building/floor, staff close/reopen controls, schedules and responsive navigation.
-Deployment follows the existing deployment scripts; this change does not
-automatically reseed or migrate a live organization.
+Deployment follows the existing deployment scripts; nothing here reseeds or
+migrates a live organization.
