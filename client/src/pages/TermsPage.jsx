@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Navigate, useNavigate } from "react-router-dom";
+import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { ArrowDown, FileText } from "lucide-react";
 import { motion } from "framer-motion";
 import { api } from "../lib/api.js";
@@ -22,6 +22,8 @@ import { useOrg } from "../lib/OrgContext.jsx";
 export default function TermsPage() {
   const { user, isAuthenticated, requiresTermsAcceptance, acceptTerms, booting } = useAuth();
   const navigate = useNavigate();
+  // Where the person was headed before the gates stopped them.
+  const from = useLocation().state?.from;
   const scrollRef = useRef(null);
 
   const [terms, setTerms] = useState(null);
@@ -51,7 +53,7 @@ export default function TermsPage() {
   // reload has a token but no /me answer yet.
   if (booting) return <Loading className="min-h-screen" />;
   if (!isAuthenticated) return <Navigate to="/login" replace />;
-  if (!requiresTermsAcceptance) return <Navigate to="/map" replace />;
+  if (!requiresTermsAcceptance) return <Navigate to={from || "/map"} replace />;
 
   const onScroll = (e) => {
     const el = e.currentTarget;
@@ -65,17 +67,18 @@ export default function TermsPage() {
     setError(null);
     try {
       await acceptTerms();
-      navigate("/map", { replace: true });
+      navigate(from || "/map", { replace: true });
     } catch (err) {
       setError(err.message);
       setSubmitting(false);
     }
   };
 
+  // Said to whoever is signing in, so no story ids and no instructions for
+  // an administrator — just that there is nothing more to read.
   const body =
     terms?.termsOfServiceText?.trim() ||
-    "This organization has not configured its terms of service text yet. " +
-      "A superadmin sets it in Settings (ADM-5); until then there is nothing further to display.";
+    `${terms?.organizationName || "This organization"} hasn't written its terms of use yet, so there's nothing more to read here.`;
 
   return (
     <AuthShell

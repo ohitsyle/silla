@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, Navigate, useNavigate } from "react-router-dom";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { Building2, LockKeyhole } from "lucide-react";
 import { useOrg } from "../lib/OrgContext.jsx";
 import { useAuth } from "../lib/AuthContext.jsx";
@@ -13,37 +13,63 @@ import { Button, Card, Field, Loading, Notice, PinField } from "../components/ui
  *
  * AUTH-2's lockout and rate limiting are enforced server-side; this
  * screen's job is to report them in a way a person can act on, which
- * means distinguishing "wrong PIN" from "locked" from "slow down".
+ * means distinguishing "wrong PIN" from "locked" from "slow down" — and,
+ * for a forgotten or locked PIN, offering the way back (AUTH-4, at
+ * /login/reset), which also clears a lockout.
+ *
+ * Sign in is never disabled: an empty field is said when the person
+ * presses it, next to the field, rather than a greyed-out button that
+ * explains nothing. And it returns people to the page that sent them
+ * here — a link to /admin/plan from an email should land on the plan,
+ * not on the map, once they have signed in.
  */
 export default function LoginPage() {
   const { org, entitlements } = useOrg();
   const { login, isAuthenticated, requiresTermsAcceptance, mustChangePin, booting } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const from = location.state?.from;
 
   const [email, setEmail] = useState("");
   const [pin, setPin] = useState("");
+  const [fieldErrors, setFieldErrors] = useState({});
   const [error, setError] = useState(null);
+  const [locked, setLocked] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   const memberNoun = org?.terminology?.memberNoun || "member";
 
+  /** Where a signed-in person goes next: the gates first, in order, then where they were headed. */
+  const onward = (user) => {
+    if (user.mustChangePin) return navigate("/change-pin", { replace: true, state: { from } });
+    if (user.requiresTermsAcceptance) return navigate("/terms", { replace: true, state: { from } });
+    return navigate(from || "/map", { replace: true });
+  };
+
   const onSubmit = async (e) => {
     e.preventDefault();
+    const found = {};
+    if (!email.trim()) found.email = "Enter the email address you sign in with.";
+    if (pin.length !== 6) found.pin = "Enter your 6-digit PIN.";
+    setFieldErrors(found);
     setError(null);
+    setLocked(false);
+    if (Object.keys(found).length) return;
+
     setSubmitting(true);
     try {
-      const user = await login(email.trim(), pin);
-      // The gates run in order: PIN change (ADM-4), then terms (AUTH-3).
-      if (user.mustChangePin) navigate("/change-pin");
-      else navigate(user.requiresTermsAcceptance ? "/terms" : "/map");
+      onward(await login(email.trim(), pin));
     } catch (err) {
       if (err.status === 403 && err.body?.requiresVerification) {
         setError("This account isn't verified yet. Finish registration at the kiosk.");
       } else if (err.status === 423) {
+        setLocked(true);
         setError("Too many incorrect PINs — this account is locked for 15 minutes.");
       } else if (err.status === 429) {
-        const secs = err.body?.retryAfterSeconds;
+        const secs = err.details?.retryAfterSeconds;
         setError(`Too many attempts. Try again${secs ? ` in ${Math.ceil(secs / 60)} minute(s)` : " shortly"}.`);
+      } else if (err.status === 401) {
+        setError("That email and PIN don't match an account here.");
       } else {
         setError(err.message);
       }
@@ -53,13 +79,22 @@ export default function LoginPage() {
 
   if (booting) return <Loading className="min-h-screen" />;
   if (isAuthenticated) {
-    return <Navigate to={mustChangePin ? "/change-pin" : requiresTermsAcceptance ? "/terms" : "/map"} replace />;
+    return (
+      <Navigate
+        to={mustChangePin ? "/change-pin" : requiresTermsAcceptance ? "/terms" : from || "/map"}
+        replace
+        state={{ from }}
+      />
+    );
   }
+
+  // The reset page starts from the address already typed here.
+  const resetLink = { pathname: "/login/reset", state: { email: email.trim(), from } };
 
   return (
     <AuthShell
       icon={Building2}
-      title={org?.name || "SILLA"}
+      title={org?.name || "Sign in"}
       subtitle="Sign in to continue"
       footer={
         // Without the kiosk on the plan there is nowhere to register, so the
@@ -78,30 +113,60 @@ export default function LoginPage() {
       }
     >
       <Card elevation="floating">
-        <form onSubmit={onSubmit} className="space-y-4">
+        <form onSubmit={onSubmit} noValidate className="space-y-4">
           <Field
             label="Email"
             type="email"
             name="email"
-            required
             autoComplete="email"
             autoFocus
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            error={fieldErrors.email}
+            onChange={(e) => {
+              setEmail(e.target.value);
+              if (fieldErrors.email) setFieldErrors((f) => ({ ...f, email: undefined }));
+            }}
           />
-          <PinField label="6-digit PIN" name="pin" value={pin} onChange={setPin} />
+          <div>
+            <PinField
+              label="6-digit PIN"
+              name="pin"
+              value={pin}
+              error={fieldErrors.pin}
+              onChange={(value) => {
+                setPin(value);
+                if (fieldErrors.pin) setFieldErrors((f) => ({ ...f, pin: undefined }));
+              }}
+            />
+            {/* Visible, under the field it is about — not tucked in a footer. */}
+            <div className="mt-2 text-right">
+              <Link
+                to={resetLink.pathname}
+                state={resetLink.state}
+                className="text-xs text-ink-secondary underline-offset-2 transition-colors duration-fast
+                           hover:text-ink-primary hover:underline"
+              >
+                Forgot your PIN?
+              </Link>
+            </div>
+          </div>
 
-          {error && <Notice tone="error">{error}</Notice>}
+          {error && (
+            <Notice tone="error">
+              {error}
+              {locked && (
+                <>
+                  {" "}
+                  <Link to={resetLink.pathname} state={resetLink.state} className="font-medium underline underline-offset-2">
+                    Reset your PIN
+                  </Link>{" "}
+                  to unlock it now.
+                </>
+              )}
+            </Notice>
+          )}
 
-          <Button
-            type="submit"
-            variant="primary"
-            size="lg"
-            icon={LockKeyhole}
-            loading={submitting}
-            disabled={pin.length !== 6}
-            className="w-full"
-          >
+          <Button type="submit" variant="primary" size="lg" icon={LockKeyhole} loading={submitting} className="w-full">
             Sign in
           </Button>
         </form>

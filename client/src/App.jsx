@@ -13,6 +13,7 @@ import KioskPage from "./pages/KioskPage.jsx";
 import AdminPage from "./pages/AdminPage.jsx";
 import EditorPage from "./pages/EditorPage.jsx";
 import ChangePinPage from "./pages/ChangePinPage.jsx";
+import ResetPinPage from "./pages/ResetPinPage.jsx";
 import FindOrganizationPage, { BootScreen, ServiceUnavailablePage } from "./pages/FindOrganizationPage.jsx";
 import AppShell from "./components/AppShell.jsx";
 
@@ -53,16 +54,19 @@ function RequireAuth({ children }) {
   if (booting) {
     return <div className="min-h-screen flex items-center justify-center text-ink-secondary">Loading…</div>;
   }
+  // Each gate remembers where the person was going, so getting through
+  // them lands on that page rather than the map.
+  const from = `${location.pathname}${location.search}`;
   if (!isAuthenticated) {
-    return <Navigate to="/login" replace state={{ from: `${location.pathname}${location.search}` }} />;
+    return <Navigate to="/login" replace state={{ from }} />;
   }
   // ADM-4 — a provisioned or staff-reset PIN must be replaced before the
   // account is usable, and that gate comes before the terms gate.
   if (mustChangePin) {
-    return <Navigate to="/change-pin" replace />;
+    return <Navigate to="/change-pin" replace state={{ from }} />;
   }
   if (requiresTermsAcceptance) {
-    return <Navigate to="/terms" replace />;
+    return <Navigate to="/terms" replace state={{ from }} />;
   }
   return children;
 }
@@ -132,6 +136,10 @@ function OrganizationApp({ org, basename }) {
           <Routes>
             <Route path="/" element={<Shell><StarterPage /></Shell>} />
             <Route path="/login" element={<LoginPage />} />
+            {/* AUTH-4 — "Forgot your PIN?". Under /login on purpose: a new
+                top-level route would be a word no organization's address
+                could use (lib/orgAddress.js). */}
+            <Route path="/login/reset" element={<ResetPinPage />} />
             {/* The kiosk is an unauthenticated, physically-supervised
                 surface — a person registering does not have an account
                 yet (spec §4, ID-1). */}
