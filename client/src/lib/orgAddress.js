@@ -106,7 +106,9 @@ export function addressFromInput(raw) {
 export async function resolveAddress({ pathname, search = "", hash = "" }, defaultOrganizationId) {
   const { first, rest } = splitPath(pathname);
 
-  if (!first || LEGACY_ROUTES.has(first)) {
+  // The router never cared about case (/MAP reached the map), so neither
+  // does the check for a legacy path.
+  if (!first || LEGACY_ROUTES.has(first.toLowerCase())) {
     const find = { phase: "find", then: first ? `${pathname}${search}${hash}` : "" };
     if (!defaultOrganizationId) return find;
     let org;

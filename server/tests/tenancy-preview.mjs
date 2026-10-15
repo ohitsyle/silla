@@ -10,6 +10,9 @@
  *                                                     control plane signs it
  *        [--features=kiosk,reports]                   …with these features added
  *        [--limits=members:1,staff:3]                 …and these limits changed
+ *   node tests/tenancy-preview.mjs --legacy-demo      serve with the demo WITHOUT an
+ *                                                     address, as an organization is
+ *                                                     between deploy and migrate:slugs
  *
  * --plan takes trialing, active, past_due, suspended or cancelled. Then
  * point the client at it, as the summary prints:
@@ -43,6 +46,7 @@ import http from "node:http";
 const PORT = Number(process.argv.find((arg) => arg.startsWith("--port="))?.slice("--port=".length)) || 4012;
 const PLAN_STATE = process.argv.find((arg) => arg.startsWith("--plan="))?.slice("--plan=".length);
 const OUT = process.argv.find((arg) => arg.startsWith("--out="))?.slice("--out=".length);
+const LEGACY_DEMO = process.argv.includes("--legacy-demo");
 
 /** Exists only for this throwaway database, like the one in isolated.mjs. */
 const CONTROL_PLANE_SECRET = "tenancy-preview-control-plane-secret-not-for-real-use";
@@ -196,6 +200,11 @@ try {
   // Whole-day hours, so the kiosk's walk-in check-in works at any hour.
   await Organization.updateMany({}, { $set: { "policy.operatingHours": { open: "00:00", close: "23:59" } } });
 
+  // The window between deploying addresses and running migrate:slugs: the
+  // default organization predates addresses, so it has none, and must
+  // still be served at the old paths (docs/control-plane.md §1).
+  if (LEGACY_DEMO) await Organization.updateOne({ _id: demoId }, { $unset: { slug: 1 } });
+
   // 3. The API, with Socket.io, the way server.js runs it.
   const { Server } = await import("socket.io");
   const { createApp } = await import("../src/app.js");
@@ -209,7 +218,7 @@ try {
   const api = `http://127.0.0.1:${PORT}`;
   const fixture = {
     api,
-    demo: { id: demoId, slug: demoSlug },
+    demo: { id: demoId, slug: LEGACY_DEMO ? null : demoSlug },
     harborview: {
       id: String(harborviewId),
       slug: harborview.slug,
@@ -224,7 +233,7 @@ Tenancy preview on ${api} — a disposable database; nothing reaches Atlas or se
 
   cd client && VITE_API_URL=${api} VITE_DEMO_ORG_ID=${demoId} npx vite --port 5180
 
-  /${demoSlug}  (default — /map and /kiosk redirect here) unmanaged, no plan limits
+  ${LEGACY_DEMO ? "/  (default, NO address — served at the old paths: /map, /kiosk, …)" : `/${demoSlug}  (default — /map and /kiosk redirect here)`} unmanaged, no plan limits
       admin@demo.test / 123456   staff@demo.test / 654321 (terms gate)
       member@demo.test / 111111, card DEADBEEF
 

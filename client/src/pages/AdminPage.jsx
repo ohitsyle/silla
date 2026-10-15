@@ -1276,7 +1276,13 @@ function Reports() {
 
   useEffect(() => {
     if (!included) return;
-    api.adminReports(days).then(setData).catch((e) => setError(e));
+    api
+      .adminReports(days)
+      .then((result) => {
+        setData(result);
+        setError(null);
+      })
+      .catch((e) => setError(e));
   }, [days, included]);
 
   const exportCsv = async () => {
