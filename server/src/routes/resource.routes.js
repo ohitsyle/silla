@@ -7,7 +7,8 @@ import Zone from "../models/Zone.js";
 import Label from "../models/Label.js";
 import Reservation from "../models/Reservation.js";
 import Room from "../models/Room.js";
-import { withSpaceTransaction, intersects, contains } from "../services/spaces.js";
+import { roomHolds, withSpaceTransaction } from "../services/spaces.js";
+import { contains, intersects, plainAreas, regionAreas } from "../lib/cells.js";
 import Site from "../models/Site.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { LIVE_STATUSES } from "../services/reservations/availability.js";
@@ -116,9 +117,10 @@ router.post("/", asyncHandler(async (req, res) => {
     if (await findOverlap({ floorId, col, row, w, h }, session)) throw Object.assign(new Error("That item overlaps an existing piece."), { status: 409 });
     const rooms = await Room.find({ organization: req.user.organizationId, "levels.floor": floorId }).session(session);
     for (const room of rooms) {
-      const level = room.levels.find((l) => String(l.floor) === String(floorId));
-      if (intersects(level.bounds, { col, row, w, h }) && !contains(level.bounds, { col, row, w, h })) throw Object.assign(new Error("Place the entire item inside or outside the room boundary."), { status: 409 });
-      if (contains(level.bounds, { col, row, w, h }) && await Reservation.exists({ resource: room.resource, status: { $in: LIVE_STATUSES } }).session(session)) throw Object.assign(new Error("This room has a live reservation. Cancel it before changing its contents."), { status: 409 });
+      // The room's shape on this floor: an L-shaped room is both its arms.
+      const level = regionAreas(room.levels.find((l) => String(l.floor) === String(floorId)));
+      if (intersects(level, { col, row, w, h }) && !contains(level, { col, row, w, h })) throw Object.assign(new Error("Place the entire item inside or outside the room boundary."), { status: 409 });
+      if (contains(level, { col, row, w, h }) && await Reservation.exists({ resource: room.resource, status: { $in: LIVE_STATUSES } }).session(session)) throw Object.assign(new Error("This room has a live reservation. Cancel it before changing its contents."), { status: 409 });
     }
     // The plan counts bookable units, so a piece adds its seats; one that
     // is not bookable (a shelf) adds none and is never refused for it.
@@ -136,7 +138,7 @@ router.delete("/:id", asyncHandler(async (req, res) => {
     if (!r) throw Object.assign(new Error("Resource not found"), { status: 404 });
     const type = await ResourceType.findById(r.resourceType).session(session);
     const rooms = await Room.find({ organization: req.user.organizationId, "levels.floor": r.floor }).session(session);
-    const related = rooms.filter((room) => room.levels.some((l) => String(l.floor) === String(r.floor) && contains(l.bounds, { ...r.position.toObject(), ...type.footprint.toObject() })));
+    const related = rooms.filter((room) => roomHolds(room, r, type));
     if (await Reservation.exists({ resource: { $in: [r._id, ...related.map((room) => room.resource)] }, status: { $in: LIVE_STATUSES } }).session(session)) throw Object.assign(new Error("This item or its room has an active or upcoming reservation. Cancel it first."), { status: 409 });
     await r.deleteOne({ session });
   });
@@ -144,6 +146,18 @@ router.delete("/:id", asyncHandler(async (req, res) => {
 }));
 
 /* ══════════════════ MAP-4 — Zones ══════════════════ */
+
+/**
+ * A zone as the API returns it: `areas` is its shape and `bounds` their
+ * bounding box. A zone written before shapes reports its one bounds as its
+ * one area, so a reader only ever needs `areas`.
+ */
+const shapeZone = (zone) => ({
+  id: zone._id.toString(),
+  name: zone.name,
+  bounds: plainAreas([zone.bounds])[0],
+  areas: regionAreas(zone),
+});
 
 /**
  * POST /api/resources/zones
@@ -176,9 +190,10 @@ router.post(
       floor: floorId,
       name: name.trim(),
       bounds: { col, row, w, h },
+      areas: [{ col, row, w, h }],
     });
 
-    res.status(201).json({ zone: { id: zone._id.toString(), name: zone.name, bounds: zone.bounds } });
+    res.status(201).json({ zone: shapeZone(zone) });
   })
 );
 
@@ -190,7 +205,7 @@ router.patch(
     if (!zone) return res.status(404).json({ error: "Zone not found" });
     if (req.body?.name?.trim()) zone.name = req.body.name.trim();
     await zone.save();
-    res.json({ zone: { id: zone._id.toString(), name: zone.name, bounds: zone.bounds } });
+    res.json({ zone: shapeZone(zone) });
   })
 );
 

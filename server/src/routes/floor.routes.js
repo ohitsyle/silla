@@ -3,7 +3,8 @@ import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
 import Building from "../models/Building.js";
 import Room from "../models/Room.js";
-import { shapeRoom, contains, pieceBounds, withSpaceTransaction } from "../services/spaces.js";
+import { roomHolds, shapeRoom, withSpaceTransaction } from "../services/spaces.js";
+import { plainAreas, regionAreas } from "../lib/cells.js";
 import Site from "../models/Site.js";
 import Floor from "../models/Floor.js";
 import Resource from "../models/Resource.js";
@@ -48,6 +49,14 @@ async function readRole(req, organizationId) {
 const isStaff = (role) => role === "staff" || role === "superadmin";
 
 /**
+ * A floor's outline as the API returns it: `areas`, the rectangles whose
+ * cells are the floor. Empty means the whole grid, which is every floor
+ * drawn before outlines existed and every plain rectangle since; readers
+ * resolve it with floorAreas() in lib/cells.js.
+ */
+const shapeOf = (floor) => ({ areas: plainAreas(floor.shape?.areas) });
+
+/**
  * GET /api/floors?organizationId=...
  *
  * The floor switcher's data source (MAP-1: "multi-floor map ... floor
@@ -66,7 +75,7 @@ router.get("/", asyncHandler(async (req, res) => {
 
   const siteNames = new Map(sites.map((s) => [s._id.toString(), s.name]));
   const floors = await Floor.find({ site: { $in: sites.map((s) => s._id) } })
-    .select("name order grid site building")
+    .select("name order grid shape site building")
     .sort({ order: 1, name: 1 });
 
   res.json({
@@ -75,6 +84,7 @@ router.get("/", asyncHandler(async (req, res) => {
       name: f.name,
       order: f.order,
       grid: f.grid,
+      shape: shapeOf(f),
       buildingId: f.building ? String(f.building) : null,
       site: { id: f.site.toString(), name: siteNames.get(f.site.toString()) || null },
     })),
@@ -87,8 +97,10 @@ router.get("/", asyncHandler(async (req, res) => {
  * One REST read that boots the map (MAP-1). The response deliberately
  * splits into `layout` and `status`:
  *
- *   layout — the slow-changing half: grid, placed pieces, zones, labels.
- *            Fetched once; only changes when an admin edits the map.
+ *   layout — the slow-changing half: grid, outline, placed pieces,
+ *            rooms, zones, labels. Fetched once; only changes when an
+ *            admin edits the map. Rooms and zones carry `areas`, their
+ *            shape; the floor carries `shape.areas`, its outline.
  *   status — the fast-changing half: per-unit availability, keyed by
  *            resource id. This snapshot is what Socket.io will later
  *            patch entry-by-entry (MAP-2, spec §12/§17: "the layout is
@@ -105,7 +117,7 @@ router.get("/:id/layout", asyncHandler(async (req, res) => {
     return res.status(400).json({ error: "Invalid floor id" });
   }
 
-  const floor = await Floor.findById(id).select("name order grid site building");
+  const floor = await Floor.findById(id).select("name order grid shape site building");
   if (!floor) return res.status(404).json({ error: "Floor not found" });
 
   // Resource carries `organization` directly, but zones/labels/catalog
@@ -115,8 +127,8 @@ router.get("/:id/layout", asyncHandler(async (req, res) => {
   const organizationId = site.organization;
 
   const [resources, zones, labels, resourceTypes, rooms, building] = await Promise.all([
-    Resource.find({ floor: floor._id, kind: { $ne: "room" } }).select("resourceType position units").sort({ createdAt: 1 }),
-    Zone.find({ floor: floor._id }).select("name bounds").sort({ name: 1 }),
+    Resource.find({ floor: floor._id, kind: { $ne: "room" } }).select("floor resourceType position units").sort({ createdAt: 1 }),
+    Zone.find({ floor: floor._id }).select("name bounds areas").sort({ name: 1 }),
     Label.find({ floor: floor._id }).select("text position"),
     ResourceType.find({ organization: organizationId, internal: { $ne: true } }).select(
       "key label footprint seatCount reservable icon hasServiceStatus"
@@ -145,6 +157,7 @@ router.get("/:id/layout", asyncHandler(async (req, res) => {
       name: floor.name,
       order: floor.order,
       grid: floor.grid,
+      shape: shapeOf(floor),
       site: { id: site._id.toString(), name: site.name },
       building: building ? { id: String(building._id), name: building.name } : null,
     },
@@ -164,12 +177,13 @@ router.get("/:id/layout", asyncHandler(async (req, res) => {
         id: r._id.toString(),
         resourceType: r.resourceType.toString(),
         position: r.position,
-        roomId: rooms.find((room) => room.levels.some((l) => String(l.floor) === String(floor._id) && contains(l.bounds, pieceBounds(r, resourceTypes.find((t) => String(t._id) === String(r.resourceType))))))?._id?.toString() || null,
+        // Membership is derived from the room's shape, never stored.
+        roomId: rooms.find((room) => roomHolds(room, r, resourceTypes.find((t) => String(t._id) === String(r.resourceType))))?._id?.toString() || null,
         // Only the unit's identity lives in layout; its status lives in
         // `status` above.
         units: r.units.map((u) => ({ label: u.label })),
       })),
-      zones: zones.map((z) => ({ id: z._id.toString(), name: z.name, bounds: z.bounds })),
+      zones: zones.map((z) => ({ id: z._id.toString(), name: z.name, bounds: plainAreas([z.bounds])[0], areas: regionAreas(z) })),
       labels: labels.map((l) => ({ id: l._id.toString(), text: l.text, position: l.position })),
     },
     status,
@@ -201,7 +215,7 @@ function validateGrid(cols, rows) {
  * POST /api/floors
  * Body: { siteId?, name, order?, grid: { cols, rows } }
  */
-const floorShape = (f, site) => ({ id: String(f._id), name: f.name, order: f.order, grid: f.grid, buildingId: f.building ? String(f.building) : null, site: { id: String(site._id), name: site.name } });
+const floorShape = (f, site) => ({ id: String(f._id), name: f.name, order: f.order, grid: f.grid, shape: shapeOf(f), buildingId: f.building ? String(f.building) : null, site: { id: String(site._id), name: site.name } });
 function bad(message, status = 400) { return Object.assign(new Error(message), { status }); }
 async function ownedFloor(id, orgId, session) {
   if (!mongoose.isValidObjectId(id)) throw bad("Invalid floor id");
@@ -284,7 +298,7 @@ router.use((err, req, res, next) => {
 async function findOutsideGrid(floorId, cols, rows, session) {
   const [resources, zones, labels] = await Promise.all([
     Resource.find({ floor: floorId, kind: { $ne: "room" } }).select("position resourceType").session(session),
-    Zone.find({ floor: floorId }).select("name bounds").session(session),
+    Zone.find({ floor: floorId }).select("name bounds areas").session(session),
     Label.find({ floor: floorId }).select("text position").session(session),
   ]);
   const types = await ResourceType.find({
@@ -294,7 +308,7 @@ async function findOutsideGrid(floorId, cols, rows, session) {
 
   const outside = [];
   const rooms = await Room.find({ "levels.floor": floorId }).session(session);
-  for (const r of rooms) for (const l of r.levels) if (String(l.floor) === String(floorId) && (l.bounds.col + l.bounds.w > cols || l.bounds.row + l.bounds.h > rows)) outside.push({ kind: "room", name: r.name });
+  for (const r of rooms) for (const l of r.levels) if (String(l.floor) === String(floorId) && regionAreas(l).some((a) => a.col + a.w > cols || a.row + a.h > rows)) outside.push({ kind: "room", name: r.name });
   for (const r of resources) {
     const f = typeById.get(r.resourceType.toString())?.footprint || { w: 1, h: 1 };
     if (r.position.col + f.w > cols || r.position.row + f.h > rows) {
@@ -302,7 +316,7 @@ async function findOutsideGrid(floorId, cols, rows, session) {
     }
   }
   for (const z of zones) {
-    if (z.bounds.col + z.bounds.w > cols || z.bounds.row + z.bounds.h > rows) {
+    if (regionAreas(z).some((a) => a.col + a.w > cols || a.row + a.h > rows)) {
       outside.push({ kind: "zone", at: { col: z.bounds.col, row: z.bounds.row }, label: z.name });
     }
   }

@@ -238,6 +238,11 @@ try {
   );
   check("layout names the owning building", layout.floor.building?.id === building.id);
   check(
+    "layout gives each room level its shape, and a plain floor an empty outline",
+    layout.layout.rooms[0].levels.every((level) => JSON.stringify(level.areas) === JSON.stringify([level.bounds])) &&
+      Array.isArray(layout.floor.shape?.areas) && layout.floor.shape.areas.length === 0
+  );
+  check(
     "whole-room target is not fake furniture",
     layout.layout.resources.length === 1 && layout.resourceTypes.every((type) => type.key !== "__room")
   );
