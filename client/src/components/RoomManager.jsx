@@ -1,9 +1,13 @@
 import { useEffect, useState } from "react";
 import {
-  Building2, CalendarClock, DoorOpen, Grid2x2, LayoutGrid, Lock, LockOpen, Settings2, SquareDashedMousePointer, Trash2,
+  Building2, CalendarClock, DoorOpen, Grid2x2, LayoutGrid, Lock, LockOpen, Settings2, SquareDashedMousePointer,
+  SquareMinus, SquarePlus, Trash2,
 } from "lucide-react";
 import { api } from "../lib/api.js";
+import { regionAreas } from "../lib/cells.js";
 import { ROOM_MODE_ORDER, levelName, plural, roomMode } from "../lib/rooms.js";
+import { shapeSize } from "../lib/shapeWords.js";
+import ShapeGlyph from "./ShapeGlyph.jsx";
 import { Badge, Button, EmptyState, Field, Modal, Notice, Panel, Select } from "./ui/index.jsx";
 
 /**
@@ -202,9 +206,17 @@ const MODE_ICON = { individual: Grid2x2, whole: DoorOpen, either: LayoutGrid };
  * one later. The last step of the setup sequence: a name, and what members
  * book here, said in plain words rather than as a mode.
  *
- * `draft` = { id?, name, bookingMode, buildingId, levels, resourceId? }.
- * `onDraw(draft, floorId)` hands back to the map to draw a level (on
- * another floor, or again on this one) and reopens the dialog after.
+ * `draft` = { id?, name, bookingMode, buildingId, levels, resourceId? }, each
+ * level { floorId, name, areas } — its shape on that floor.
+ * `onDraw(draft, floorId, mode)` hands back to the map and reopens the
+ * dialog after the drag:
+ *
+ *   "draw"   draw a level (on another floor, or again on this one)
+ *   "add"    "Add to room": the drag joins the level, making an L or a T
+ *   "cut"    "Cut from room": the drag is taken away from it
+ *
+ * Nothing is saved until "Save changes": a reshaped room is a draft like a
+ * renamed one.
  *
  * `wholeRoomAllowed` is the plan's wholeRoomBooking feature. Without it the
  * two whole-room choices are shown but not offered, with the reason — the
@@ -283,7 +295,7 @@ export function RoomDialog({
       subtitle={
         editing
           ? `${draft.name} · ${levels.length} ${plural("floor", levels.length)}`
-          : first && `${first.bounds.w} × ${first.bounds.h} cells on ${floorName(first.floorId)}`
+          : first && `${shapeSize(regionAreas(first))} on ${floorName(first.floorId)}`
       }
       icon={DoorOpen}
       width="max-w-xl"
@@ -358,28 +370,55 @@ export function RoomDialog({
             </span>
           </div>
           <p className="mt-1 text-xs leading-relaxed text-ink-muted">
-            A room can reach several floors of its building — a hall and its balcony, say. Every level shares one
-            booking.
+            A room can reach several floors of its building — a hall and its balcony, say — and on each it can be
+            any shape the grid allows, like an L or a T. Every level shares one booking.
           </p>
           <ul className="mt-3 space-y-2">
             {levels.map((level) => (
               <li key={level.floorId} className="rounded-md border border-line/10 bg-bg-panel/40 p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-medium">{floorName(level.floorId)}</span>
-                  <span className="flex items-center gap-2 text-xs text-ink-muted">
-                    {level.bounds.w} × {level.bounds.h} cells
-                    {levels.length > 1 && (
-                      <button
-                        type="button"
-                        className="grid h-7 w-7 place-items-center rounded-md text-ink-muted transition-colors
-                                   hover:bg-line/10 hover:text-state-unavailable"
-                        aria-label={`Remove the level on ${floorName(level.floorId)}`}
-                        onClick={() => setLevels((all) => all.filter((other) => other.floorId !== level.floorId))}
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    )}
-                  </span>
+                <div className="flex items-center gap-3">
+                  <ShapeGlyph areas={regionAreas(level)} />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium">{floorName(level.floorId)}</p>
+                    <p className="text-xs text-ink-muted">{shapeSize(regionAreas(level))}</p>
+                  </div>
+                  {levels.length > 1 && (
+                    <button
+                      type="button"
+                      className="grid h-7 w-7 place-items-center rounded-md text-ink-muted transition-colors
+                                 hover:bg-line/10 hover:text-state-unavailable"
+                      aria-label={`Remove the level on ${floorName(level.floorId)}`}
+                      onClick={() => setLevels((all) => all.filter((other) => other.floorId !== level.floorId))}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  )}
+                </div>
+                {/* Reshape this level on the map: the dialog closes for the
+                    drag and comes back with the new shape, unsaved. */}
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    icon={SquarePlus}
+                    disabled={busy}
+                    onClick={() => {
+                      onDraw({ ...draft, name, bookingMode: mode, levels }, level.floorId, "add");
+                      onClose();
+                    }}
+                  >
+                    Add to room
+                  </Button>
+                  <Button
+                    size="sm"
+                    icon={SquareMinus}
+                    disabled={busy}
+                    onClick={() => {
+                      onDraw({ ...draft, name, bookingMode: mode, levels }, level.floorId, "cut");
+                      onClose();
+                    }}
+                  >
+                    Cut from room
+                  </Button>
                 </div>
                 {levels.length > 1 && (
                   <Field
@@ -410,7 +449,7 @@ export function RoomDialog({
                 icon={SquareDashedMousePointer}
                 disabled={busy || !drawOn}
                 onClick={() => {
-                  onDraw({ ...draft, name, bookingMode: mode, levels }, drawOn);
+                  onDraw({ ...draft, name, bookingMode: mode, levels }, drawOn, "draw");
                   onClose();
                 }}
               >

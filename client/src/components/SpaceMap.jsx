@@ -229,10 +229,12 @@ export default function SpaceMap({
   onRegionSelect,
   /**
    * A shape being edited, drawn live as the drag goes (the editor's Shape
-   * tool, and a room's "Add to room" / "Cut from room"):
+   * tool, a room's "Add to room" / "Cut from room", and a zone's):
    *
    *   { target: "floor", areas, mode }           the floor's draft outline
-   *   { target: "room", roomId?, areas, mode }   one room level's draft
+   *   { target: "room", id?, areas, mode }       one room level's draft (no
+   *                                              id for a room not yet saved)
+   *   { target: "zone", id, areas, mode }        a zone's draft
    *
    * `mode` is "add" or "cut": a drag is previewed as the shape it would
    * leave, before onRegionSelect hands the rectangle over. Editing the
@@ -730,15 +732,19 @@ export default function SpaceMap({
             fillRule="evenodd"
             fill="none"
             strokeLinejoin="round"
-            style={{ stroke: editingFloor ? editTone : "var(--color-map-wall)", strokeWidth: editingFloor ? 2.5 : 3 }}
+            // The draft takes the accent while it is edited, whether the
+            // next drag adds or cuts: only the dragged rectangle shows that.
+            style={{ stroke: editingFloor ? "var(--color-accent)" : "var(--color-map-wall)", strokeWidth: editingFloor ? 2.5 : 3 }}
           />
         </g>
 
         {/* ---- Layer: zones (spec §12) ---- a backdrop, so it takes no clicks */}
         <g pointerEvents="none">
-          {zonesHere.map(({ zone, cells }) => (
-            <ZoneShape key={zone.id} zone={zone} cells={cells} flagged={Boolean(flagged?.has(zone.id))} />
-          ))}
+          {zonesHere.map(({ zone, cells }) =>
+            shapeEdit?.target === "zone" && shapeEdit.id === zone.id ? null : (
+              <ZoneShape key={zone.id} zone={zone} cells={cells} flagged={Boolean(flagged?.has(zone.id))} />
+            )
+          )}
         </g>
 
         {/* ---- Layer: rooms ----
@@ -749,7 +755,7 @@ export default function SpaceMap({
              instead, as the draft. */}
         <g>
           {roomsHere.map(({ room, cells }) =>
-            shapeEdit?.target === "room" && shapeEdit.roomId === room.id ? null : (
+            shapeEdit?.target === "room" && shapeEdit.id === room.id ? null : (
               <RoomShape
                 key={room.id}
                 room={room}
@@ -990,9 +996,9 @@ export default function SpaceMap({
           ))}
         </g>
 
-        {/* ---- Layer: a room's shape being edited ----
+        {/* ---- Layer: a room's or a zone's shape being edited ----
              The draft, as the drag in progress would leave it. */}
-        {shapeEdit?.target === "room" && previewCells?.size > 0 && (
+        {shapeEdit && !editingFloor && previewCells?.size > 0 && (
           <path
             d={outlinePath(previewCells, { cell: CELL, inset: 1, radius: ROOM_RADIUS })}
             fillRule="evenodd"

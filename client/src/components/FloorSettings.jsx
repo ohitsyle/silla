@@ -2,18 +2,21 @@ import { useEffect, useState } from "react";
 import { Layers, Ruler, Trash2 } from "lucide-react";
 import { api } from "../lib/api.js";
 import GridSketch from "./GridSketch.jsx";
+import { shapeSize } from "../lib/shapeWords.js";
 import { Button, Field, Modal, Notice, Panel, Select } from "./ui/index.jsx";
 
 /**
  * Floors in the editor — superadmin only (floor.routes.js refuses anyone
  * else): adding one to a building, and the open floor's own settings.
  *
- * A floor is a grid of whole cells. 1–60 each way is the server's own
- * limit (validateGrid); offering a bigger sketch than it accepts would be
- * a trap.
+ * A floor is a grid of whole cells and, for a building that is not a
+ * rectangle, an outline inside it. 1–60 each way is the server's own limit
+ * (validateGrid); offering a bigger sketch than it accepts would be a trap.
+ * An existing floor's outline is redrawn on the map itself, with the
+ * editor's Shape tool.
  */
 const GRID = { min: 1, max: 60 };
-const DEFAULT_GRID = { cols: 20, rows: 12 };
+const DEFAULT_OUTLINE = { cols: 20, rows: 12, areas: [] };
 
 /**
  * "Add a floor" — a dialog, not a form that grows out of the page: the
@@ -21,7 +24,8 @@ const DEFAULT_GRID = { cols: 20, rows: 12 };
  */
 export function AddFloorDialog({ open, building, onClose, onCreated }) {
   const [name, setName] = useState("");
-  const [grid, setGrid] = useState(DEFAULT_GRID);
+  /** { cols, rows, areas }: the grid, and the outline inside it (none for a rectangle). */
+  const [outline, setOutline] = useState(DEFAULT_OUTLINE);
   const [nameError, setNameError] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -29,7 +33,7 @@ export function AddFloorDialog({ open, building, onClose, onCreated }) {
   useEffect(() => {
     if (!open) return;
     setName("");
-    setGrid(DEFAULT_GRID);
+    setOutline(DEFAULT_OUTLINE);
     setNameError(null);
     setError(null);
   }, [open]);
@@ -43,7 +47,13 @@ export function AddFloorDialog({ open, building, onClose, onCreated }) {
     }
     setBusy(true);
     try {
-      const created = await api.createFloor({ name, buildingId: building.id, grid });
+      const { cols, rows, areas } = outline;
+      const created = await api.createFloor({
+        name,
+        buildingId: building.id,
+        grid: { cols, rows },
+        ...(areas.length ? { shape: { areas } } : {}),
+      });
       onCreated(created);
       onClose();
     } catch (err) {
@@ -58,8 +68,9 @@ export function AddFloorDialog({ open, building, onClose, onCreated }) {
       open={open}
       onClose={busy ? undefined : onClose}
       title={`Add a floor to ${building?.name || "the building"}`}
-      subtitle="A name and a size. Both can be changed later."
+      subtitle="A name and a shape. Both can be changed later."
       icon={Layers}
+      width="max-w-xl"
     >
       <form onSubmit={submit} noValidate>
         <Field
@@ -75,14 +86,21 @@ export function AddFloorDialog({ open, building, onClose, onCreated }) {
         />
         {/* Sketch the floor rather than describing it in two numbers. The
             fields stay for whoever does know the figure — each drives the
-            other. */}
+            other — while the floor is a rectangle; a shaped floor is only
+            described by its sketch. */}
         <div className="mt-4">
-          <span className="text-sm font-medium text-ink-secondary">Size</span>
+          <span className="text-sm font-medium text-ink-secondary">Shape</span>
           <div className="mt-1.5">
-            <GridSketch cols={grid.cols} rows={grid.rows} onChange={setGrid} />
+            <GridSketch cols={outline.cols} rows={outline.rows} areas={outline.areas} onChange={setOutline} />
           </div>
         </div>
-        <GridFields grid={grid} onChange={setGrid} />
+        {outline.areas.length ? (
+          <p className="mt-3 text-sm text-ink-secondary">
+            {shapeSize(outline.areas)}. Rooms and furniture can only go inside the outline.
+          </p>
+        ) : (
+          <GridFields grid={outline} onChange={(grid) => setOutline({ ...grid, areas: [] })} />
+        )}
         {error && (
           <Notice tone="error" className="mt-4">
             {error}
@@ -102,7 +120,7 @@ export function AddFloorDialog({ open, building, onClose, onCreated }) {
 }
 
 function GridFields({ grid, onChange, className = "mt-4 grid grid-cols-2 gap-3" }) {
-  const set = (key) => (e) => onChange({ ...grid, [key]: Number(e.target.value) });
+  const set = (key) => (e) => onChange({ cols: grid.cols, rows: grid.rows, [key]: Number(e.target.value) });
   return (
     <div className={className}>
       <Field label="Columns" type="number" min={GRID.min} max={GRID.max} value={grid.cols} onChange={set("cols")} />
@@ -220,8 +238,9 @@ export function FloorSettings({ floor, buildings = [], onChanged, onDeleted }) {
         </Notice>
       )}
       <p className="mt-3 text-xs text-ink-muted">
-        Shrinking is refused while anything would fall outside the new edge. Move a floor's rooms off it before
-        moving it to another building.
+        Shrinking is refused while anything would fall outside the new edge, and trims a shaped floor's outline to
+        fit. Reshape the outline itself with the Shape tool above the map. Move a floor's rooms off it before moving
+        it to another building.
       </p>
 
       <Modal open={removing} onClose={busy ? undefined : () => setRemoving(false)} title="Remove floor" subtitle={floor.name} icon={Trash2}>
