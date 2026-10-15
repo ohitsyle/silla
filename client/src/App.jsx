@@ -110,9 +110,9 @@ export default function App() {
     case "ready":
       return <OrganizationApp org={boot.org} basename={boot.basename} />;
     case "find":
-      return <FindOrganizationPage />;
+      return <FindOrganizationPage then={boot.then} />;
     case "not-found":
-      return <FindOrganizationPage attempted={boot.attempted} />;
+      return <FindOrganizationPage attempted={boot.attempted} then={boot.then} />;
     case "unavailable":
       return (
         <ServiceUnavailablePage

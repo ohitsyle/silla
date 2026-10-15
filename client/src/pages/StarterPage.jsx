@@ -163,7 +163,9 @@ export default function StarterPage() {
         <p className="mt-2 text-ink-secondary">
           {isAuthenticated
             ? `Welcome back, ${user.firstName}.`
-            : `Find ${article(resourceNoun)} ${resourceNoun}, or check in at the door.`}
+            : entitlements.hasFeature("kiosk")
+              ? `Find ${article(resourceNoun)} ${resourceNoun}, or check in at the door.`
+              : `Find ${article(resourceNoun)} ${resourceNoun} and see what's free right now.`}
         </p>
       </motion.div>
 

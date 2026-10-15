@@ -144,7 +144,7 @@ export default function ResetPinPage() {
       title={requesting ? "Reset your PIN" : "Check your email"}
       subtitle={
         requesting
-          ? `We'll email you a code to set a new one${org?.name ? ` for ${org.name}` : ""}.`
+          ? "We'll email you a code to choose a new one."
           : `If ${email.trim()} has an account here, a 6-digit code is on its way. It expires in ${expiryMinutes} minutes.`
       }
       footer={

@@ -13,7 +13,9 @@ import { Button, Card, Spinner } from "../components/ui/index.jsx";
  * "SILLA" would mean nothing to them.
  *
  * FindOrganizationPage  no address and no default organization; or, with
- *                       `attempted`, an address nobody has
+ *                       `attempted`, an address nobody has. `then` is the
+ *                       page that was asked for, carried over once the
+ *                       organization is found
  * ServiceUnavailable    the API could not be reached to find out
  * BootScreen            the moment while the address is being looked up
  *
@@ -23,7 +25,7 @@ import { Button, Card, Spinner } from "../components/ui/index.jsx";
 
 const cx = (...parts) => parts.filter(Boolean).join(" ");
 
-export default function FindOrganizationPage({ attempted = null }) {
+export default function FindOrganizationPage({ attempted = null, then = "" }) {
   const [value, setValue] = useState(attempted || "");
   const [error, setError] = useState(null);
   const [checking, setChecking] = useState(false);
@@ -58,7 +60,7 @@ export default function FindOrganizationPage({ attempted = null }) {
       // A full page load, not an in-app hop: the organization's colours,
       // session and router all start from its own address, so nothing
       // from this neutral screen can leak into it.
-      window.location.assign(`/${slug}`);
+      window.location.assign(`/${slug}${then}`);
     } catch (err) {
       setChecking(false);
       setError(

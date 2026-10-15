@@ -88,6 +88,11 @@ export function addressFromInput(raw) {
  *   an unknown address    { phase: "not-found" }, with what they asked for
  *   the API unreachable   { phase: "unavailable" }, to retry
  *
+ * "find" and "not-found" also carry `then`: the page that was asked for
+ * (/kiosk, /map/abc?room=…), so finding the organization lands there and
+ * not on its home page — a kiosk pointed at /kiosk should end up at
+ * /<slug>/kiosk once someone types the address, not at a map.
+ *
  * One window matters: a default organization that has no slug yet (it
  * predates addresses and `npm run migrate:slugs` has not run) is served
  * at the legacy paths with no prefix, exactly as before, so deploying
@@ -102,13 +107,14 @@ export async function resolveAddress({ pathname, search = "", hash = "" }, defau
   const { first, rest } = splitPath(pathname);
 
   if (!first || LEGACY_ROUTES.has(first)) {
-    if (!defaultOrganizationId) return { phase: "find" };
+    const find = { phase: "find", then: first ? `${pathname}${search}${hash}` : "" };
+    if (!defaultOrganizationId) return find;
     let org;
     try {
       org = await api.getOrgConfig(defaultOrganizationId);
     } catch (err) {
       // A default that no longer exists is no default at all.
-      return err.status === 404 ? { phase: "find" } : { phase: "unavailable" };
+      return err.status === 404 ? find : { phase: "unavailable" };
     }
     if (!org.slug) return { phase: "ready", org, basename: "" };
     const target = `/${org.slug}${first ? pathname : ""}`;
@@ -116,13 +122,14 @@ export async function resolveAddress({ pathname, search = "", hash = "" }, defau
   }
 
   const slug = first.toLowerCase();
-  if (!isSlugShaped(slug)) return { phase: "not-found", attempted: first };
+  const notFound = { phase: "not-found", attempted: first, then: `${rest}${search}${hash}` };
+  if (!isSlugShaped(slug)) return notFound;
 
   let org;
   try {
     org = await api.getOrgConfigBySlug(slug);
   } catch (err) {
-    return err.status === 404 ? { phase: "not-found", attempted: first } : { phase: "unavailable" };
+    return err.status === 404 ? notFound : { phase: "unavailable" };
   }
   // The canonical spelling: /Harborview/map becomes /harborview/map, so
   // the address a person copies next is the real one.
