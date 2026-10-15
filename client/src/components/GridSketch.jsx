@@ -135,7 +135,8 @@ export default function GridSketch({ cols, rows, areas = [], max = 60, onChange 
   // current outline.
   const shown = drag ? resultOf(drag) : drawn;
   const box = boundingBox(shown);
-  const spot = largestRect(shown);
+  // The size goes where a line of text fits: a T's bar, not its stem.
+  const spot = largestRect(shown, { usefulHeight: 2 });
   const dragged = drag && mode !== "size" ? rectOf(drag) : null;
   const cutting = mode === "cut";
   const shaped = areas.length > 0;
