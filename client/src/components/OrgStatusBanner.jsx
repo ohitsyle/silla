@@ -54,7 +54,7 @@ export default function OrgStatusBanner() {
     case "cancelled":
       banner = {
         Icon: CircleSlash,
-        lead: admin ? `${name}'s subscription has ended.` : `${name} is no longer taking bookings.`,
+        lead: admin ? "Your subscription has ended." : `${name} is no longer taking bookings.`,
         rest: admin ? "Everything is kept and can still be read, but nothing can change." : "You can still look around.",
       };
       break;

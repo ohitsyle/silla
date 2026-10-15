@@ -52,7 +52,7 @@ export function standing(entitlements, orgName = "This organization") {
     case "suspended":
       return `${orgName} is paused. Everyone can still sign in and look, but nothing can be booked or changed until the subscription is sorted out.`;
     case "cancelled":
-      return `${orgName}'s subscription has ended. Everything is kept and can still be read, but nothing can change.`;
+      return "Your subscription has ended. Everything is kept and can still be read, but nothing can change.";
     default:
       return end ? `Paid through ${end}.` : "Your subscription is active.";
   }

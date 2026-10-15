@@ -13,29 +13,70 @@ export function bindOrganization(organizationId) {
   adoptLegacyToken(sessionOrganizationId);
 }
 
-async function request(path, options = {}) {
+/**
+ * Answers that mean this page's picture of the plan is out of date: it
+ * offered something the plan no longer includes, or the organization was
+ * paused since the page loaded. OrgProvider listens for this event and
+ * re-reads the organization, so the banners and upgrade prompts catch up
+ * with the server instead of the next person meeting the same error.
+ * (PLAN_LIMIT is not one: a limit is reached by usage, which the config
+ * does not carry, not by the plan changing.)
+ */
+export const PLAN_CHANGED_EVENT = "silla:plan-changed";
+const STALE_PLAN = new Set(["PLAN_FEATURE", "ORG_SUSPENDED"]);
+
+/**
+ * One request, answered or thrown. A thrown error carries:
+ *
+ *   message  the server's own sentence — written for the person who hit
+ *            it, so screens can show it as it is
+ *   status   the HTTP status (0 when the server could not be reached)
+ *   code     the server's stable code: PLAN_LIMIT, PLAN_FEATURE,
+ *            ORG_SUSPENDED, BUSY, …, or "NETWORK"
+ *   details  everything else the server sent: { limit, max, used },
+ *            { feature }, { retryAfterSeconds }, { attemptsRemaining }, …
+ *   body     the whole answer, as before
+ *
+ * The kiosk and login flows branch on these — a 403 with
+ * requiresVerification means "resume ID-2", a 429 carries
+ * retryAfterSeconds, a failed code entry carries attemptsRemaining.
+ * Collapsing all of that into a message string would make those flows
+ * impossible to build correctly.
+ */
+async function send(path, options = {}) {
   const token = readToken(sessionOrganizationId);
-  const res = await fetch(`${BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(options.headers || {}),
-    },
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    // Carry the status and the response body on the error. The kiosk and
-    // login flows branch on both — a 403 with requiresVerification means
-    // "resume ID-2", a 429 carries retryAfterSeconds, a failed code entry
-    // carries attemptsRemaining. Collapsing all of that into a message
-    // string would make those flows impossible to build correctly.
-    const error = new Error(body.error || `Request failed: ${res.status}`);
-    error.status = res.status;
-    error.body = body;
+  let res;
+  try {
+    res = await fetch(`${BASE_URL}${path}`, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(options.headers || {}),
+      },
+    });
+  } catch {
+    // No answer at all. The browser's own words ("Failed to fetch") mean
+    // nothing to the person reading them.
+    const error = new Error("We couldn't reach the service. Check your connection and try again.");
+    Object.assign(error, { status: 0, code: "NETWORK", details: {}, body: {} });
     throw error;
   }
-  return res.json();
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const { error: message, code = null, ...details } = body;
+    const error = new Error(message || `Request failed: ${res.status}`);
+    Object.assign(error, { status: res.status, code, details, body });
+    if (STALE_PLAN.has(code) && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent(PLAN_CHANGED_EVENT, { detail: { code } }));
+    }
+    throw error;
+  }
+  return res;
+}
+
+async function request(path, options = {}) {
+  return (await send(path, options)).json();
 }
 
 export const api = {
@@ -124,7 +165,17 @@ export const api = {
   adminCreateClosure: (payload) => request(`/api/admin/closures`, { method: "POST", body: JSON.stringify(payload) }),
   adminDeleteClosure: (id) => request(`/api/admin/closures/${id}`, { method: "DELETE" }),
   adminReports: (days = 30) => request(`/api/admin/reports?days=${days}`),
-  adminExportUrl: (days = 30) => `${BASE_URL}/api/admin/export?days=${days}`,
+  /**
+   * The CSV export, fetched WITH the session and handed back as a file.
+   * It used to be a plain link to the API, which a browser follows with
+   * no Authorization header — so every export answered 401 and saved a
+   * scrap of JSON. Fetching it also means a plan without reports answers
+   * with its reason, like every other screen.
+   */
+  adminExport: async (days = 30) => {
+    const res = await send(`/api/admin/export?days=${days}`);
+    return { blob: await res.blob(), filename: `reservations-${days}d.csv` };
+  },
 
   // Floor management — superadmin only: add floors, resize them, and set
   // their outline ({ shape: { areas } }; null resets it to the whole grid).

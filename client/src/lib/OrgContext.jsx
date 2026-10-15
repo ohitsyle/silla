@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { api } from "./api.js";
+import { PLAN_CHANGED_EVENT, api } from "./api.js";
 import { applyOrgTheme } from "../theme/applyOrgTheme.js";
 
 const OrgContext = createContext(null);
@@ -44,15 +44,34 @@ export function OrgProvider({ initialOrg, children }) {
    * map left open on the paused state comes back by itself once the
    * subscription is sorted out — nobody should have to know to reload a
    * wall screen. A working organization is only re-read when the page
-   * returns from the background after a while; polling it would cost
-   * every open tab a request a minute for news that is almost always
-   * "nothing".
+   * returns from the background after a while, or when an answer says the
+   * plan changed under it (PLAN_CHANGED_EVENT, from lib/api.js); polling
+   * it would cost every open tab a request a minute for news that is
+   * almost always "nothing".
    */
   useEffect(() => {
     if (operational) return undefined;
     const timer = setInterval(reload, 60_000);
     return () => clearInterval(timer);
   }, [operational, reload]);
+
+  useEffect(() => {
+    // Several requests can fail with the same news at once (a page that
+    // loads three things); one re-read answers all of them.
+    let pending = null;
+    const onPlanChanged = () => {
+      if (pending) return;
+      pending = setTimeout(() => {
+        pending = null;
+        reload();
+      }, 250);
+    };
+    window.addEventListener(PLAN_CHANGED_EVENT, onPlanChanged);
+    return () => {
+      window.removeEventListener(PLAN_CHANGED_EVENT, onPlanChanged);
+      clearTimeout(pending);
+    };
+  }, [reload]);
 
   useEffect(() => {
     let last = Date.now();

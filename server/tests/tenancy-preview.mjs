@@ -8,6 +8,8 @@
  *   node tests/tenancy-preview.mjs --plan=suspended   push a plan state to a RUNNING
  *        [--port=4020]                                preview, signed the way the
  *                                                     control plane signs it
+ *        [--features=kiosk,reports]                   …with these features added
+ *        [--limits=members:1,staff:3]                 …and these limits changed
  *
  * --plan takes trialing, active, past_due, suspended or cancelled. Then
  * point the client at it, as the summary prints:
@@ -80,11 +82,18 @@ function harborviewPlan(status = "active") {
 
 if (PLAN_STATE) {
   const base = `http://127.0.0.1:${PORT}`;
+  const snapshot = harborviewPlan(PLAN_STATE);
+  const list = (name) => process.argv.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3).split(",").filter(Boolean) || [];
+  for (const feature of list("features")) snapshot.features[feature] = true;
+  for (const pair of list("limits")) {
+    const [key, value] = pair.split(":");
+    snapshot.limits[key] = value === "none" ? null : Number(value);
+  }
   const org = await (await fetch(`${base}/api/organizations/by-slug/harborview/config`)).json();
   if (!org?._id) throw new Error(`No preview answering on ${base}`);
   // Signed exactly as vendor/src/lib/controlPlane.js signs (docs/control-plane.md §3).
   const path = `/api/internal/organizations/${org._id}/entitlements?n=${Date.now()}`;
-  const body = JSON.stringify(harborviewPlan(PLAN_STATE));
+  const body = JSON.stringify(snapshot);
   const t = Math.floor(Date.now() / 1000);
   const hash = crypto.createHash("sha256").update(body).digest("hex");
   const sig = crypto.createHmac("sha256", CONTROL_PLANE_SECRET).update(`${t}\nPUT\n${path}\n${hash}`).digest("hex");

@@ -268,7 +268,7 @@ export default function StarterPage() {
           />
         )}
 
-        {!paused && (
+        {!paused && entitlements.hasFeature("kiosk") && (
           <ActionCard
             to="/kiosk"
             icon={ContactRound}

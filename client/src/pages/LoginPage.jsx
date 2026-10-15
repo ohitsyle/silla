@@ -16,7 +16,7 @@ import { Button, Card, Field, Loading, Notice, PinField } from "../components/ui
  * means distinguishing "wrong PIN" from "locked" from "slow down".
  */
 export default function LoginPage() {
-  const { org } = useOrg();
+  const { org, entitlements } = useOrg();
   const { login, isAuthenticated, requiresTermsAcceptance, mustChangePin, booting } = useAuth();
   const navigate = useNavigate();
 
@@ -62,13 +62,19 @@ export default function LoginPage() {
       title={org?.name || "SILLA"}
       subtitle="Sign in to continue"
       footer={
-        <>
-          New {memberNoun}s register in person at a kiosk by tapping their card.
-          <br />
-          <Link to="/kiosk" className="text-ink-secondary hover:text-ink-primary underline underline-offset-2">
-            Open the kiosk
-          </Link>
-        </>
+        // Without the kiosk on the plan there is nowhere to register, so the
+        // footer stops sending people to one.
+        entitlements.hasFeature("kiosk") ? (
+          <>
+            New {memberNoun}s register in person at a kiosk by tapping their card.
+            <br />
+            <Link to="/kiosk" className="text-ink-secondary hover:text-ink-primary underline underline-offset-2">
+              Open the kiosk
+            </Link>
+          </>
+        ) : (
+          <>Don't have an account yet? Ask a member of staff to set one up.</>
+        )
       }
     >
       <Card elevation="floating">
