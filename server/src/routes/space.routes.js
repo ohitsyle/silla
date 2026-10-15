@@ -42,8 +42,9 @@ import { assertFeature, assertWithinLimit, countUsage } from "../services/entitl
 import { LIVE_STATUSES } from "../services/reservations/availability.js";
 import { announceUnitStatus } from "../services/reservations/index.js";
 import {
-  SpaceError, contains, intersects, pieceBounds, roomContents, shapeRoom, withSpaceTransaction,
+  SpaceError, pieceBounds, roomContents, shapeRoom, withSpaceTransaction,
 } from "../services/spaces.js";
+import { boundingBox, contains, floorCells, intersects, normaliseAreas, plainAreas, regionAreas } from "../lib/cells.js";
 
 const router = Router();
 const run = (handler) => (req, res, next) => Promise.resolve(handler(req, res)).catch(next);
@@ -82,6 +83,8 @@ router.get("/", run(async (req, res) => {
     name: floor.name,
     order: floor.order,
     grid: floor.grid,
+    // The outline: empty is the whole grid (see floor.routes.js shapeOf).
+    shape: { areas: plainAreas(floor.shape?.areas) },
     rooms: rooms
       .filter((room) => room.levels.some((level) => String(level.floor) === String(floor._id)))
       .map(shapeRoom),
@@ -171,11 +174,18 @@ router.delete("/buildings/:id", ...superadmin, run(async (req, res) => {
 /**
  * Checks a room's proposed levels and returns them ready to store.
  *
- * Each level is a rectangle of whole cells on a different floor of the
- * room's own building. It must fit the floor, must not overlap another
- * room on that floor, and must not cut through a placed piece — a piece
- * is either wholly inside a room or wholly outside it, which is what lets
- * membership be derived from position instead of stored.
+ * Each level is a shape of whole cells on a different floor of the room's
+ * own building: `areas`, a list of rectangles whose union is the room
+ * there (an L-shaped room is two), or the single `bounds` rectangle a
+ * client that predates shapes sends. It must lie on the floor (inside its
+ * outline, not just its grid), must not share a cell with another room on
+ * that floor, and must not cut through a placed piece — a piece is either
+ * wholly inside a room or wholly outside it, which is what lets membership
+ * be derived from position instead of stored.
+ *
+ * Stored, a level always has `areas` (canonical: the same shape always
+ * stores the same rectangles) and `bounds`, their bounding box, so a
+ * reader that predates shapes still finds the room.
  */
 async function validateLevels(input, building, excludeRoomId, session) {
   if (!Array.isArray(input) || !input.length || input.length > MAX_LEVELS) {
@@ -200,16 +210,16 @@ async function validateLevels(input, building, excludeRoomId, session) {
     const floor = await Floor.findOne({ _id: item.floorId, building: building._id, site: building.site }).session(session);
     if (!floor) throw new SpaceError("Every room level must be on a floor in this building.", 404);
 
-    const bounds = item.bounds;
-    const wholeCells = bounds && [bounds.col, bounds.row, bounds.w, bounds.h].every(Number.isInteger);
-    if (!wholeCells || bounds.col < 0 || bounds.row < 0 || bounds.w < 1 || bounds.h < 1) {
-      throw new SpaceError("Draw a room using whole grid cells.");
-    }
-    if (bounds.col + bounds.w > floor.grid.cols || bounds.row + bounds.h > floor.grid.rows) {
-      throw new SpaceError("That room extends beyond the floor.");
-    }
+    const drawn = Array.isArray(item.areas) && item.areas.length ? item.areas : item.bounds ? [item.bounds] : item.areas;
+    const { areas, cells, error } = normaliseAreas(drawn, floor.grid, { noun: "room" });
+    if (error) throw new SpaceError(error);
+    // Inside the building, not just the grid: an L-shaped floor's missing
+    // corner is in the grid but is not floor.
+    if (!contains(floorCells(floor), cells)) throw new SpaceError("That room reaches outside the floor's outline.");
+
+    // Sharing a single cell is an overlap: rooms tile a floor, never stack.
     const overlapping = otherRooms.some((room) =>
-      room.levels.some((level) => String(level.floor) === item.floorId && intersects(level.bounds, bounds))
+      room.levels.some((level) => String(level.floor) === item.floorId && intersects(regionAreas(level), cells))
     );
     if (overlapping) throw new SpaceError("Rooms cannot overlap on the same floor.", 409);
 
@@ -217,7 +227,7 @@ async function validateLevels(input, building, excludeRoomId, session) {
       .session(session);
     for (const piece of pieces) {
       const footprint = pieceBounds(piece, typeById.get(String(piece.resourceType)));
-      if (intersects(bounds, footprint) && !contains(bounds, footprint)) {
+      if (intersects(cells, footprint) && !contains(cells, footprint)) {
         throw new SpaceError(
           "A room boundary cuts through a placed item. Include the entire item or move the boundary.",
           409
@@ -228,7 +238,8 @@ async function validateLevels(input, building, excludeRoomId, session) {
     levels.push({
       floor: floor._id,
       name: nameOf(item.name).slice(0, 80),
-      bounds: { col: bounds.col, row: bounds.row, w: bounds.w, h: bounds.h },
+      bounds: boundingBox(cells),
+      areas,
     });
   }
   return levels;
@@ -254,6 +265,17 @@ async function assertNoBookings(room, session) {
 }
 
 /**
+ * Where a room's booking target is anchored: the top-left cell of its first
+ * level's first rectangle. That cell is always inside the room, which the
+ * corner of the bounding box is not for every shape (an L lying the other
+ * way round has nothing in that corner).
+ */
+function anchorOf(level) {
+  const [first] = regionAreas(level);
+  return { col: first.col, row: first.row };
+}
+
+/**
  * The internal catalog type every room's booking target uses. Hidden
  * from the catalog (internal) and never drawn as furniture; created the
  * first time an organization draws a room.
@@ -272,7 +294,9 @@ async function roomTargetType(organizationId, session) {
 }
 
 /**
- * Body: { name, buildingId, bookingMode, levels: [{ floorId, name?, bounds }] }.
+ * Body: { name, buildingId, bookingMode, levels: [{ floorId, name?, areas }] },
+ * where `areas` is a list of { col, row, w, h } (one for a rectangular room,
+ * two for an L). A single `bounds` in place of `areas` is still accepted.
  *
  * A room is two documents: the Room (its boundary and rules) and one
  * internal Resource with a single unit, "room" — its booking target, so
@@ -301,7 +325,7 @@ router.post("/rooms", ...superadmin, run(async (req, res) => {
     const [target] = await Resource.create(
       [{
         organization: organizationId, floor: levels[0].floor, resourceType: type._id, kind: "room", room: roomId,
-        position: { col: levels[0].bounds.col, row: levels[0].bounds.row }, units: [{ label: "room" }],
+        position: anchorOf(levels[0]), units: [{ label: "room" }],
       }],
       { session }
     );
@@ -348,7 +372,7 @@ router.patch("/rooms/:id", ...superadmin, run(async (req, res) => {
       // The booking target sits on the first level, where the map anchors it.
       await Resource.updateOne(
         { _id: current.resource },
-        { floor: current.levels[0].floor, position: { col: current.levels[0].bounds.col, row: current.levels[0].bounds.row } },
+        { floor: current.levels[0].floor, position: anchorOf(current.levels[0]) },
         { session }
       );
     }

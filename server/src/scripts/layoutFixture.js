@@ -75,11 +75,14 @@ export function expandFloor(floorDefinition, { organizationId, floor, typesByKey
     };
   });
 
+  // A profile's zones are rectangles; stored the way the editor stores any
+  // zone, as its areas plus their bounding box.
   const zones = (floorDefinition.zones || []).map((zone) => ({
     organization: organizationId,
     floor: floor._id,
     name: zone.name,
     bounds: zone.bounds,
+    areas: [zone.bounds],
   }));
 
   const labels = (floorDefinition.labels || []).map((label) => ({

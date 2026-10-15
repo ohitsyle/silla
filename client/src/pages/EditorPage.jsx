@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
-import { Ban, Building2, CircleCheck, DoorOpen, Eye, Layers, MousePointerClick, Tag, Trash2, Wrench } from "lucide-react";
+import {
+  Ban, Building2, Check, CircleCheck, DoorOpen, Eye, LandPlot, Layers, MousePointerClick, RotateCcw, SquareMinus,
+  SquarePlus, Tag, Trash2, Undo2, Wrench,
+} from "lucide-react";
 import { api } from "../lib/api.js";
 import { useOrg } from "../lib/OrgContext.jsx";
 import { useAuth } from "../lib/AuthContext.jsx";
 import { useFloorSocket } from "../lib/useFloorSocket.js";
 import { readLimit, withArticle } from "../lib/rooms.js";
+import {
+  areasOf, boundingBox, cellsOf, difference, floorAreas, floorCells, intersection, isRectangle, regionAreas, union,
+} from "../lib/cells.js";
+import { outlineSummary, shapeSize } from "../lib/shapeWords.js";
 import { resolveStatePalette } from "../theme/applyOrgTheme.js";
 import SpaceMap from "../components/SpaceMap.jsx";
 import SetupSteps, { Usage } from "../components/SetupSteps.jsx";
@@ -37,6 +44,18 @@ import {
  * (useOrg) and the same usage counts (GET /api/spaces/usage) so the setup
  * steps can say "3 of 5 rooms" and, at the cap, explain instead of
  * offering an Add that fails. Unmanaged organizations see none of it.
+ *
+ * ── Shapes ─────────────────────────────────────────────────────────
+ * Floors, rooms and zones need not be rectangles (lib/cells.js). Each is
+ * reshaped the same way: drag a rectangle on the map to add its cells or
+ * to cut them away, and watch the result before letting go.
+ *
+ *   floor   the Shape tool: a draft outline with Undo, Reset to
+ *           rectangle and Save; a refused save says what is in the way
+ *           and the map flags it
+ *   room    "Add to room" / "Cut from room" in its settings; the dialog
+ *           comes back with the new shape, saved with the rest of it
+ *   zone    the same two actions in the zones list, saved at once
  */
 
 const TOOL = {
@@ -46,6 +65,7 @@ const TOOL = {
   ROOM: "room",
   ZONE: "zone",
   LABEL: "label",
+  SHAPE: "shape",
 };
 
 export default function EditorPage() {
@@ -68,7 +88,7 @@ export default function EditorPage() {
   const [busy, setBusy] = useState(false);
   const [selectedUnit, setSelectedUnit] = useState(null);
 
-  /** A rectangle dragged out with the Zone tool, waiting for its name. */
+  /** A zone dragged out with the Zone tool (its areas, on the floor), waiting for its name. */
   const [pendingZone, setPendingZone] = useState(null);
   const [zoneName, setZoneName] = useState("");
   const [labelDraft, setLabelDraft] = useState({ text: "", col: 0, row: 0 });
@@ -77,8 +97,23 @@ export default function EditorPage() {
   const [addingFloor, setAddingFloor] = useState(false);
   /** The room being created or configured, shown in RoomDialog. */
   const [roomDraft, setRoomDraft] = useState(null);
-  /** A room whose level is being drawn — set between "Draw it" and the drag. */
+  /**
+   * A room whose level is being drawn or reshaped — set between "Draw it"
+   * (or "Add to room" / "Cut from room") and the drag. `drawMode` is
+   * "draw", "add" or "cut".
+   */
   const [drawingRoom, setDrawingRoom] = useState(null);
+
+  /**
+   * The Shape tool's draft of this floor's outline: `areas`, the edits
+   * before it for Undo, and whether a drag adds or cuts. Null outside the
+   * tool; leaving the tool drops an unsaved draft.
+   */
+  const [outline, setOutline] = useState(null);
+  /** A refused save of the outline: the server's reason, and the ids it named. */
+  const [outlineRefusal, setOutlineRefusal] = useState(null);
+  /** A zone being reshaped from the zones list: { id, name, areas, mode }. */
+  const [zoneEdit, setZoneEdit] = useState(null);
 
   const palette = useMemo(() => resolveStatePalette(org), [org]);
   const resourceNoun = org?.terminology?.resourceNoun || "resource";
@@ -170,6 +205,31 @@ export default function EditorPage() {
   const visible = data?.floor.id === floorId && floor ? data : null;
   const canDraw = Boolean(building && !building.unassigned && floor);
 
+  // Another floor, another outline: nothing drafted on this one carries over.
+  useEffect(() => {
+    setOutline(null);
+    setOutlineRefusal(null);
+    setZoneEdit(null);
+  }, [floorId]);
+
+  // The Shape tool starts from the floor's saved outline (the whole grid,
+  // for a floor that has never had one), and starts again after a save.
+  const savedOutline = visible ? floorAreas(visible.floor) : null;
+  const savedOutlineKey = JSON.stringify(savedOutline);
+  useEffect(() => {
+    if (tool !== TOOL.SHAPE) {
+      setOutline(null);
+      setOutlineRefusal(null);
+      return;
+    }
+    // A floor that is the whole grid has nothing around it to add, so the
+    // first drag cuts; a shaped one more often grows.
+    if (savedOutline && !outline) {
+      setOutline({ areas: savedOutline, history: [], mode: visible.floor.shape?.areas?.length ? "add" : "cut" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tool, savedOutlineKey, outline]);
+
   if (booting) return <Loading className="min-h-screen" />;
   if (!isAuthenticated) return <Navigate to="/login" replace />;
   if (user && !["staff", "superadmin"].includes(user.role)) {
@@ -212,9 +272,13 @@ export default function EditorPage() {
     navigate(`/editor/${id}`);
   };
 
-  /** Draw a room — a new one, or another level of `room` on floor `onFloor`. */
-  const drawRoom = (room = null, onFloor = floorId) => {
-    setDrawingRoom(room);
+  /**
+   * Draw a room — a new one, or a level of `room` on floor `onFloor`:
+   * drawn afresh ("draw"), or added to or cut from its current shape.
+   */
+  const drawRoom = (room = null, onFloor = floorId, mode = "draw") => {
+    setDrawingRoom(room ? { ...room, drawMode: mode } : null);
+    setZoneEdit(null);
     setTool(TOOL.ROOM);
     setSelectedUnit(null);
     if (onFloor && onFloor !== floorId) navigate(`/editor/${onFloor}`);
@@ -222,6 +286,70 @@ export default function EditorPage() {
   const stopDrawing = () => {
     setDrawingRoom(null);
     setTool(TOOL.AVAILABILITY);
+  };
+
+  /** The toolbar: picking a tool ends whatever reshape was under way. */
+  const chooseTool = (value) => {
+    if (value === TOOL.ROOM) {
+      drawRoom(null);
+      return;
+    }
+    setDrawingRoom(null);
+    setZoneEdit(null);
+    setTool(value);
+  };
+
+  /** "Add to zone" / "Cut from zone": the next drag reshapes that zone. */
+  const reshapeZone = (zone, mode) => {
+    setError(null);
+    setNotice(null);
+    setDrawingRoom(null);
+    setZoneEdit({ id: zone.id, name: zone.name, areas: zone.areas, mode });
+    setTool(TOOL.ZONE);
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    document.getElementById("editor-canvas")?.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "center" });
+  };
+
+  /* ── The floor's outline (the Shape tool) ── */
+
+  const outlineDirty = Boolean(outline) && JSON.stringify(outline.areas) !== savedOutlineKey;
+  const editOutline = (areas) => {
+    setOutline((current) => ({ ...current, areas, history: [...current.history, current.areas] }));
+    setOutlineRefusal(null);
+  };
+  const undoOutline = () => {
+    setOutline((current) => ({ ...current, areas: current.history[current.history.length - 1], history: current.history.slice(0, -1) }));
+    setOutlineRefusal(null);
+  };
+  const saveOutline = async () => {
+    setError(null);
+    setNotice(null);
+    if (!outlineDirty) {
+      setOutlineRefusal({ message: "Nothing to save yet. Drag on the map to add floor or cut it away.", flagged: null });
+      return;
+    }
+    setBusy(true);
+    try {
+      const saved = await api.updateFloor(floorId, { shape: { areas: outline.areas } });
+      // The floor takes its new outline at once, and the tool starts again
+      // from what was saved (in the same mode) — not from the layout the
+      // reload is about to replace.
+      setData((current) =>
+        current?.floor.id === floorId
+          ? { ...current, floor: { ...current.floor, grid: saved.floor.grid, shape: saved.floor.shape } }
+          : current
+      );
+      setOutline((current) => ({ areas: floorAreas(saved.floor), history: [], mode: current.mode }));
+      setOutlineRefusal(null);
+      setNotice("Outline saved.");
+      reloadAll();
+    } catch (err) {
+      // The server names what stands in the part being removed; the map
+      // flags each of them so they can be found.
+      setOutlineRefusal({ message: err.message, flagged: new Set((err.body?.outside || []).map((item) => item.id)) });
+    } finally {
+      setBusy(false);
+    }
   };
 
   /** Clicking a unit: remove its piece, or open its availability. */
@@ -235,25 +363,78 @@ export default function EditorPage() {
     if (tool === TOOL.AVAILABILITY) setSelectedUnit(unit);
   };
 
+  /** A shape with `rect` added to it or cut from it, as cells. */
+  const reshaped = (areas, rect, mode) => (mode === "cut" ? difference(cellsOf(areas), [rect]) : union(cellsOf(areas), [rect]));
+
   /**
-   * A rectangle was dragged out. A zone needs only its name. A room needs
-   * its name and how it is booked — RoomDialog asks for both, which is the
-   * last step of the setup sequence.
+   * What a drawn room or zone keeps: only cells that are floor. The walls
+   * bound a room, so a box dragged across an L's missing corner becomes an
+   * L-shaped room rather than a refusal (the server checks it regardless).
+   */
+  const onTheFloor = (cells) => (visible ? intersection(cells, floorCells(visible.floor)) : cells);
+  const OFF_THE_FLOOR = "That's outside the floor. Draw inside its outline.";
+
+  /**
+   * A rectangle was dragged out. With the Shape tool it reshapes the draft
+   * outline. A new zone needs only its name; a zone being reshaped is saved
+   * at once. A room needs its name and how it is booked — RoomDialog asks
+   * for both, which is the last step of the setup sequence — and a room
+   * being reshaped goes back to that dialog with its new shape.
    */
   const onRegionSelect = (rect) => {
     if (!isSuperadmin) return;
-    if (tool === TOOL.ZONE) setPendingZone(rect);
+
+    if (tool === TOOL.SHAPE && outline) {
+      const next = reshaped(outline.areas, rect, outline.mode);
+      if (!next.size) {
+        setOutlineRefusal({ message: "That would cut away the whole floor. Keep at least one cell.", flagged: null });
+        return;
+      }
+      editOutline(areasOf(next));
+      return;
+    }
+
+    if (tool === TOOL.ZONE && zoneEdit) {
+      const next = onTheFloor(reshaped(zoneEdit.areas, rect, zoneEdit.mode));
+      if (!next.size) {
+        setError(`That would cut away the whole of “${zoneEdit.name}”. To remove it, use the bin in the zones list.`);
+        return;
+      }
+      const { id, name } = zoneEdit;
+      setZoneEdit(null);
+      setTool(TOOL.AVAILABILITY);
+      act(() => api.updateZone(id, { areas: areasOf(next) }), `Zone “${name}” reshaped.`);
+      return;
+    }
+    if (tool === TOOL.ZONE) {
+      const cells = onTheFloor(cellsOf([rect]));
+      if (!cells.size) setError(OFF_THE_FLOOR);
+      else setPendingZone(areasOf(cells));
+      return;
+    }
     if (tool !== TOOL.ROOM) return;
     if (!canDraw) {
       setError("Set up the building before drawing rooms.");
       return;
     }
+
     const existing = drawingRoom?.levels || [];
-    const levels = [
-      ...existing.filter((level) => level.floorId !== floorId),
-      { floorId, name: existing.find((level) => level.floorId === floorId)?.name || "", bounds: rect },
-    ];
-    setRoomDraft({ bookingMode: "individual", name: "", ...drawingRoom, buildingId: building.id, levels });
+    const here = existing.find((level) => level.floorId === floorId);
+    const mode = here ? drawingRoom.drawMode || "draw" : "draw";
+    const cells = onTheFloor(mode === "draw" ? cellsOf([rect]) : reshaped(regionAreas(here), rect, mode));
+    if (!cells.size) {
+      setError(
+        mode === "cut"
+          ? "That would cut away the whole of this level. To take the room off this floor, remove the level in its settings."
+          : OFF_THE_FLOOR
+      );
+      return;
+    }
+    const level = { floorId, name: here?.name || "", areas: areasOf(cells), bounds: boundingBox(cells) };
+    // A level keeps its place in the list: the first one anchors the room.
+    const levels = here ? existing.map((other) => (other.floorId === floorId ? level : other)) : [...existing, level];
+    const { drawMode, ...room } = drawingRoom || {}; // eslint-disable-line no-unused-vars
+    setRoomDraft({ bookingMode: "individual", name: "", ...room, buildingId: building.id, levels });
     setDrawingRoom(null);
     setTool(TOOL.AVAILABILITY);
   };
@@ -286,9 +467,30 @@ export default function EditorPage() {
           ...(canDraw && !limits.rooms?.blocked ? [{ value: TOOL.ROOM, label: "Room", icon: DoorOpen }] : []),
           { value: TOOL.ZONE, label: "Zone", icon: Layers },
           { value: TOOL.LABEL, label: "Label", icon: Tag },
+          { value: TOOL.SHAPE, label: "Shape", icon: LandPlot },
         ]
       : []),
   ];
+
+  /** What the room being drawn is called in the hint. */
+  const drawingName = drawingRoom?.name ? `“${drawingRoom.name}”` : "the room";
+
+  /**
+   * The shape the map previews while a drag adds to it or cuts from it:
+   * the draft outline, the room level being reshaped, or the zone.
+   */
+  const levelBeingReshaped =
+    tool === TOOL.ROOM && drawingRoom && drawingRoom.drawMode !== "draw"
+      ? drawingRoom.levels?.find((level) => level.floorId === floorId)
+      : null;
+  const shapeEdit =
+    tool === TOOL.SHAPE && outline
+      ? { target: "floor", areas: outline.areas, mode: outline.mode }
+      : levelBeingReshaped
+        ? { target: "room", id: drawingRoom.id, areas: regionAreas(levelBeingReshaped), mode: drawingRoom.drawMode }
+        : tool === TOOL.ZONE && zoneEdit
+          ? { target: "zone", id: zoneEdit.id, areas: zoneEdit.areas, mode: zoneEdit.mode }
+          : null;
 
   const hint = {
     [TOOL.AVAILABILITY]: isSuperadmin
@@ -296,11 +498,21 @@ export default function EditorPage() {
       : `Click ${withArticle(resourceNoun)} to mark it unavailable or out of service.`,
     [TOOL.PLACE]: "Click an empty cell to place the chosen piece.",
     [TOOL.REMOVE]: "Click a piece to remove it.",
-    [TOOL.ROOM]: drawingRoom?.name
-      ? `Drag a box for “${drawingRoom.name}” on ${floor?.name}.`
-      : "Drag a box around the room, corner to corner. Next you'll name it and choose how it's booked.",
-    [TOOL.ZONE]: "Drag a box on the map, then name the zone.",
+    [TOOL.ROOM]:
+      drawingRoom?.drawMode === "add"
+        ? `Drag across the map to add to ${drawingName} — an arm of an L, the stem of a T.`
+        : drawingRoom?.drawMode === "cut"
+          ? `Drag across the part of ${drawingName} to cut away.`
+          : drawingRoom?.name
+            ? `Drag a box for “${drawingRoom.name}” on ${floor?.name}.`
+            : "Drag a box around the room, corner to corner. Next you'll name it and choose how it's booked.",
+    [TOOL.ZONE]: zoneEdit
+      ? zoneEdit.mode === "add"
+        ? `Drag across the map to add to the zone “${zoneEdit.name}”.`
+        : `Drag across the part of “${zoneEdit.name}” to cut away.`
+      : "Drag a box on the map, then name the zone.",
     [TOOL.LABEL]: "Click the map to position the label, then add it.",
+    [TOOL.SHAPE]: "Drag on the map to cut away what isn't floor, or to add more. Nothing changes until you save.",
   }[tool];
 
 
@@ -310,7 +522,13 @@ export default function EditorPage() {
         title={isSuperadmin ? "Map editor" : "Space controls"}
         subtitle={
           floor && building
-            ? `${building.name} › ${floor.name}${visible ? ` · ${visible.floor.grid.cols} × ${visible.floor.grid.rows} cells` : ""}`
+            ? `${building.name} › ${floor.name}${
+                visible
+                  ? visible.floor.shape?.areas?.length
+                    ? ` · shaped, within ${visible.floor.grid.cols} × ${visible.floor.grid.rows} cells`
+                    : ` · ${visible.floor.grid.cols} × ${visible.floor.grid.rows} cells`
+                  : ""
+              }`
             : building?.name || "Loading…"
         }
         action={
@@ -389,12 +607,7 @@ export default function EditorPage() {
       {/* ── The map and its tools — staff have one tool, so no toolbar ── */}
       {isSuperadmin && (
         <div className="mt-6 flex flex-wrap items-center gap-x-3 gap-y-2">
-          <Segmented
-            className="editortools"
-            value={tool}
-            onChange={(value) => (value === TOOL.ROOM ? drawRoom(null) : setTool(value))}
-            options={tools}
-          />
+          <Segmented className="editortools" value={tool} onChange={chooseTool} options={tools} />
           {busy && <Spinner className="text-ink-muted" />}
         </div>
       )}
@@ -425,6 +638,24 @@ export default function EditorPage() {
             />
           )}
         </div>
+      )}
+
+      {tool === TOOL.SHAPE && isSuperadmin && outline && visible && (
+        <OutlineBar
+          outline={outline}
+          grid={visible.floor.grid}
+          dirty={outlineDirty}
+          busy={busy}
+          refusal={outlineRefusal}
+          onMode={(mode) => setOutline((current) => ({ ...current, mode }))}
+          onUndo={undoOutline}
+          onReset={() => editOutline([{ col: 0, row: 0, w: visible.floor.grid.cols, h: visible.floor.grid.rows }])}
+          onDiscard={() => {
+            setOutline(null);
+            setOutlineRefusal(null);
+          }}
+          onSave={saveOutline}
+        />
       )}
 
       {tool === TOOL.LABEL && isSuperadmin && (
@@ -465,8 +696,10 @@ export default function EditorPage() {
             onSelectRoom={isSuperadmin && tool === TOOL.AVAILABILITY ? (room) => setRoomDraft(room) : undefined}
             onCellClick={onCellClick}
             management
-            regionMode={isSuperadmin && (tool === TOOL.ZONE || tool === TOOL.ROOM)}
+            regionMode={isSuperadmin && (tool === TOOL.ZONE || tool === TOOL.ROOM || tool === TOOL.SHAPE)}
             onRegionSelect={onRegionSelect}
+            shapeEdit={shapeEdit}
+            flagged={tool === TOOL.SHAPE ? outlineRefusal?.flagged : null}
             editing={isSuperadmin && tool !== TOOL.REMOVE && tool !== TOOL.AVAILABILITY}
           />
         ) : (
@@ -536,7 +769,11 @@ export default function EditorPage() {
             items={visible.layout.zones.map((zone) => ({
               id: zone.id,
               primary: zone.name,
-              secondary: `${zone.bounds.w} × ${zone.bounds.h} at (${zone.bounds.col}, ${zone.bounds.row})`,
+              secondary: `${shapeSize(zone.areas)} at (${zone.bounds.col}, ${zone.bounds.row})`,
+              actions: [
+                { label: `Add to ${zone.name}`, icon: SquarePlus, onClick: () => reshapeZone(zone, "add") },
+                { label: `Cut from ${zone.name}`, icon: SquareMinus, onClick: () => reshapeZone(zone, "cut") },
+              ],
             }))}
             onRemove={(id) => act(() => api.deleteZone(id), "Zone removed.")}
           />
@@ -606,18 +843,18 @@ export default function EditorPage() {
           setZoneName("");
         }}
         title="Name this zone"
-        subtitle={pendingZone ? `${pendingZone.w} × ${pendingZone.h} cells at (${pendingZone.col}, ${pendingZone.row})` : ""}
+        subtitle={pendingZone ? shapeSize(pendingZone) : ""}
         icon={Layers}
       >
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            const rect = pendingZone;
+            const areas = pendingZone;
             const name = zoneName.trim();
-            if (!rect || !name) return;
+            if (!areas || !name) return;
             setPendingZone(null);
             setZoneName("");
-            act(() => api.createZone({ floorId, name, ...rect }), `Zone "${name}" added.`);
+            act(() => api.createZone({ floorId, name, areas }), `Zone "${name}" added.`);
           }}
         >
           <Field
@@ -712,6 +949,61 @@ function AvailabilityPanel({ unit, resourceNoun, busy, onClose, onSet }) {
   );
 }
 
+/* ─────────────────────────── the floor's outline ─────────────────────────── */
+
+/**
+ * The Shape tool's controls, above the map: whether a drag adds floor or
+ * cuts it away, what the draft is, and Undo, Reset to rectangle, Discard and
+ * Save. A refused save is shown here, where the Save was pressed, in the
+ * server's own words ("1 piece and the room “Commons” are in the part
+ * you're removing"); the map flags each of those things.
+ */
+function OutlineBar({ outline, grid, dirty, busy, refusal, onMode, onUndo, onReset, onDiscard, onSave }) {
+  const cells = cellsOf(outline.areas);
+  const wholeGrid = isRectangle(cells) && cells.size === grid.cols * grid.rows;
+  return (
+    <Card className="mt-3 p-4">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
+        <Segmented
+          className="outline-mode"
+          size="sm"
+          value={outline.mode}
+          onChange={onMode}
+          options={[
+            { value: "add", label: "Add area", icon: SquarePlus },
+            { value: "cut", label: "Cut area", icon: SquareMinus },
+          ]}
+        />
+        <p className="text-sm text-ink-secondary">
+          {outlineSummary(cells, grid)}
+          {dirty && <span className="text-ink-muted"> · not saved yet</span>}
+        </p>
+        <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
+          <Button size="sm" variant="ghost" icon={Undo2} disabled={!outline.history.length || busy} onClick={onUndo}>
+            Undo
+          </Button>
+          <Button size="sm" variant="ghost" icon={RotateCcw} disabled={wholeGrid || busy} onClick={onReset}>
+            Reset to rectangle
+          </Button>
+          {dirty && (
+            <Button size="sm" disabled={busy} onClick={onDiscard}>
+              Discard
+            </Button>
+          )}
+          <Button size="sm" variant="primary" icon={Check} loading={busy} onClick={onSave}>
+            Save outline
+          </Button>
+        </div>
+      </div>
+      {refusal && (
+        <Notice tone="error" className="mt-3">
+          {refusal.message}
+        </Notice>
+      )}
+    </Card>
+  );
+}
+
 /* ─────────────────────────────── bits ─────────────────────────────── */
 
 /** MAP-5: free text at a cell — the click on the map sets the position. */
@@ -762,6 +1054,19 @@ function ListPanel({ title, items, onRemove, readOnly, emptyHint }) {
             <li key={item.id} className="flex items-center gap-2 py-2 text-sm">
               <span className="mr-auto text-ink-primary">{item.primary}</span>
               <span className="text-xs text-ink-muted">{item.secondary}</span>
+              {!readOnly &&
+                (item.actions || []).map(({ label, icon: Icon, onClick }) => (
+                  <button
+                    key={label}
+                    type="button"
+                    onClick={onClick}
+                    title={label}
+                    aria-label={label}
+                    className="rounded-sm text-ink-muted transition-colors duration-fast ease-out hover:text-ink-primary"
+                  >
+                    <Icon size={14} />
+                  </button>
+                ))}
               {!readOnly && (
                 <button
                   type="button"

@@ -7,7 +7,8 @@ import Floor from "../models/Floor.js";
 import Resource from "../models/Resource.js";
 import ResourceType from "../models/ResourceType.js";
 import Room from "../models/Room.js";
-import { applyRoomStates, roomContents, roomForResource, withSpaceTransaction, SpaceError } from "../services/spaces.js";
+import { applyRoomStates, pieceBounds, roomContents, roomForResource, withSpaceTransaction, SpaceError } from "../services/spaces.js";
+import { contains, regionAreas } from "../lib/cells.js";
 import Zone from "../models/Zone.js";
 import User from "../models/User.js";
 import Reservation from "../models/Reservation.js";
@@ -117,16 +118,9 @@ router.get(
     await applyRoomStates(resources);
     const typeById = new Map(types.map((t) => [t._id.toString(), t]));
 
-    const inZone = (zone, resource, type) => {
-      const { col, row } = resource.position;
-      const { w, h } = type?.footprint || { w: 1, h: 1 };
-      return (
-        col >= zone.bounds.col &&
-        row >= zone.bounds.row &&
-        col + w <= zone.bounds.col + zone.bounds.w &&
-        row + h <= zone.bounds.row + zone.bounds.h
-      );
-    };
+    // Wholly inside the zone's shape: every cell of the footprint is one of
+    // the zone's cells, so a piece in either arm of an L-shaped zone counts.
+    const inZone = (zone, resource, type) => contains(regionAreas(zone), pieceBounds(resource, type));
 
     const grouped = new Map();
     for (const resource of resources) {

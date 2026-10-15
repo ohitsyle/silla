@@ -108,7 +108,8 @@ export const api = {
   adminReports: (days = 30) => request(`/api/admin/reports?days=${days}`),
   adminExportUrl: (days = 30) => `${BASE_URL}/api/admin/export?days=${days}`,
 
-  // Floor management — superadmin only (add floors, resize rooms).
+  // Floor management — superadmin only: add floors, resize them, and set
+  // their outline ({ shape: { areas } }; null resets it to the whole grid).
   createFloor: (payload) => request(`/api/floors`, { method: "POST", body: JSON.stringify(payload) }),
   updateFloor: (id, patch) => request(`/api/floors/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteFloor: (id) => request(`/api/floors/${id}`, { method: "DELETE" }),
@@ -134,6 +135,8 @@ export const api = {
   placeResource: (payload) => request(`/api/resources`, { method: "POST", body: JSON.stringify(payload) }),
   removeResource: (id) => request(`/api/resources/${id}`, { method: "DELETE" }),
   createZone: (payload) => request(`/api/resources/zones`, { method: "POST", body: JSON.stringify(payload) }),
+  // { name?, areas? }: rename a zone, or reshape it (an L-shaped zone is two areas).
+  updateZone: (id, patch) => request(`/api/resources/zones/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteZone: (id) => request(`/api/resources/zones/${id}`, { method: "DELETE" }),
   createLabel: (payload) => request(`/api/resources/labels`, { method: "POST", body: JSON.stringify(payload) }),
   deleteLabel: (id) => request(`/api/resources/labels/${id}`, { method: "DELETE" }),

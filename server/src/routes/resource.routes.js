@@ -7,7 +7,10 @@ import Zone from "../models/Zone.js";
 import Label from "../models/Label.js";
 import Reservation from "../models/Reservation.js";
 import Room from "../models/Room.js";
-import { withSpaceTransaction, intersects, contains } from "../services/spaces.js";
+import { roomHolds, withSpaceTransaction } from "../services/spaces.js";
+import {
+  boundingBox, cellKey, contains, floorCells, intersects, normaliseAreas, plainAreas, regionAreas,
+} from "../lib/cells.js";
 import Site from "../models/Site.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { LIVE_STATUSES } from "../services/reservations/availability.js";
@@ -18,6 +21,12 @@ const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, ne
 
 /**
  * Structural map editing is SUPERADMIN-ONLY.
+ *
+ * Every write here runs inside withSpaceTransaction (services/spaces.js),
+ * like every other structural write, so it cannot interleave with a change
+ * to the floor's outline: a piece, zone or label is only ever placed on
+ * cells that are floor when it commits. Everything placed must sit inside
+ * the floor's outline (lib/cells.js floorCells), not merely its grid.
  *
  * Placing and removing pieces, drawing zones and adding labels change
  * what the space *is* — they are configuration, not operation. Staff run
@@ -49,14 +58,20 @@ router.use(requireAuth, requireRole("superadmin"));
  *
  * floor.routes.js does exactly this before every structural write; this
  * is the same check, which is where it should have been all along.
+ *
+ * `session` is the space transaction's, so the floor (and its outline) is
+ * read on the same snapshot as everything the write then checks.
  */
-async function floorInOrg(floorId, organizationId) {
-  const floor = await Floor.findById(floorId);
+async function floorInOrg(floorId, organizationId, session = null) {
+  const floor = await Floor.findById(floorId).session(session);
   if (!floor) return null;
-  const site = await Site.findById(floor.site).select("organization");
+  const site = await Site.findById(floor.site).select("organization").session(session);
   if (!site || site.organization.toString() !== String(organizationId)) return null;
   return floor;
 }
+
+/** An error this router answers with its own status and message. */
+const refuse = (message, status = 400) => Object.assign(new Error(message), { status });
 
 /**
  * MAP-3 — "Pick from catalog; click cell to place / remove; Overlap
@@ -106,19 +121,22 @@ router.post("/", asyncHandler(async (req, res) => {
   const { floorId, resourceTypeKey, col, row } = req.body || {};
   if (!mongoose.isValidObjectId(floorId) || !Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0) return res.status(400).json({ error: "Choose a floor and an integer grid position." });
   const resource = await withSpaceTransaction(req.user.organizationId, async (session, org) => {
-    const floor = await Floor.findById(floorId).session(session);
-    const site = floor && await Site.findOne({ _id: floor.site, organization: req.user.organizationId }).session(session);
-    if (!site) throw Object.assign(new Error("Floor not found"), { status: 404 });
+    const floor = await floorInOrg(floorId, req.user.organizationId, session);
+    if (!floor) throw refuse("Floor not found", 404);
     const type = await ResourceType.findOne({ organization: req.user.organizationId, key: resourceTypeKey, internal: { $ne: true } }).session(session);
-    if (!type) throw Object.assign(new Error("Catalog type not found"), { status: 404 });
+    if (!type) throw refuse("Catalog type not found", 404);
     const { w, h } = type.footprint;
-    if (col + w > floor.grid.cols || row + h > floor.grid.rows) throw Object.assign(new Error("That item extends beyond the floor."), { status: 400 });
-    if (await findOverlap({ floorId, col, row, w, h }, session)) throw Object.assign(new Error("That item overlaps an existing piece."), { status: 409 });
+    if (col + w > floor.grid.cols || row + h > floor.grid.rows) throw refuse("That item extends beyond the floor.");
+    // Every cell of the footprint must be floor: on an L-shaped floor the
+    // missing corner is inside the grid but is not part of the building.
+    if (!contains(floorCells(floor), { col, row, w, h })) throw refuse("That item would stand outside the floor's outline.");
+    if (await findOverlap({ floorId, col, row, w, h }, session)) throw refuse("That item overlaps an existing piece.", 409);
     const rooms = await Room.find({ organization: req.user.organizationId, "levels.floor": floorId }).session(session);
     for (const room of rooms) {
-      const level = room.levels.find((l) => String(l.floor) === String(floorId));
-      if (intersects(level.bounds, { col, row, w, h }) && !contains(level.bounds, { col, row, w, h })) throw Object.assign(new Error("Place the entire item inside or outside the room boundary."), { status: 409 });
-      if (contains(level.bounds, { col, row, w, h }) && await Reservation.exists({ resource: room.resource, status: { $in: LIVE_STATUSES } }).session(session)) throw Object.assign(new Error("This room has a live reservation. Cancel it before changing its contents."), { status: 409 });
+      // The room's shape on this floor: an L-shaped room is both its arms.
+      const level = regionAreas(room.levels.find((l) => String(l.floor) === String(floorId)));
+      if (intersects(level, { col, row, w, h }) && !contains(level, { col, row, w, h })) throw refuse("Place the entire item inside or outside the room boundary.", 409);
+      if (contains(level, { col, row, w, h }) && await Reservation.exists({ resource: room.resource, status: { $in: LIVE_STATUSES } }).session(session)) throw refuse("This room has a live reservation. Cancel it before changing its contents.", 409);
     }
     // The plan counts bookable units, so a piece adds its seats; one that
     // is not bookable (a shelf) adds none and is never refused for it.
@@ -133,11 +151,11 @@ router.delete("/:id", asyncHandler(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid resource id" });
   await withSpaceTransaction(req.user.organizationId, async (session) => {
     const r = await Resource.findOne({ _id: req.params.id, organization: req.user.organizationId, kind: { $ne: "room" } }).session(session);
-    if (!r) throw Object.assign(new Error("Resource not found"), { status: 404 });
+    if (!r) throw refuse("Resource not found", 404);
     const type = await ResourceType.findById(r.resourceType).session(session);
     const rooms = await Room.find({ organization: req.user.organizationId, "levels.floor": r.floor }).session(session);
-    const related = rooms.filter((room) => room.levels.some((l) => String(l.floor) === String(r.floor) && contains(l.bounds, { ...r.position.toObject(), ...type.footprint.toObject() })));
-    if (await Reservation.exists({ resource: { $in: [r._id, ...related.map((room) => room.resource)] }, status: { $in: LIVE_STATUSES } }).session(session)) throw Object.assign(new Error("This item or its room has an active or upcoming reservation. Cancel it first."), { status: 409 });
+    const related = rooms.filter((room) => roomHolds(room, r, type));
+    if (await Reservation.exists({ resource: { $in: [r._id, ...related.map((room) => room.resource)] }, status: { $in: LIVE_STATUSES } }).session(session)) throw refuse("This item or its room has an active or upcoming reservation. Cancel it first.", 409);
     await r.deleteOne({ session });
   });
   res.json({ ok: true });
@@ -146,51 +164,80 @@ router.delete("/:id", asyncHandler(async (req, res) => {
 /* ══════════════════ MAP-4 — Zones ══════════════════ */
 
 /**
+ * A zone as the API returns it: `areas` is its shape and `bounds` their
+ * bounding box. A zone written before shapes reports its one bounds as its
+ * one area, so a reader only ever needs `areas`.
+ */
+const shapeZone = (zone) => ({
+  id: zone._id.toString(),
+  name: zone.name,
+  bounds: plainAreas([zone.bounds])[0],
+  areas: regionAreas(zone),
+});
+
+/**
+ * A zone's drawn shape, checked against its floor and ready to store.
+ * Whole cells inside the grid, and every one of them floor.
+ */
+function zoneShape(drawn, floor) {
+  const { areas, cells, error } = normaliseAreas(drawn, floor.grid, { noun: "zone" });
+  if (error) throw refuse(error);
+  if (!contains(floorCells(floor), cells)) throw refuse("That zone reaches outside the floor's outline.");
+  return { areas, bounds: boundingBox(cells) };
+}
+
+/**
  * POST /api/resources/zones
- * Body: { floorId, name, col, row, w, h }
+ * Body: { floorId, name, areas: [{ col, row, w, h }, …] }, or the single
+ * rectangle as { floorId, name, col, row, w, h }.
  *
  * "Drag rectangle; name it; Membership derived from position."
- * No membership is stored — a zone is a rectangle and nothing more
+ * No membership is stored — a zone is a shape and nothing more
  * (spec §12).
  */
 router.post(
   "/zones",
   asyncHandler(async (req, res) => {
-    const { floorId, name, col, row, w, h } = req.body || {};
+    const { floorId, name, areas, col, row, w, h } = req.body || {};
     if (!floorId || !mongoose.isValidObjectId(floorId)) {
       return res.status(400).json({ error: "A valid floorId is required" });
     }
-    if (!name?.trim()) return res.status(400).json({ error: "A zone name is required" });
-    if (![col, row, w, h].every((n) => Number.isInteger(n)) || w < 1 || h < 1 || col < 0 || row < 0) {
-      return res.status(400).json({ error: "col/row must be >= 0 and w/h >= 1, all integers" });
-    }
+    if (typeof name !== "string" || !name.trim()) return res.status(400).json({ error: "A zone name is required" });
+    const drawn = Array.isArray(areas) ? areas : [{ col, row, w, h }];
 
-    const floor = await floorInOrg(floorId, req.user.organizationId);
-    if (!floor) return res.status(404).json({ error: "Floor not found" });
-    if (col + w > floor.grid.cols || row + h > floor.grid.rows) {
-      return res.status(400).json({ error: "That zone falls outside the grid." });
-    }
-
-    const zone = await Zone.create({
-      organization: req.user.organizationId,
-      floor: floorId,
-      name: name.trim(),
-      bounds: { col, row, w, h },
+    const zone = await withSpaceTransaction(req.user.organizationId, async (session) => {
+      const floor = await floorInOrg(floorId, req.user.organizationId, session);
+      if (!floor) throw refuse("Floor not found", 404);
+      const [created] = await Zone.create(
+        [{ organization: req.user.organizationId, floor: floorId, name: name.trim(), ...zoneShape(drawn, floor) }],
+        { session }
+      );
+      return created;
     });
-
-    res.status(201).json({ zone: { id: zone._id.toString(), name: zone.name, bounds: zone.bounds } });
+    res.status(201).json({ zone: shapeZone(zone) });
   })
 );
 
+/** Body: any of { name, areas } — rename, or reshape (an L-shaped zone is two areas). */
 router.patch(
   "/zones/:id",
   asyncHandler(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid zone id" });
-    const zone = await Zone.findOne({ _id: req.params.id, organization: req.user.organizationId });
-    if (!zone) return res.status(404).json({ error: "Zone not found" });
-    if (req.body?.name?.trim()) zone.name = req.body.name.trim();
-    await zone.save();
-    res.json({ zone: { id: zone._id.toString(), name: zone.name, bounds: zone.bounds } });
+    const zone = await withSpaceTransaction(req.user.organizationId, async (session) => {
+      const current = await Zone.findOne({ _id: req.params.id, organization: req.user.organizationId }).session(session);
+      if (!current) throw refuse("Zone not found", 404);
+      if (typeof req.body?.name === "string" && req.body.name.trim()) current.name = req.body.name.trim();
+      if (req.body?.areas !== undefined) {
+        const floor = await floorInOrg(current.floor, req.user.organizationId, session);
+        if (!floor) throw refuse("Floor not found", 404);
+        const { areas, bounds } = zoneShape(req.body.areas, floor);
+        current.areas = areas;
+        current.bounds = bounds;
+      }
+      await current.save({ session });
+      return current;
+    });
+    res.json({ zone: shapeZone(zone) });
   })
 );
 
@@ -198,7 +245,9 @@ router.delete(
   "/zones/:id",
   asyncHandler(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid zone id" });
-    await Zone.deleteOne({ _id: req.params.id, organization: req.user.organizationId });
+    await withSpaceTransaction(req.user.organizationId, async (session) => {
+      await Zone.deleteOne({ _id: req.params.id, organization: req.user.organizationId }, { session });
+    });
     res.json({ ok: true });
   })
 );
@@ -224,17 +273,16 @@ router.post(
       return res.status(400).json({ error: "col and row must be non-negative integers" });
     }
 
-    const floor = await floorInOrg(floorId, req.user.organizationId);
-    if (!floor) return res.status(404).json({ error: "Floor not found" });
-    if (col >= floor.grid.cols || row >= floor.grid.rows) {
-      return res.status(400).json({ error: "That label falls outside the grid." });
-    }
-
-    const label = await Label.create({
-      organization: req.user.organizationId,
-      floor: floorId,
-      text: text.trim(),
-      position: { col, row },
+    const label = await withSpaceTransaction(req.user.organizationId, async (session) => {
+      const floor = await floorInOrg(floorId, req.user.organizationId, session);
+      if (!floor) throw refuse("Floor not found", 404);
+      if (col >= floor.grid.cols || row >= floor.grid.rows) throw refuse("That label falls outside the grid.");
+      if (!floorCells(floor).has(cellKey(col, row))) throw refuse("Place the label on the floor, inside its outline.");
+      const [created] = await Label.create(
+        [{ organization: req.user.organizationId, floor: floorId, text: text.trim(), position: { col, row } }],
+        { session }
+      );
+      return created;
     });
 
     res.status(201).json({ label: { id: label._id.toString(), text: label.text, position: label.position } });
@@ -245,7 +293,9 @@ router.delete(
   "/labels/:id",
   asyncHandler(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid label id" });
-    await Label.deleteOne({ _id: req.params.id, organization: req.user.organizationId });
+    await withSpaceTransaction(req.user.organizationId, async (session) => {
+      await Label.deleteOne({ _id: req.params.id, organization: req.user.organizationId }, { session });
+    });
     res.json({ ok: true });
   })
 );

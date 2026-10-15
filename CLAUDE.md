@@ -559,7 +559,8 @@ live is a decent beat in itself). Set them back afterwards, or run
 ## Spatial hierarchy — buildings, floors and rooms
 
 The map now navigates site → building → floor → room → resource. Rooms can
-have rectangular levels on several floors in one building, with booking mode
+have levels on several floors in one building — each level any
+square-cornered shape (see Shapes below) — with booking mode
 `individual`, `whole` or `either`. A whole-room reservation conflicts with all
 contents on all levels; an individual reservation conflicts with its unit and
 whole-room reservations. Buildings and floors are navigation containers.
@@ -575,11 +576,47 @@ Existing floors remain readable under an unassigned building. **Set up building*
 adopts them explicitly while preserving IDs and layout. No read reseeds or
 migrates live data. See `docs/spatial-map.md` for the workflow and constraints.
 
-`npm run test:spaces` runs 73 named spatial checks in a temporary replica set;
-`npm run test:isolated` runs the existing 117 checks in another temporary
-database, including literal-code checks with console email. Neither reads live
-credentials or touches Atlas. `test:spaces -- --serve` keeps disposable fixture
-data on :4010 for the :5175 browser preview documented there.
+**Shapes — floors, rooms and zones are not only rectangles.** An L-shaped
+floor's missing corner used to read as floor, and an L-shaped room had to be
+two rooms that booked separately. A shape is now a SET OF GRID CELLS, stored
+as a short canonical list of rectangles: `Floor.shape.areas` (the cells that
+ARE the floor), and `areas` on a room level and a zone, each beside the old
+`bounds`, kept as their bounding box. Absent or empty means what it always
+meant (the whole grid; the one bounds rectangle), so **nothing was
+migrated** — legacy documents read and behave as before, asserted with the
+fields unset in the database. The geometry lives once in `lib/cells.js`,
+byte-identical in `server/` and `client/` (the geometry suite fails if they
+drift). Rules, all server-side: everything placed sits inside the floor's
+outline, not just its grid; a reshape or a smaller grid is refused while
+anything would be left outside, naming what ("1 piece and the room
+“Commons” are in the part you're removing", ids in `outside`); a smaller
+grid trims a shaped outline; two rooms may not share one cell; a room may
+not cut through a piece; membership is containment in the union, so a
+whole-room booking covers every area of every level. Zone and label writes
+moved inside `withSpaceTransaction` with this work — outside it, a zone
+placed in a corner being cut away could commit beside the cut, and the
+suite's race check fails every time against the old writes. Editing: the
+**Shape** tool (Add/Cut area, Undo, Reset to rectangle, Save, refusals
+inline with the map flagging what is in the way), the outline sketch in
+**Add floor**, **Add to room / Cut from room** in room settings, the same
+for zones from the zones list; drawn rooms and zones keep only floor cells,
+so a box across an L's missing corner gives an L-shaped room. Out of scope:
+curves and diagonals (they would be staircases of cells), and the portal
+configurator, which still describes rectangular floors only.
+
+SpaceMap now resolves clicks BY CELL on the `<svg>` rather than per drawn
+element. Before, a room's or zone's fill sat over the grid and swallowed the
+click, so the Place tool could not put a piece inside a room by clicking —
+reproduced against main's SpaceMap, not theorised. Pieces stop their own
+clicks so furniture is never mistaken for the cell beneath it.
+
+`npm run test:spaces` runs 52 geometry checks (`tests/cells.test.mjs`, alone
+as `npm run test:cells`) and then 110 named spatial checks in a temporary
+replica set; `npm run test:isolated` runs the existing 117 checks in another
+temporary database, including literal-code checks with console email.
+Neither reads live credentials or touches Atlas. `test:spaces -- --serve`
+keeps disposable fixture data on :4010 (`--port=<n>` when another worktree's
+preview holds it) for the :5175 browser preview documented there.
 
 Members read the map as building › floor › room: a breadcrumb, a building
 switcher (only when there is more than one), floor tabs, a row of the
@@ -614,7 +651,7 @@ Who may do what to the map — enforced on the server, mirrored in the UI:
 | Reserve, check in/out | ✅ | ✅ | ✅ |
 | Change a unit's availability / out-of-service | — | ✅ | ✅ |
 | Place & remove pieces, zones, labels | — | — | ✅ |
-| Add / rename / resize / delete floors | — | — | ✅ |
+| Add / rename / resize / reshape / delete floors | — | — | ✅ |
 | Staff management, org settings, closures | — | — | ✅ |
 
 **Cross-organization isolation.** The portal provisions a deployment per

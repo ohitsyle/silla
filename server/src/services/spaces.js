@@ -6,11 +6,15 @@
  * copies would drift apart:
  *
  *   withSpaceTransaction   the concurrency guard — read its comment first
- *   geometry               intersects / contains / pieceBounds
+ *   pieces                 the cells a placed piece covers
  *   rooms                  which room a piece sits in, what a room holds,
  *                          and how a room's lock is shown on its contents
+ *
+ * Shapes themselves (a room level, a zone, a floor's outline, each a set
+ * of grid cells) are lib/cells.js, the one geometry the client shares.
  */
 import mongoose from "mongoose";
+import { contains, plainAreas, regionAreas } from "../lib/cells.js";
 import Organization from "../models/Organization.js";
 import Room from "../models/Room.js";
 import Resource from "../models/Resource.js";
@@ -102,21 +106,12 @@ function pause(attempt) {
   return new Promise((resolve) => setTimeout(resolve, Math.random() * ceiling));
 }
 
-/* ──────────────────────────────── geometry ──────────────────────────────── */
-// Rectangles are { col, row, w, h } in whole grid cells (spec §12).
+/* ──────────────────────────────── pieces ──────────────────────────────── */
 
-/** True when the two rectangles share at least one cell. */
-export const intersects = (a, b) =>
-  a.col < b.col + b.w && a.col + a.w > b.col && a.row < b.row + b.h && a.row + a.h > b.row;
-
-/** True when `inner` lies entirely inside `outer`; touching edges count as inside. */
-export const contains = (outer, inner) =>
-  inner.col >= outer.col &&
-  inner.row >= outer.row &&
-  inner.col + inner.w <= outer.col + outer.w &&
-  inner.row + inner.h <= outer.row + outer.h;
-
-/** The cells a placed piece covers: its position plus its type's footprint. */
+/**
+ * The cells a placed piece covers, as one rectangle: its position plus its
+ * type's footprint (spec §8: fixed footprints, whole cells, no rotation).
+ */
 export function pieceBounds(resource, type) {
   const { col, row } = resource.position;
   const { w, h } = type?.footprint || { w: 1, h: 1 };
@@ -130,7 +125,9 @@ export const levelOn = (room, floorId) =>
   room.levels.find((level) => String(level.floor) === String(floorId)) || null;
 
 /**
- * True when a piece sits wholly inside one of the room's levels.
+ * True when a piece sits wholly inside the room's shape on the piece's
+ * floor: every cell of its footprint is one of the level's cells. For an
+ * L-shaped room that is either arm, as the room is the union of them.
  *
  * Membership is DERIVED from containment, never stored: there is no second
  * list of "what is in this room" to keep in step with the map, and a
@@ -139,10 +136,14 @@ export const levelOn = (room, floorId) =>
  */
 export function roomHolds(room, piece, type) {
   const level = levelOn(room, piece.floor);
-  return Boolean(level) && contains(level.bounds, pieceBounds(piece, type));
+  return Boolean(level) && contains(regionAreas(level), pieceBounds(piece, type));
 }
 
-/** A room as the API returns it. */
+/**
+ * A room as the API returns it. Each level carries `areas`, its shape, and
+ * `bounds`, their bounding box; a level written before shapes reports its
+ * one bounds as its one area, so a reader only ever needs `areas`.
+ */
 export function shapeRoom(room) {
   return {
     id: String(room._id),
@@ -153,7 +154,8 @@ export function shapeRoom(room) {
     levels: room.levels.map((level) => ({
       floorId: String(level.floor),
       name: level.name,
-      bounds: { col: level.bounds.col, row: level.bounds.row, w: level.bounds.w, h: level.bounds.h },
+      bounds: plainAreas([level.bounds])[0],
+      areas: regionAreas(level),
     })),
   };
 }
