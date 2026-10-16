@@ -9,6 +9,7 @@ import { announceUnitStatus } from "../services/reservations/index.js";
 // Every state change below is conditional on the state the job read: the
 // holder may have checked in, out or cancelled since. See lifecycle.js.
 import { claimReminder, closeOut, moveReservation } from "../services/reservations/lifecycle.js";
+import { hasFeature } from "../services/entitlements.js";
 import { sendEmail } from "../services/email/index.js";
 import {
   closureCancelledEmail,
@@ -251,10 +252,15 @@ export async function sendStartingSoonReminders() {
   });
 
   for (const reservation of upcoming) {
+    const org = await loadOrg(reservation.organization);
+    // Reminder emails are a plan feature (emailReminders). Checked BEFORE
+    // the claim, so a skipped reminder is not marked sent: remindedAt
+    // records a reminder that went out, and an organization that gains
+    // the feature inside the lead window should still get this one.
+    if (org && !hasFeature(org, "emailReminders")) continue;
     // Claimed before sending: never twice, and never for a booking
     // cancelled since this batch was read.
     if (!(await claimReminder(reservation, now))) continue;
-    const org = await loadOrg(reservation.organization);
     const member = await User.findById(reservation.member);
     if (member && org) {
       sendEmail(

@@ -22,12 +22,60 @@ import { sendEmail } from "../services/email/index.js";
 import { gracePeriodChangedEmail, staffOnboardingEmail } from "../services/email/templates.js";
 import { generateVerificationCode } from "../lib/identity.js";
 import { emitOrgNotice } from "../services/realtime.js";
+import { FEATURES, LIMITS } from "../lib/plans.js";
+import {
+  assertFeature,
+  assertWithinLimit,
+  hasFeature,
+  isOperational,
+  limitOf,
+  publicEntitlements,
+  requireFeature,
+  usageOf,
+} from "../services/entitlements.js";
 
 const router = Router();
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 // Spec §14: the admin surface is staff-and-above, desktop-only.
 router.use(requireAuth, requireRole("staff", "superadmin"));
+
+/* ═══════════════════════ Plan & usage ═══════════════════════ */
+
+/**
+ * GET /api/admin/plan
+ *
+ * What this organization's plan allows and how much of it is in use —
+ * the console's "Plan & usage" page, and what the staff screen reads to
+ * offer an upgrade prompt instead of a Create button that would fail.
+ *
+ * `limits` and `features` are the SERVER's reading of the snapshot
+ * (services/entitlements.js is its only interpreter), so the page never
+ * re-derives a rule and can never disagree with what is enforced.
+ */
+router.get(
+  "/plan",
+  asyncHandler(async (req, res) => {
+    const org = await Organization.findById(req.user.organizationId).select("name entitlements terminology").lean();
+    if (!org) return res.status(404).json({ error: "Organization not found" });
+    const usage = await usageOf(org._id);
+    res.json({
+      entitlements: publicEntitlements(org),
+      operational: isOperational(org),
+      usage,
+      limits: Object.entries(LIMITS).map(([key, label]) => ({ key, label, max: limitOf(org, key), used: usage[key] })),
+      features: Object.entries(FEATURES).map(([key, label]) => ({ key, label, included: hasFeature(org, key) })),
+    });
+  })
+);
+
+/**
+ * Which limit an account counts against while it exists: active members
+ * against `members`, active staff and superadmins against `staff`
+ * (the same rule services/entitlements.js counts with), and a
+ * deactivated account against nothing.
+ */
+const countsAgainst = ({ role, active }) => (active === false ? null : role === "member" ? "members" : "staff");
 
 /* ═══════════════════════ ADM-1 — Dashboard ═══════════════════════ */
 
@@ -298,7 +346,12 @@ router.get(
   "/members/:id/history",
   asyncHandler(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid member id" });
-    const history = await Reservation.find({ member: req.params.id }).sort({ startTime: -1 }).limit(100);
+    // Scoped to the caller's organization in the QUERY: a bare member id
+    // let staff of one organization read another's member history once
+    // more than one organization shared this database.
+    const history = await Reservation.find({ member: req.params.id, organization: req.user.organizationId })
+      .sort({ startTime: -1 })
+      .limit(100);
     res.json({
       history: history.map((r) => ({
         id: r._id.toString(),
@@ -424,6 +477,10 @@ router.post(
       return res.status(409).json({ error: "That email address is already in use." });
     }
 
+    // The plan's staff cap (PLAN_LIMIT). Checked last, immediately before
+    // the create, so a typo or a duplicate is reported as what it is.
+    await assertWithinLimit(req.user.organizationId, "staff");
+
     const temporaryPin = generateVerificationCode();
     const user = await User.create({
       organization: req.user.organizationId,
@@ -477,12 +534,20 @@ router.patch(
       return res.status(403).json({ error: "You cannot demote or deactivate yourself." });
     }
 
-    if (role) {
-      if (!["staff", "superadmin"].includes(role)) {
-        return res.status(400).json({ error: "Role must be staff or superadmin." });
-      }
-      target.role = role;
+    if (role && !["staff", "superadmin"].includes(role)) {
+      return res.status(400).json({ error: "Role must be staff or superadmin." });
     }
+
+    // Reactivating an account, or promoting a member, brings an account
+    // back under a plan limit just as creating one does — otherwise the
+    // staff cap could be walked around by deactivating and reactivating.
+    // A downgrade still takes nothing away: only the change that would
+    // ADD to a count is refused.
+    const before = countsAgainst(target);
+    const after = countsAgainst({ role: role || target.role, active: active === undefined ? target.active : Boolean(active) });
+    if (after && after !== before) await assertWithinLimit(req.user.organizationId, after);
+
+    if (role) target.role = role;
     if (active !== undefined) target.active = Boolean(active);
     await target.save();
 
@@ -491,6 +556,29 @@ router.patch(
 );
 
 /* ═══════════ ADM-5 — Settings (superadmin only) ═══════════ */
+
+const BRANDING_GROUPS = {
+  surface: ["page", "pageEnd", "card", "panel", "line"],
+  ink: ["primary", "secondary", "muted"],
+  states: ["available", "reserved", "occupied", "unavailable", "overstay"],
+};
+
+/**
+ * Whether applying `patch` the way PATCH /settings does (a shallow merge:
+ * a group that is sent replaces the whole group) would change any colour
+ * or the logo. Compared value by value, case- and blank-insensitively, so
+ * "#ffd41c" and "#FFD41C" are the same colour and unset is unset.
+ */
+function brandingWouldChange(current, patch) {
+  if (!patch || typeof patch !== "object") return false;
+  const next = { ...current, ...patch };
+  const norm = (v) => (v === undefined || v === null || String(v).trim() === "" ? null : String(v).trim().toLowerCase());
+  const differs = (a, b) => norm(a) !== norm(b);
+  if (["primaryColor", "accentTextColor", "logoUrl"].some((key) => differs(current?.[key], next[key]))) return true;
+  return Object.entries(BRANDING_GROUPS).some(([group, keys]) =>
+    keys.some((key) => differs(current?.[group]?.[key], next[group]?.[key]))
+  );
+}
 
 router.get(
   "/settings",
@@ -536,6 +624,15 @@ router.patch(
     if (!org) return res.status(404).json({ error: "Organization not found" });
 
     const { status, policy, branding, terminology, identity, termsOfServiceText, name } = req.body || {};
+
+    // Custom colours and logo are a plan feature (customBranding). Only an
+    // actual CHANGE is refused, and it is checked before anything else is
+    // touched: a form may send the branding it was given straight back,
+    // and an organization downgraded after setting its colours keeps them
+    // — a downgrade never takes anything away.
+    if (branding && brandingWouldChange(org.branding.toObject(), branding)) {
+      await assertFeature(org, "customBranding");
+    }
 
     if (status) {
       if (!["open", "limited", "closed"].includes(status)) {
@@ -653,9 +750,14 @@ router.delete(
 /**
  * GET /api/admin/reports?days=30
  * "Peak hours, average occupancy, no-show / overstay rate."
+ *
+ * Reports and the CSV export are a plan feature (`reports`): a plan
+ * without it answers PLAN_FEATURE here, and the console shows an upgrade
+ * prompt instead of a page that fails.
  */
 router.get(
   "/reports",
+  requireFeature("reports"),
   asyncHandler(async (req, res) => {
     const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 365);
     const since = new Date(Date.now() - days * 86_400_000);
@@ -703,10 +805,12 @@ router.get(
 
 /**
  * GET /api/admin/export?days=30
- * ADM-5 — "manual filtered export". CSV, generated on demand.
+ * ADM-5 — "manual filtered export". CSV, generated on demand. Part of
+ * the `reports` plan feature, like the page it is exported from.
  */
 router.get(
   "/export",
+  requireFeature("reports"),
   asyncHandler(async (req, res) => {
     const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 365);
     const since = new Date(Date.now() - days * 86_400_000);

@@ -184,3 +184,24 @@ export function readableInkFor(background) {
   }
   return `rgb(${Math.round(r + (255 - r) * 0.88)} ${Math.round(g + (255 - g) * 0.88)} ${Math.round(b + (255 - b) * 0.88)})`;
 }
+
+/**
+ * WCAG contrast ratio between two colours, 1 to 21 — what the branding
+ * settings check before saving an accent and the text drawn on it.
+ * Accepts anything toRgbChannels does; null when either is unreadable.
+ */
+export function contrastRatio(a, b) {
+  const luminance = (value) => {
+    const channels = toRgbChannels(value);
+    if (!channels) return null;
+    const [r, g, bl] = channels.split(/\s+/).map(Number).map((c) => {
+      const s = c / 255;
+      return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+  };
+  const la = luminance(a);
+  const lb = luminance(b);
+  if (la === null || lb === null) return null;
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}

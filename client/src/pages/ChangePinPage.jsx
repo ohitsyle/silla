@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Navigate, useNavigate } from "react-router-dom";
+import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { KeyRound } from "lucide-react";
 import { api } from "../lib/api.js";
 import { useAuth } from "../lib/AuthContext.jsx";
@@ -12,32 +12,49 @@ import { Button, Card, Loading, Notice, PinField } from "../components/ui/index.
  *
  * Provisioned staff and members whose PIN was reset by staff arrive here
  * with a temporary PIN they must replace before anything else works.
+ *
+ * Save is never disabled. What is wrong is said when it is pressed, next
+ * to the field it is about — a greyed-out button explains nothing — and
+ * from then on each message clears as soon as its field is put right.
  */
 export default function ChangePinPage() {
   const { user, booting, isAuthenticated, refresh } = useAuth();
   const navigate = useNavigate();
+  const from = useLocation().state?.from;
 
   const [currentPin, setCurrentPin] = useState("");
   const [newPin, setNewPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
+  const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
 
   if (booting) return <Loading className="min-h-screen" />;
   if (!isAuthenticated) return <Navigate to="/login" replace />;
 
-  const mismatch = confirmPin.length === 6 && newPin !== confirmPin;
-  const sameAsOld = newPin.length === 6 && newPin === currentPin;
   const forced = Boolean(user?.mustChangePin);
+  const problems = {
+    currentPin: currentPin.length !== 6 ? `Enter your ${forced ? "temporary" : "current"} 6-digit PIN.` : null,
+    newPin:
+      newPin.length !== 6
+        ? "Choose a 6-digit PIN."
+        : newPin === currentPin
+          ? "Choose a PIN different from the current one."
+          : null,
+    confirmPin: newPin.length === 6 && confirmPin !== newPin ? "The two PINs don't match." : null,
+  };
+  const shown = (field) => (submitted ? problems[field] || undefined : undefined);
 
   const submit = async (e) => {
     e.preventDefault();
-    setBusy(true);
+    setSubmitted(true);
     setError(null);
+    if (Object.values(problems).some(Boolean)) return;
+    setBusy(true);
     try {
       await api.changePin(currentPin, newPin);
       const fresh = await refresh?.();
-      navigate(fresh?.requiresTermsAcceptance ? "/terms" : "/map", { replace: true });
+      navigate(fresh?.requiresTermsAcceptance ? "/terms" : from || "/map", { replace: true, state: { from } });
     } catch (err) {
       setError(err.message);
       setBusy(false);
@@ -54,40 +71,28 @@ export default function ChangePinPage() {
           : "Pick a new 6-digit PIN."
       }
     >
-      <Card>
-        <form onSubmit={submit} className="space-y-4">
+      <Card elevation="floating">
+        <form onSubmit={submit} noValidate className="space-y-4">
           <PinField
             label={forced ? "Temporary PIN" : "Current PIN"}
             name="currentPin"
             autoFocus
             value={currentPin}
             onChange={setCurrentPin}
+            error={shown("currentPin")}
           />
-          <PinField
-            label="New PIN"
-            name="newPin"
-            value={newPin}
-            onChange={setNewPin}
-            error={sameAsOld ? "Must be different from your current PIN" : undefined}
-          />
+          <PinField label="New PIN" name="newPin" value={newPin} onChange={setNewPin} error={shown("newPin")} />
           <PinField
             label="Confirm new PIN"
             name="confirmPin"
             value={confirmPin}
             onChange={setConfirmPin}
-            error={mismatch ? "PINs don't match" : undefined}
+            error={shown("confirmPin")}
           />
 
           {error && <Notice tone="error">{error}</Notice>}
 
-          <Button
-            type="submit"
-            variant="primary"
-            size="lg"
-            loading={busy}
-            disabled={newPin.length !== 6 || newPin !== confirmPin || currentPin.length !== 6 || sameAsOld}
-            className="w-full"
-          >
+          <Button type="submit" variant="primary" size="lg" loading={busy} className="w-full">
             Save PIN
           </Button>
         </form>

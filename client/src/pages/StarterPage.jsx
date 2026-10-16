@@ -117,7 +117,7 @@ function ActionCard({ to, icon: Icon, title, body, primary }) {
 }
 
 export default function StarterPage() {
-  const { org, error } = useOrg();
+  const { org, error, entitlements } = useOrg();
   const { user, isAuthenticated } = useAuth();
   const navigate = useNavigate();
   const availability = useAvailability(org?.id || org?._id);
@@ -153,6 +153,8 @@ export default function StarterPage() {
   const hours = org.policy?.operatingHours;
   const isStaff = user?.role === "staff" || user?.role === "superadmin";
   const { loading, open, total, breakdown, preview } = availability;
+  // Paused or ended: the map is still worth opening, booking is not.
+  const paused = !entitlements.operational;
 
   return (
     <Page>
@@ -161,7 +163,9 @@ export default function StarterPage() {
         <p className="mt-2 text-ink-secondary">
           {isAuthenticated
             ? `Welcome back, ${user.firstName}.`
-            : `Find ${article(resourceNoun)} ${resourceNoun}, or check in at the door.`}
+            : entitlements.hasFeature("kiosk")
+              ? `Find ${article(resourceNoun)} ${resourceNoun}, or check in at the door.`
+              : `Find ${article(resourceNoun)} ${resourceNoun} and see what's free right now.`}
         </p>
       </motion.div>
 
@@ -249,8 +253,14 @@ export default function StarterPage() {
             to="/map"
             icon={MapIcon}
             primary
-            title={`Find ${article(resourceNoun)} ${resourceNoun}`}
-            body={`See the live floor plan and reserve ${article(resourceNoun)} ${resourceNoun} for later.`}
+            title={paused ? "See the floor plan" : `Find ${article(resourceNoun)} ${resourceNoun}`}
+            body={
+              paused
+                ? entitlements.status === "cancelled"
+                  ? "What's free and what's in use, live. Booking has closed."
+                  : "What's free and what's in use, live. Booking is paused for now."
+                : `See the live floor plan and reserve ${article(resourceNoun)} ${resourceNoun} for later.`
+            }
           />
         ) : (
           <ActionCard
@@ -262,12 +272,14 @@ export default function StarterPage() {
           />
         )}
 
-        <ActionCard
-          to="/kiosk"
-          icon={ContactRound}
-          title="Check in at the kiosk"
-          body={`Tap a card to check in, check out, or enrol a new ${memberNoun} on the spot.`}
-        />
+        {!paused && entitlements.hasFeature("kiosk") && (
+          <ActionCard
+            to="/kiosk"
+            icon={ContactRound}
+            title="Check in at the kiosk"
+            body={`Tap a card to check in, check out, or enrol a new ${memberNoun} on the spot.`}
+          />
+        )}
 
         {isStaff && (
           <ActionCard

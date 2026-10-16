@@ -70,6 +70,41 @@ under SHOULD FIX remain: the onboarding guards are client-side only, and
 the seeded `admin@demo.test` / `123456` is now a live superadmin on a
 public URL.
 
+### Client addresses behind CloudFront (rate limits)
+
+Every per-IP rate limit depends on knowing the visitor's address, and as
+first deployed neither API did:
+
+- **The product API had no `trust proxy`**, so every request arrived from
+  nginx's `127.0.0.1` and each "per-IP" limit was one bucket for the whole
+  world — thirty kiosk taps a minute across every organization.
+- **nginx trusted `X-Forwarded-For` from anyone** (`set_real_ip_from
+  0.0.0.0/0`, `real_ip_recursive on`), which resolves to the leftmost
+  entry — the one the visitor writes themselves, because CloudFront
+  appends to whatever header arrives. The vendor API keyed its limits on
+  that, so a forged header stepped around all of them.
+
+Now nginx does no address rewriting: it appends what it saw (CloudFront's
+edge) and passes the header on. Both Express apps trust exactly the hops
+in front of them — `TRUST_PROXY_HOPS`, default `2` (CloudFront, then
+nginx) — so `req.ip` is the address CloudFront connected from, and
+anything further left in the header is ignored. Set `TRUST_PROXY_HOPS=0`
+for a process that takes requests directly with no proxy in front.
+
+**This only holds while nobody can reach nginx except through
+CloudFront.** Someone connecting to the origin directly can write any
+`X-Forwarded-For` they like and be counted as a different visitor every
+request. The origin's port 80 should therefore accept only CloudFront:
+in security group `sg-03be50d24f6d69c1c`, replace the `0.0.0.0/0` rule
+on port 80 with one whose source is the AWS-managed prefix list
+**`com.amazonaws.global.cloudfront.origin-facing`**. Nothing else needs
+port 80 (SSH is 22; the vendor reaches the product API on 127.0.0.1).
+*Not yet applied — a console change, recorded here rather than made.*
+
+nginx also refuses `/api/internal/` outright now. The control plane calls
+the product on `127.0.0.1:4000`, never through nginx, and every internal
+request is HMAC-signed; the refusal is defence in depth.
+
 ## How it got here
 
 **Not deployed.** No AWS resource has been created. Nothing is billing.

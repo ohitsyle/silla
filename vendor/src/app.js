@@ -22,11 +22,12 @@ import auditRoutes from "./routes/audit.routes.js";
 export function createApp() {
   const app = express();
 
-  // Behind nginx (and CloudFront) in production. Trusting only the
-  // loopback hop makes req.ip the address nginx reports, which is what
-  // the rate limiters key on — without it every visitor is 127.0.0.1 and
-  // one person's failed logins lock out everyone.
-  app.set("trust proxy", "loopback");
+  // Behind CloudFront and nginx in production: trust exactly those two
+  // hops (TRUST_PROXY_HOPS, default 2) so req.ip is the visitor CloudFront
+  // saw — what the rate limiters key on. Trusting only loopback took the
+  // address nginx reported, and nginx used to take it from a header any
+  // visitor could forge. See server/src/app.js and deploy/nginx.conf.
+  app.set("trust proxy", /^\d+$/.test(process.env.TRUST_PROXY_HOPS || "") ? Number(process.env.TRUST_PROXY_HOPS) : 2);
 
   app.use(
     cors({

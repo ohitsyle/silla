@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { RefreshCw } from "lucide-react";
+import { CirclePause, RefreshCw } from "lucide-react";
 import { api } from "../lib/api.js";
 import { useOrg } from "../lib/OrgContext.jsx";
 import { useFloorSocket } from "../lib/useFloorSocket.js";
@@ -33,7 +33,10 @@ import { Button, Notice, Page, Skeleton } from "../components/ui/index.jsx";
  * one REST read, but MAP-2's Socket.io stream only ever touches `status`.
  */
 export default function MapPage() {
-  const { org, organizationId, error: orgError } = useOrg();
+  const { org, organizationId, error: orgError, entitlements } = useOrg();
+  // A suspended or cancelled organization is read-only: the map stays,
+  // the booking flow does not (docs/control-plane.md §2).
+  const paused = !entitlements.operational;
   const { floorId } = useParams();
   const [search] = useSearchParams();
   const roomId = search.get("room");
@@ -361,6 +364,7 @@ export default function MapPage() {
               resourceNoun={resourceNoun}
               policy={org?.policy}
               compact={Boolean(selection || focusedRoom)}
+              readOnly={paused}
               onCancelled={() => {
                 loadMine();
                 loadLayout(floorId, { silent: true });
@@ -368,7 +372,9 @@ export default function MapPage() {
             />
           )}
 
-          {target ? (
+          {paused && (target || focusedRoom) ? (
+            <BookingPaused orgName={org?.name} resourceNoun={resourceNoun} ended={entitlements.status === "cancelled"} />
+          ) : target ? (
             <ReservePanel
               key={`${target.resourceId}:${target.unitLabel}`}
               target={target}
@@ -398,6 +404,31 @@ export default function MapPage() {
           ) : null}
         </div>
       </Inspector>
+    </div>
+  );
+}
+
+/**
+ * What the panel says instead of a booking form while the organization is
+ * paused. Every booking would be refused (the server's read-only guard),
+ * so offering the form — times, a PIN, a Reserve button — would only lead
+ * someone through three steps to an error. The map beside it still works.
+ */
+function BookingPaused({ orgName, resourceNoun, ended = false }) {
+  return (
+    <div className="rounded-lg border border-line/10 bg-bg-panel/60 p-4">
+      <div className="flex items-start gap-3">
+        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-line/10 text-ink-secondary">
+          <CirclePause size={18} />
+        </span>
+        <div className="min-w-0">
+          <p className="font-medium">{ended ? "Booking has closed" : "Booking is paused"}</p>
+          <p className="mt-1 text-sm leading-relaxed text-ink-secondary">
+            {orgName || "This organization"} {ended ? "is no longer taking bookings" : "isn't taking bookings right now"}.
+            The map still shows which {resourceNoun}s are free and which are in use.
+          </p>
+        </div>
+      </div>
     </div>
   );
 }

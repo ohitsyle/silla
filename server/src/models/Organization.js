@@ -51,6 +51,19 @@ const organizationSchema = new mongoose.Schema(
       syncedAt: { type: Date, default: null },
     },
 
+    /**
+     * Which order this deployment was provisioned for, when SILLA's
+     * control plane created it (services/provisioning.js). One order, one
+     * organization: a provisioning call that timed out on the vendor's
+     * side and was retried must not mint a second deployment. No defaults
+     * on purpose — the unique index below is sparse, and a stored null
+     * would collide with every other organization's null.
+     */
+    provisioning: {
+      orderId: { type: String, trim: true },
+      provisionedAt: { type: Date },
+    },
+
     // ---- Organization identity / branding (spec §16) ----
     //
     // The full design-system palette, not just an accent. Every field is
@@ -153,5 +166,7 @@ const organizationSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+organizationSchema.index({ "provisioning.orderId": 1 }, { unique: true, sparse: true });
 
 export default mongoose.model("Organization", organizationSchema);

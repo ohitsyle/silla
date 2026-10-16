@@ -54,6 +54,8 @@ router.get("/:id/config", async (req, res, next) => {
 
 router.get("/:id/terms", async (req, res, next) => {
   try {
+    // A malformed id is "not found", not a cast error surfacing as a 500.
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Organization not found" });
     const org = await Organization.findById(req.params.id).select("name termsOfServiceText");
     if (!org) return res.status(404).json({ error: "Organization not found" });
     res.json({

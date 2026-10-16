@@ -55,6 +55,12 @@ for (const [key, profile] of Object.entries(VERTICAL_PROFILES)) {
       temporaryPin: "918273",
       deploymentUrl: "https://reserve.example.org",
     }),
+    "11-owner-access-reset": t.ownerAccessResetEmail({
+      org,
+      user: { ...user, role: "superadmin" },
+      temporaryPin: "507316",
+      deploymentUrl: "https://reserve.example.org",
+    }),
   };
 
   for (const [name, mail] of Object.entries(samples)) {

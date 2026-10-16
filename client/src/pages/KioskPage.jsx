@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  CircleCheck, ContactRound, CreditCard, DoorOpen, LoaderCircle, MailCheck,
+  ArrowRight, CircleCheck, CirclePause, CircleSlash, ContactRound, CreditCard, DoorOpen, LoaderCircle, MailCheck,
   RotateCcw, TriangleAlert, UserX,
 } from "lucide-react";
 import { api } from "../lib/api.js";
 import { useOrg } from "../lib/OrgContext.jsx";
+import { useAuth } from "../lib/AuthContext.jsx";
 import { resolveStatePalette } from "../theme/applyOrgTheme.js";
 import { stepSwap } from "../lib/motion.js";
 import SpaceMap from "../components/SpaceMap.jsx";
@@ -45,8 +47,22 @@ const STEP = {
 /** Kiosks are shared — a result screen must not sit there for the next person. */
 const AUTO_RESET_MS = 12_000;
 
+/**
+ * What a member at the kiosk is told when the plan refuses something. The
+ * server's sentence ("Your plan includes 40 employees… ask SILLA") is
+ * written for an administrator; the person at the kiosk can do nothing
+ * about a plan, only find someone who can.
+ */
+function kioskReason(err, memberNoun) {
+  if (err?.code === "PLAN_LIMIT" || err?.code === "PLAN_FEATURE") {
+    return `New ${memberNoun}s can't be registered here right now. Please ask a member of staff.`;
+  }
+  return err?.message;
+}
+
 export default function KioskPage() {
-  const { org, organizationId } = useOrg();
+  const { org, organizationId, entitlements, reload } = useOrg();
+  const { user } = useAuth();
 
   const [requirements, setRequirements] = useState(null);
   const [step, setStep] = useState(STEP.TAP);
@@ -98,7 +114,15 @@ export default function KioskPage() {
 
         switch (r.next) {
           case "register": // ID-1
-            setStep(STEP.DETAILS);
+            // Asked at the tap, so nobody types their name, ID, email and
+            // PIN into a form the server would then refuse: registration
+            // can be switched off, or the plan's member limit reached.
+            if (r.registration?.open === false) {
+              setResult({ kind: "registration-closed", reason: r.registration.code });
+              setStep(STEP.RESULT);
+            } else {
+              setStep(STEP.DETAILS);
+            }
             break;
           case "verify": // ID-2 — resume, don't restart
             setRegistration({ registrationId: r.registrationId, email: r.email });
@@ -129,6 +153,12 @@ export default function KioskPage() {
         if (err.body?.next === "see-staff") {
           setResult({ kind: "see-staff" });
           setStep(STEP.RESULT);
+        } else if (err.code === "ORG_SUSPENDED" || err.code === "PLAN_FEATURE") {
+          // Paused, or the kiosk taken off the plan, since this screen
+          // loaded. The server's sentence is for administrators; re-reading
+          // the organization swaps this screen for one written for whoever
+          // is standing at it.
+          reload();
         } else {
           setError(err.message);
         }
@@ -136,8 +166,25 @@ export default function KioskPage() {
         setBusy(false);
       }
     },
-    [organizationId, busy, requirements]
+    [organizationId, busy, requirements, reload]
   );
+
+  // Suspended or cancelled, or a plan without the kiosk: every tap would
+  // be refused, so the kiosk says so instead of inviting one
+  // (docs/control-plane.md §2).
+  if (!entitlements.operational) {
+    return <KioskClosed org={org} ended={entitlements.status === "cancelled"} />;
+  }
+  if (!entitlements.hasFeature("kiosk")) {
+    return (
+      <KioskClosed
+        org={org}
+        notInPlan
+        admin={user?.role === "staff" || user?.role === "superadmin"}
+        resourceNoun={resourceNoun}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen px-6 py-10 max-w-3xl mx-auto text-ink-primary flex flex-col justify-center">
@@ -239,6 +286,63 @@ export default function KioskPage() {
 }
 
 /* ---------------------------------------------------------------- */
+
+/**
+ * The kiosk while it cannot take a tap. Shaped like the tap screen — the
+ * same header, the same large type for reading at arm's length — so a wall
+ * screen reads as a device waiting, not one that has crashed.
+ *
+ *   paused      the organization is suspended. It comes back by itself:
+ *               OrgProvider asks again every minute while paused.
+ *   ended       cancelled: the same screen, without the promise to reopen.
+ *   notInPlan   the plan has no kiosk. Whoever is here is pointed to the
+ *               web sign-in; staff and superadmins also to the plan page,
+ *               since they are the ones who can ask for it.
+ */
+function KioskClosed({ org, notInPlan = false, ended = false, admin = false, resourceNoun = "resource" }) {
+  const name = org?.name || "This organization";
+  return (
+    <div className="min-h-screen px-6 py-10 max-w-3xl mx-auto text-ink-primary flex flex-col justify-center">
+      <header className="flex items-center gap-3 mb-8">
+        <div
+          className="w-11 h-11 rounded-xl flex items-center justify-center"
+          style={{ background: "var(--color-accent)", color: "var(--color-accent-ink)" }}
+        >
+          <ContactRound size={22} />
+        </div>
+        <div className="text-lg font-semibold">{org?.name || "Kiosk"}</div>
+      </header>
+
+      <div className="flex flex-col items-center justify-center text-center py-6 sm:py-10">
+        <div className="w-36 h-36 sm:w-44 sm:h-44 rounded-[2rem] flex items-center justify-center mb-9 bg-bg-panel border border-line/10 text-ink-secondary">
+          {notInPlan ? <CircleSlash size={64} strokeWidth={1.6} /> : <CirclePause size={64} strokeWidth={1.6} />}
+        </div>
+        <h1 className="text-4xl sm:text-5xl font-semibold tracking-tight">
+          {notInPlan ? "Kiosk check-in isn't available" : ended ? "Check-in has closed" : "Check-in is paused"}
+        </h1>
+        <p className="text-lg sm:text-xl text-ink-secondary mt-4 max-w-xl leading-relaxed">
+          {notInPlan
+            ? admin
+              ? "Kiosk check-in and self-registration aren't part of your plan. Ask SILLA to add them."
+              : `${name} doesn't check in at a kiosk. Sign in on the web to book a ${resourceNoun}.`
+            : `${name} ${ended ? "is no longer taking" : "isn't taking"} check-ins or registrations${ended ? "" : " right now"}. Please ask a member of staff.`}
+        </p>
+        {notInPlan ? (
+          <Link
+            to={admin ? "/admin/plan" : "/login"}
+            className="mt-10 inline-flex items-center gap-1.5 text-base font-medium text-ink-secondary
+                       transition-colors duration-fast hover:text-ink-primary"
+          >
+            {admin ? "See plan & usage" : "Sign in"}
+            <ArrowRight size={16} />
+          </Link>
+        ) : ended ? null : (
+          <p className="mt-12 text-sm text-ink-muted">This screen reopens by itself when check-in is back.</p>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function Stepper({ step }) {
   const steps = [
@@ -442,7 +546,7 @@ function DetailsStep({ organizationId, cardUid, requirements, onRegistered, onEr
       });
       onRegistered(data);
     } catch (err) {
-      onError(err.message);
+      onError(kioskReason(err, memberNoun));
       setSubmitting(false);
     }
   };
@@ -710,6 +814,16 @@ function ResultStep({ result, memberNoun, resourceNoun, onReset }) {
       title: "Please see a member of staff",
       body: "This account is deactivated.",
       foot: null,
+    },
+    "registration-closed": {
+      Icon: CircleSlash,
+      tone: "occupied",
+      title: "This card isn't registered yet",
+      body:
+        result?.reason === "REGISTRATION_DISABLED"
+          ? `New ${memberNoun}s are set up by staff here, not at the kiosk.`
+          : `New ${memberNoun}s can't be registered here right now.`,
+      foot: "Please ask a member of staff.",
     },
     unknown: {
       Icon: CircleCheck,

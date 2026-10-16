@@ -1,32 +1,89 @@
+import { adoptLegacyToken, readToken } from "./session.js";
+
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:4000";
 
-async function request(path, options = {}) {
-  const token = localStorage.getItem("silla_token"); // fine for a dev scaffold; revisit for production auth storage
-  const res = await fetch(`${BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(options.headers || {}),
-    },
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    // Carry the status and the response body on the error. The kiosk and
-    // login flows branch on both — a 403 with requiresVerification means
-    // "resume ID-2", a 429 carries retryAfterSeconds, a failed code entry
-    // carries attemptsRemaining. Collapsing all of that into a message
-    // string would make those flows impossible to build correctly.
-    const error = new Error(body.error || `Request failed: ${res.status}`);
-    error.status = res.status;
-    error.body = body;
+/**
+ * The organization this page serves, set once at boot (App.jsx) — one
+ * page load serves exactly one organization. Requests carry THAT
+ * organization's session and no other (lib/session.js).
+ */
+let sessionOrganizationId = null;
+export function bindOrganization(organizationId) {
+  sessionOrganizationId = organizationId ? String(organizationId) : null;
+  adoptLegacyToken(sessionOrganizationId);
+}
+
+/**
+ * Answers that mean this page's picture of the plan is out of date: it
+ * offered something the plan no longer includes, or the organization was
+ * paused since the page loaded. OrgProvider listens for this event and
+ * re-reads the organization, so the banners and upgrade prompts catch up
+ * with the server instead of the next person meeting the same error.
+ * (PLAN_LIMIT is not one: a limit is reached by usage, which the config
+ * does not carry, not by the plan changing.)
+ */
+export const PLAN_CHANGED_EVENT = "silla:plan-changed";
+const STALE_PLAN = new Set(["PLAN_FEATURE", "ORG_SUSPENDED"]);
+
+/**
+ * One request, answered or thrown. A thrown error carries:
+ *
+ *   message  the server's own sentence — written for the person who hit
+ *            it, so screens can show it as it is
+ *   status   the HTTP status (0 when the server could not be reached)
+ *   code     the server's stable code: PLAN_LIMIT, PLAN_FEATURE,
+ *            ORG_SUSPENDED, BUSY, …, or "NETWORK"
+ *   details  everything else the server sent: { limit, max, used },
+ *            { feature }, { retryAfterSeconds }, { attemptsRemaining }, …
+ *   body     the whole answer, as before
+ *
+ * The kiosk and login flows branch on these — a 403 with
+ * requiresVerification means "resume ID-2", a 429 carries
+ * retryAfterSeconds, a failed code entry carries attemptsRemaining.
+ * Collapsing all of that into a message string would make those flows
+ * impossible to build correctly.
+ */
+async function send(path, options = {}) {
+  const token = readToken(sessionOrganizationId);
+  let res;
+  try {
+    res = await fetch(`${BASE_URL}${path}`, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(options.headers || {}),
+      },
+    });
+  } catch {
+    // No answer at all. The browser's own words ("Failed to fetch") mean
+    // nothing to the person reading them.
+    const error = new Error("We couldn't reach the service. Check your connection and try again.");
+    Object.assign(error, { status: 0, code: "NETWORK", details: {}, body: {} });
     throw error;
   }
-  return res.json();
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const { error: message, code = null, ...details } = body;
+    const error = new Error(message || `Request failed: ${res.status}`);
+    Object.assign(error, { status: res.status, code, details, body });
+    if (STALE_PLAN.has(code) && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent(PLAN_CHANGED_EVENT, { detail: { code } }));
+    }
+    throw error;
+  }
+  return res;
+}
+
+async function request(path, options = {}) {
+  return (await send(path, options)).json();
 }
 
 export const api = {
   getOrgConfig: (orgId) => request(`/api/organizations/${orgId}/config`),
+  // How the app finds its organization from the address it was opened at
+  // (<product>/<slug>/…). The same config, found by slug instead of id.
+  getOrgConfigBySlug: (slug) => request(`/api/organizations/by-slug/${encodeURIComponent(slug)}/config`),
   login: (organizationId, email, pin) =>
     request(`/api/auth/login`, { method: "POST", body: JSON.stringify({ organizationId, email, pin }) }),
 
@@ -82,6 +139,8 @@ export const api = {
     request(`/api/auth/reset-pin`, { method: "POST", body: JSON.stringify({ organizationId, email, code, newPin }) }),
 
   // ADM-1..ADM-5, RPT-1 — the admin surface.
+  // What the plan allows and how much of it is in use (staff and superadmin).
+  adminPlan: () => request(`/api/admin/plan`),
   adminDashboard: (floorId) => request(`/api/admin/dashboard${floorId ? `?floorId=${floorId}` : ""}`),
   adminResources: (floorId) => request(`/api/admin/resources${floorId ? `?floorId=${floorId}` : ""}`),
   adminResourceHistory: (id) => request(`/api/admin/resources/${id}/history`),
@@ -106,7 +165,17 @@ export const api = {
   adminCreateClosure: (payload) => request(`/api/admin/closures`, { method: "POST", body: JSON.stringify(payload) }),
   adminDeleteClosure: (id) => request(`/api/admin/closures/${id}`, { method: "DELETE" }),
   adminReports: (days = 30) => request(`/api/admin/reports?days=${days}`),
-  adminExportUrl: (days = 30) => `${BASE_URL}/api/admin/export?days=${days}`,
+  /**
+   * The CSV export, fetched WITH the session and handed back as a file.
+   * It used to be a plain link to the API, which a browser follows with
+   * no Authorization header — so every export answered 401 and saved a
+   * scrap of JSON. Fetching it also means a plan without reports answers
+   * with its reason, like every other screen.
+   */
+  adminExport: async (days = 30) => {
+    const res = await send(`/api/admin/export?days=${days}`);
+    return { blob: await res.blob(), filename: `reservations-${days}d.csv` };
+  },
 
   // Floor management — superadmin only: add floors, resize them, and set
   // their outline ({ shape: { areas } }; null resets it to the whole grid).

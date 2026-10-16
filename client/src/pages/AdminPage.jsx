@@ -2,15 +2,16 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
-  BarChart3, CalendarX, ChevronRight, CreditCard, Download, LayoutDashboard, LoaderCircle,
-  Map as MapIcon,
-  Settings as SettingsIcon, ShieldCheck, TriangleAlert, Users, Wrench,
+  BarChart3, CalendarX, ChevronRight, CreditCard, Download, Map as MapIcon, Palette, ShieldCheck, TriangleAlert,
+  Wrench,
 } from "lucide-react";
 import { api } from "../lib/api.js";
 import { DEFAULT_ADMIN_SECTION, sectionsFor } from "../lib/adminSections.js";
 import HourHistogram from "../components/HourHistogram.jsx";
+import PlanUsage from "../components/PlanUsage.jsx";
+import UpgradePrompt from "../components/UpgradePrompt.jsx";
 import SpaceMap from "../components/SpaceMap.jsx";
-import { resolveStatePalette } from "../theme/applyOrgTheme.js";
+import { contrastRatio, resolveStatePalette, toRgbChannels } from "../theme/applyOrgTheme.js";
 import { useOrg } from "../lib/OrgContext.jsx";
 import { useAuth } from "../lib/AuthContext.jsx";
 import {
@@ -71,6 +72,7 @@ export default function AdminPage() {
       {active === "staff" && isSuperadmin && <Staff />}
       {active === "settings" && isSuperadmin && <Settings />}
       {active === "reports" && <Reports />}
+      {active === "plan" && <PlanUsage />}
     </Page>
   );
 }
@@ -323,7 +325,9 @@ function Resources() {
     }
   };
 
-  if (error) return <Notice tone="error">{error}</Notice>;
+  // A failed change (a plan refusal, a paused organization) is said above
+  // the list; only a list that never loaded is replaced by its error.
+  if (error && !groups) return <Notice tone="error">{error}</Notice>;
   if (!groups) return <SkeletonRows count={6} />;
 
   const term = query.trim().toLowerCase();
@@ -359,6 +363,7 @@ function Resources() {
 
   return (
     <div className="space-y-3">
+      {error && <Notice tone="error">{error}</Notice>}
       {floors.length > 1 && (
         <Segmented
           size="sm"
@@ -738,11 +743,23 @@ function Staff() {
   const [form, setForm] = useState({ firstName: "", lastName: "", email: "", role: "staff" });
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
+  /**
+   * The plan's staff limit, { max, used }, counted by the server exactly as
+   * it enforces it (active staff and superadmins). max is null when the
+   * plan sets no limit, which is every unmanaged organization.
+   */
+  const [places, setPlaces] = useState(null);
 
   const load = useCallback(() => {
     api.adminStaff().then((d) => setStaff(d.staff)).catch((e) => setError(e.message));
+    api
+      .adminPlan()
+      .then((plan) => setPlaces(plan.limits.find((limit) => limit.key === "staff") || null))
+      .catch(() => setPlaces(null));
   }, []);
   useEffect(load, [load]);
+
+  const full = places && places.max !== null && places.used >= places.max;
 
   const create = async (e) => {
     e.preventDefault();
@@ -758,6 +775,9 @@ function Staff() {
       load();
     } catch (e2) {
       setError(e2.message);
+      // Someone else took the last place since this page loaded: re-count,
+      // and the form gives way to the explanation.
+      if (e2.code === "PLAN_LIMIT") load();
     }
   };
 
@@ -776,7 +796,31 @@ function Staff() {
       {error && <Notice tone="error">{error}</Notice>}
       {notice && <Notice>{notice}</Notice>}
 
-      <Panel title="Create a staff account">
+      {full ? (
+        // At the limit the form would only collect a name and an email for
+        // the server to refuse, so it gives way to why and what to do.
+        <UpgradePrompt
+          icon={ShieldCheck}
+          title={
+            places.max === 1
+              ? "Your plan includes one staff account, and it's in use"
+              : `All ${places.max} staff accounts on your plan are in use`
+          }
+        >
+          Deactivate an account below to free its place, or ask SILLA to raise the limit. Staff and superadmin
+          accounts both count; deactivated ones don't.
+        </UpgradePrompt>
+      ) : (
+      <Panel
+        title="Create a staff account"
+        action={
+          places?.max != null && (
+            <span className="text-xs tabular-nums text-ink-muted">
+              {places.used} of {places.max} on your plan
+            </span>
+          )
+        }
+      >
         <form onSubmit={create} className="grid sm:grid-cols-5 gap-2 items-end">
           {["firstName", "lastName", "email"].map((field) => (
             <Field
@@ -799,6 +843,7 @@ function Staff() {
           and accept the terms at first sign-in.
         </p>
       </Panel>
+      )}
 
       <Panel title={`${staff.length} account${staff.length === 1 ? "" : "s"}`}>
         <ul className="divide-y divide-line/10">
@@ -910,7 +955,7 @@ function Settings() {
           ]}
         />
         <p className="text-xs text-ink-muted mt-2">
-          "Closed" is enforced against the reservation engine (RES-7) — nobody can book while it's set.
+          While "Closed" is set, nobody can book anything.
         </p>
       </Panel>
 
@@ -927,7 +972,7 @@ function Settings() {
                   operatingHours: { open: f.get("open"), close: f.get("close") },
                 },
               },
-              "Policy saved. Changing the grace period notifies today's reservers (RES-6)."
+              "Policy saved. If the grace period changed, everyone booked for today has been told."
             );
           }}
           className="grid sm:grid-cols-4 gap-3 items-end"
@@ -971,8 +1016,13 @@ function Settings() {
                   variant="ghost"
                   className="border border-line/10"
                   onClick={async () => {
-                    await api.adminDeleteClosure(c.id);
-                    load();
+                    setError(null);
+                    try {
+                      await api.adminDeleteClosure(c.id);
+                      load();
+                    } catch (err) {
+                      setError(err.message);
+                    }
                   }}
                 >
                   Remove
@@ -983,6 +1033,8 @@ function Settings() {
         )}
       </Panel>
 
+      <Branding branding={o.branding} />
+
       <Panel title="White-label configuration">
         <div className="grid sm:grid-cols-3 gap-3 text-sm">
           <KV label="Resource noun" value={o.terminology.resourceNoun} />
@@ -990,34 +1042,279 @@ function Settings() {
           <KV label="Facility label" value={o.terminology.facilityLabel} />
           <KV label="Member ID format" value={o.identity.memberIdFormat} />
           <KV label="Check-in method" value={o.identity.checkInMethod} />
-          <KV label="Accent" value={o.branding.primaryColor} swatch={o.branding.primaryColor} />
         </div>
         <p className="text-xs text-ink-muted mt-3">
-          Every value above came from your provisioning profile. To change your vocabulary, identity
-          format or branding, contact your provider — the whole product follows from these, so they
-          are changed together rather than one at a time.
+          Every value above came from your provisioning profile. To change your vocabulary or identity
+          format, contact your provider — the whole product follows from these, so they are changed
+          together rather than one at a time.
         </p>
       </Panel>
     </div>
   );
 }
 
+/**
+ * The accent colour and the text drawn on it — the two colours every
+ * deployment sets, and the ones a buyer most wants to match their brand.
+ * The rest of the palette (surfaces, ink, the state colours) stays as it
+ * was set up: a bad surface palette can make the whole product illegible,
+ * and that is a conversation, not a colour picker.
+ *
+ * Custom colours are a plan feature (`customBranding`). Without it the
+ * panel shows the colours in use and why they can't be changed here,
+ * instead of pickers whose Save the server would refuse.
+ *
+ * Contrast is checked before saving, never while choosing: the readout is
+ * shown as you go, and only a Save below the bar is refused with a reason.
+ */
+const HEX = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i;
+function toHex(value) {
+  const match = String(value || "").trim().match(HEX);
+  if (!match) return null;
+  const digits = match[1].length === 3 ? [...match[1]].map((c) => c + c).join("") : match[1];
+  return `#${digits.toLowerCase()}`;
+}
+
+function Branding({ branding: loaded }) {
+  const { org, entitlements, reload } = useOrg();
+  // The live config, so a save (which reloads it) is what "changed" is
+  // measured against next — not the settings read from before it.
+  const branding = org?.branding || loaded;
+  const [accent, setAccent] = useState(() => toHex(branding?.primaryColor) || "#22d3ee");
+  const [ink, setInk] = useState(() => toHex(branding?.accentTextColor) || "#04222b");
+  const [error, setError] = useState(null);
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  if (!entitlements.hasFeature("customBranding")) {
+    return (
+      <UpgradePrompt icon={Palette} title="Custom colours aren't included in your plan">
+        <p>
+          {org?.name || "Your organization"} keeps the colours it was set up with. Ask SILLA to add custom colours
+          to your plan to change them here.
+        </p>
+        <p className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs text-ink-muted">
+          <span className="inline-flex items-center gap-1.5">
+            <Swatch color={branding?.primaryColor} />
+            Accent <span className="font-mono text-ink-secondary">{toHex(branding?.primaryColor) || "default"}</span>
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <Swatch color={branding?.accentTextColor} />
+            Text on it <span className="font-mono text-ink-secondary">{toHex(branding?.accentTextColor) || "default"}</span>
+          </span>
+        </p>
+      </UpgradePrompt>
+    );
+  }
+
+  const accentHex = toHex(accent);
+  const inkHex = toHex(ink);
+  const textContrast = accentHex && inkHex ? contrastRatio(accentHex, inkHex) : null;
+  const pageChannels = toRgbChannels(getComputedStyle(document.documentElement).getPropertyValue("--c-bg-page"));
+  const pageContrast = accentHex && pageChannels ? contrastRatio(accentHex, pageChannels) : null;
+  const changed = accentHex !== toHex(branding?.primaryColor) || inkHex !== toHex(branding?.accentTextColor);
+
+  const save = async (e) => {
+    e.preventDefault();
+    setSaved(false);
+    if (!changed && accentHex && inkHex) {
+      setError(null);
+      setSaved(true);
+      return;
+    }
+    if (!accentHex || !inkHex) {
+      setError("Enter each colour as a hex code, like #2dd4bf.");
+      return;
+    }
+    if (textContrast < 4.5) {
+      setError(
+        `Text on the accent would be hard to read (${textContrast.toFixed(1)}:1). Choose a lighter or darker ` +
+          "text colour — it needs at least 4.5:1."
+      );
+      return;
+    }
+    if (pageContrast < 3) {
+      setError(
+        `The accent would barely stand out from the page (${pageContrast.toFixed(1)}:1). Choose a brighter or ` +
+          "deeper accent — it needs at least 3:1."
+      );
+      return;
+    }
+    setError(null);
+    setSaving(true);
+    try {
+      await api.adminUpdateSettings({ branding: { primaryColor: accentHex, accentTextColor: inkHex } });
+      await reload(); // repaints the whole product in the new colours
+      setSaved(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const colourField = (label, value, setValue, name) => (
+    <label className="block">
+      <span className="text-sm font-medium text-ink-secondary">{label}</span>
+      <span className="mt-1.5 flex gap-2">
+        <input
+          type="color"
+          aria-label={`${label} picker`}
+          value={toHex(value) || "#000000"}
+          onChange={(e) => {
+            setValue(e.target.value);
+            setSaved(false);
+          }}
+          className="h-11 w-12 shrink-0 cursor-pointer rounded-md border border-line/10 bg-bg-panel p-1"
+        />
+        <input
+          name={name}
+          value={value}
+          onChange={(e) => {
+            setValue(e.target.value);
+            setSaved(false);
+          }}
+          spellCheck={false}
+          className="h-11 min-w-0 flex-1 rounded-md border border-line/10 bg-bg-panel px-3 font-mono text-ink-primary
+                     outline-none transition-colors duration-fast ease-out focus:border-line/40"
+        />
+      </span>
+    </label>
+  );
+
+  return (
+    <Panel title="Colours" icon={Palette}>
+      <form onSubmit={save} noValidate className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start">
+        <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            {colourField("Accent", accent, setAccent, "accent")}
+            {colourField("Text on the accent", ink, setInk, "accentText")}
+          </div>
+          {error && <Notice tone="error">{error}</Notice>}
+          {saved && <Notice tone="success">Colours saved — everyone sees them from their next page.</Notice>}
+          <div className="flex flex-wrap items-center gap-3">
+            <Button type="submit" variant="primary" loading={saving}>
+              Save colours
+            </Button>
+            <span className="text-xs text-ink-muted">
+              Buttons, highlights and the browser tab icon follow the accent.
+            </span>
+          </div>
+        </div>
+
+        {/* The two colours together, before anyone else sees them. */}
+        <div className="rounded-lg border border-line/10 bg-bg-page p-4">
+          <p className="text-[11px] font-medium uppercase tracking-wider text-ink-muted">Preview</p>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <span
+              className="inline-flex h-10 items-center rounded-md px-4 text-sm font-medium shadow-sm"
+              style={{ background: accentHex || "transparent", color: inkHex || "inherit" }}
+            >
+              Reserve this {org?.terminology?.resourceNoun || "resource"}
+            </span>
+            <span
+              className="grid h-8 w-8 place-items-center rounded-lg text-sm font-bold"
+              style={{ background: accentHex || "transparent", color: inkHex || "inherit" }}
+            >
+              {String(org?.name || "?").trim().charAt(0).toUpperCase()}
+            </span>
+            <span className="text-sm font-medium" style={{ color: accentHex || "inherit" }}>
+              A link in the accent
+            </span>
+          </div>
+          <dl className="mt-4 grid grid-cols-2 gap-3 text-xs">
+            <ContrastReading label="Text on the accent" ratio={textContrast} needed={4.5} />
+            <ContrastReading label="Accent on the page" ratio={pageContrast} needed={3} />
+          </dl>
+        </div>
+      </form>
+    </Panel>
+  );
+}
+
+/** "7.4:1 · reads well" — the figure, and what it means, never colour alone. */
+function ContrastReading({ label, ratio, needed }) {
+  const ok = ratio !== null && ratio >= needed;
+  return (
+    <div>
+      <dt className="text-ink-muted">{label}</dt>
+      <dd className="mt-0.5 tabular-nums text-ink-primary">
+        {ratio === null ? "—" : `${ratio.toFixed(1)}:1`}
+        <span className="ml-1.5 text-ink-muted">
+          {ratio === null ? "" : ok ? "· reads well" : `· needs ${needed}:1`}
+        </span>
+      </dd>
+    </div>
+  );
+}
+
+function Swatch({ color }) {
+  return (
+    <span
+      aria-hidden="true"
+      className="inline-block h-3.5 w-3.5 shrink-0 rounded border border-line/20 align-[-2px]"
+      style={{ background: toHex(color) || "transparent" }}
+    />
+  );
+}
+
 /* ───────────────────────── RPT-1 ───────────────────────── */
 
 function Reports() {
-  const { org } = useOrg();
+  const { org, entitlements } = useOrg();
   // Vertical-neutral fallback: a default of "seat" would quietly make
   // every unconfigured deployment a library.
   const resourceNoun = org?.terminology?.resourceNoun || "resource";
   const [days, setDays] = useState(30);
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState(null);
+
+  // Reports and the CSV export are a plan feature (`reports`).
+  const included = entitlements.hasFeature("reports");
 
   useEffect(() => {
-    api.adminReports(days).then(setData).catch((e) => setError(e.message));
-  }, [days]);
+    if (!included) return;
+    api
+      .adminReports(days)
+      .then((result) => {
+        setData(result);
+        setError(null);
+      })
+      .catch((e) => setError(e));
+  }, [days, included]);
 
-  if (error) return <Notice tone="error">{error}</Notice>;
+  const exportCsv = async () => {
+    setExporting(true);
+    setExportError(null);
+    try {
+      const { blob, filename } = await api.adminExport(days);
+      const url = URL.createObjectURL(blob);
+      const link = Object.assign(document.createElement("a"), { href: url, download: filename });
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      setExportError(err.message);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  // Without the feature, or refused it by a server that knows better than
+  // this page's copy of the plan: say so, rather than a page that fails.
+  if (!included || error?.code === "PLAN_FEATURE") {
+    return (
+      <UpgradePrompt icon={BarChart3} title="Reports aren't included in your plan">
+        Reports show when {org?.name || "your organization"} is busiest, how often bookings go unused and how
+        often people overstay, with a CSV of every reservation behind them. Ask SILLA to add reports to your
+        plan.
+      </UpgradePrompt>
+    );
+  }
+  if (error) return <Notice tone="error">{error.message}</Notice>;
   if (!data) {
     return (
       <div className="space-y-4">
@@ -1037,16 +1334,12 @@ function Reports() {
           onChange={setDays}
           options={[7, 30, 90].map((d) => ({ value: d, label: `${d} days` }))}
         />
-        <a
-          href={api.adminExportUrl(days)}
-          className="ml-auto h-8 px-3 rounded-md border border-line/10 text-xs text-ink-secondary
-                     hover:text-ink-primary hover:border-line/25 flex items-center gap-1.5
-                     transition-colors duration-fast ease-out"
-        >
-          <Download size={13} />
+        <Button size="sm" icon={Download} loading={exporting} onClick={exportCsv} className="ml-auto">
           Export CSV
-        </a>
+        </Button>
       </div>
+
+      {exportError && <Notice tone="error">{exportError}</Notice>}
 
       <motion.div {...listContainer()} className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Stat label="Reservations" value={data.totalReservations} />

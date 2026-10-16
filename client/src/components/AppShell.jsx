@@ -8,6 +8,7 @@ import { useAuth } from "../lib/AuthContext.jsx";
 import { sectionsFor } from "../lib/adminSections.js";
 import { useOrg } from "../lib/OrgContext.jsx";
 import { DURATION, EASE_OUT, prefersReducedMotion } from "../lib/motion.js";
+import OrgStatusBanner from "./OrgStatusBanner.jsx";
 
 /**
  * The application shell.
@@ -40,7 +41,10 @@ const LINKS = [
   { to: "/admin", label: "Console", icon: LayoutDashboard, roles: ["staff", "superadmin"] },
   { to: "/editor", label: "Editor", icon: PencilRuler, roles: ["superadmin"] },
   { to: "/editor", label: "Space controls", icon: Wrench, roles: ["staff"] },
-  { to: "/kiosk", label: "Kiosk", icon: ContactRound, roles: ["member", "staff", "superadmin"], public: true },
+  // `feature`: a plan without it hides the link from members and visitors,
+  // who could do nothing there. Staff and superadmins keep it — the page
+  // explains what the plan is missing, and they are the ones who can ask.
+  { to: "/kiosk", label: "Kiosk", icon: ContactRound, roles: ["member", "staff", "superadmin"], public: true, feature: "kiosk" },
 ];
 
 function OrgMark({ org }) {
@@ -58,12 +62,18 @@ function OrgMark({ org }) {
 function SidebarContent({ org, user, logout, onNavigate }) {
   const role = user?.role;
   const location = useLocation();
+  const { entitlements } = useOrg();
+  const admin = role === "staff" || role === "superadmin";
   // `!role || …` showed EVERY link to a signed-out visitor, because
   // undefined passes the first branch — so the landing page advertised
   // Console and Editor to anyone. The route guards still bounced them to
   // /login, so nothing was exposed, but it read as "straight into the
   // superadmin app". A signed-out visitor sees only what they can use.
-  const visible = LINKS.filter((link) => (role ? link.roles.includes(role) : link.public));
+  const visible = LINKS.filter(
+    (link) =>
+      (role ? link.roles.includes(role) : link.public) &&
+      (!link.feature || admin || entitlements.hasFeature(link.feature))
+  );
   const adminSections = sectionsFor(role);
   const inConsole = location.pathname.startsWith("/admin");
 
@@ -259,6 +269,10 @@ export default function AppShell({ children, fill = false }) {
           <OrgMark org={org} />
           <span className="min-w-0 truncate font-semibold">{org?.name}</span>
         </div>
+
+        {/* Overdue, paused or ended — on every screen in the shell, above
+            the page, so nobody meets it first as a button that fails. */}
+        <OrgStatusBanner />
 
         <main className={fill ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-y-auto"}>
           {children}

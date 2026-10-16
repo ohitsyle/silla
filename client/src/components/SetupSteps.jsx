@@ -206,19 +206,23 @@ function Step({ number, title, icon: Icon, state, summary, detail, usage, childr
   );
 }
 
-/** "3 of 5 rooms on your plan", a bar, and at the cap the reason there is no Add. */
+/**
+ * "3 of 5 rooms on your plan", a bar, and at the cap the reason there is
+ * no Add. Coloured like the plan page's meters (components/PlanUsage.jsx):
+ * the accent while there is room, the warning at the limit, on a track of
+ * the same hue — not "available" green, which on this product means a
+ * free seat, not spare allowance.
+ */
 export function Usage({ used, max, noun, blocked, blockedReason }) {
   const share = max ? Math.min(1, used / max) : 1;
+  const channel = blocked ? "--c-state-reserved" : "--c-accent";
   return (
     <div className="space-y-1.5">
       <p className="text-xs text-ink-secondary">
         <span className="font-semibold tabular-nums text-ink-primary">{used}</span> of {max} {noun} on your plan
       </p>
-      <div className="h-1 overflow-hidden rounded-full bg-line/10" aria-hidden="true">
-        <div
-          className="h-full rounded-full"
-          style={{ width: `${share * 100}%`, background: `var(--color-state-${blocked ? "reserved" : "available"})` }}
-        />
+      <div className="h-1 overflow-hidden rounded-full" style={{ background: `rgb(var(${channel}) / 0.16)` }} aria-hidden="true">
+        <div className="h-full rounded-full" style={{ width: `${share * 100}%`, background: `rgb(var(${channel}))` }} />
       </div>
       {blocked && <p className="text-xs leading-relaxed text-ink-secondary">{blockedReason}</p>}
     </div>

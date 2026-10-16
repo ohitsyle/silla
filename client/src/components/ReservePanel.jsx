@@ -171,7 +171,7 @@ function AvailabilityLine({ checking, availability }) {
  * `compact` while a room or unit is the subject, so it stays a reminder
  * rather than pushing what they came for below the fold.
  */
-export function MyReservation({ reservation, resourceNoun = "resource", policy, compact = false, onCancelled }) {
+export function MyReservation({ reservation, resourceNoun = "resource", policy, compact = false, readOnly = false, onCancelled }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [confirming, setConfirming] = useState(false);
@@ -193,7 +193,11 @@ export function MyReservation({ reservation, resourceNoun = "resource", policy, 
     }
   };
 
-  const actions = confirming ? (
+  // While the organization is paused nothing can change, cancelling
+  // included — so the reservation is shown, and says why it has no button.
+  const actions = readOnly ? (
+    <p className="text-xs leading-relaxed text-ink-muted">Bookings are paused, so this can't be changed right now.</p>
+  ) : confirming ? (
     <>
       <Button size="sm" variant="danger" loading={busy} onClick={cancel}>
         Yes, cancel it
@@ -257,7 +261,7 @@ export function MyReservation({ reservation, resourceNoun = "resource", policy, 
         <Badge tone={held ? "reserved" : "occupied"}>{held ? "Booked" : "Checked in"}</Badge>
       </div>
 
-      {held && (
+      {held && !readOnly && (
         <p className="mt-3 text-xs leading-relaxed text-ink-muted">
           Tap your card within {policy?.gracePeriodMinutes ?? 10} minutes of the start to check in.
         </p>
