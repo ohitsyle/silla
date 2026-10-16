@@ -1898,7 +1898,10 @@ export async function lapse(sub, { kind, settings, now = new Date() }) {
   await Invoice.updateMany({ _id: { $in: due.map((i) => i._id) }, "reminders.overdueAt": null }, { $set: { "reminders.overdueAt": now } });
   await statusAudit(updated, from, null, `${kind === "trial" ? "trial" : "period"} ended unpaid`);
   await syncDeployment(updated);
-  const account = await Account.findById(updated.account);
+  // A grace period already over (the job was down, or the end was long
+  // ago) would promise "keeps working until" a date in the past; the
+  // suspension that follows in the same cycle sends the message instead.
+  const account = graceEndsAt > now ? await Account.findById(updated.account) : null;
   if (account) {
     sendEmail(mail.invoiceOverdueEmail({ invoice: due[0], account, settings, subscription: updated, graceEndsAt }));
   }

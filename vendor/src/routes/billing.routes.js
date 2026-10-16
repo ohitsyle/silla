@@ -153,6 +153,8 @@ function buyerSubscriptionShape(sub, { plan, order, open = [], now = new Date() 
     cancelledAt: sub.cancelledAt,
     deploymentUrl: order?.deploymentUrl || "",
     orderId: idOf(sub.order),
+    // The line staff set for this organization; its administrators see it in the product too.
+    notice: sub.notice || null,
     includes: { features: featureList(features), limits: limitList(limits) },
     openInvoices: open.map((inv) => invoiceShape(inv, { now })),
   };
@@ -226,7 +228,10 @@ router.get(
     ]);
     const orderById = new Map(orders.map((o) => [String(o._id), o]));
     const planByKey = new Map(plans.map((p) => [p.key, p]));
+    const business = (await billing.getSettings()).business || {};
     res.json({
+      // Prices are quoted before VAT; the page says "+ 12% VAT" while it applies.
+      vat: { registered: Boolean(business.vatRegistered), rate: business.vatRate ?? 0.12 },
       subscriptions: subs.map((sub) =>
         buyerSubscriptionShape(sub, {
           plan: planByKey.get(sub.plan),
