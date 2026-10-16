@@ -637,17 +637,29 @@ Its floors are First Floor, Second Floor, Third and SILLA MAP; five
 leftover test floors were removed on 16 Oct through the API (their pieces
 first — nothing had a live booking).
 
-## Work in progress — tenancy, billing, staff console
+## Tenancy and plans — live; billing and staff console in progress
 
-`docs/control-plane.md` is the design. Its foundation is on main (commit
-313eb03); the routes `#/staff`, `#/billing`, `#/messages` exist but are
-deliberately UNLINKED until built. Billing and the staff console are saved
-on their branches as WIP commits — not reviewed or tested yet.
+`docs/control-plane.md` is the design. Tenancy and plan enforcement are
+merged and LIVE (17 Oct 2026), both halves: the server (signed internal
+API, provisioning shared with `seed:file`, `migrate:slugs`, limits and
+features, the read-only guard — 56 checks in `tests/platform.test.mjs`)
+and the client, below.
 
-Tenancy and plan enforcement are built on the `tenancy` branch, both
-halves: the server (signed internal API, provisioning shared with
-`seed:file`, `migrate:slugs`, limits and features, the read-only guard —
-56 checks in `tests/platform.test.mjs`) and the client, below.
+Live specifics: the demo is at `/demo-library` (assigned by `npm run
+migrate:slugs --apply` on the box) and legacy paths (`/map`, `/kiosk`, …)
+redirect to it. nginx was updated the same day — it no longer rewrites the
+client address from X-Forwarded-For, it refuses `/api/internal/` from the
+internet, and both apps trust exactly two proxy hops (`TRUST_PROXY_HOPS`);
+the old config is on the box as `/etc/nginx/conf.d/silla.conf.bak-20261017`.
+`CONTROL_PLANE_SECRET` is NOT set live yet — the internal API answers 503
+until the staff console needs it. Still to do on AWS: restrict port 80 to
+CloudFront's origin-facing prefix list; until then a request sent straight
+to the origin can still pick its own X-Forwarded-For.
+
+The routes `#/staff`, `#/billing`, `#/messages` exist but stay UNLINKED
+until built. Unfinished: billing on branch `billing` (a workflow is
+finishing it), the staff console on `worktree-wf_5e3385eb-597-4` (WIP
+commits, not reviewed).
 
 ### Organization addresses (client)
 
