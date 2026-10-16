@@ -40,7 +40,7 @@ export function formatMoney(minor, currency = "PHP") {
   }
 }
 
-/** "15 October 2026" — unambiguous across the day/month order people disagree on. */
+/** "October 15, 2026" — the month in words, so nobody has to guess which number is the day. */
 export const formatDate = (value) =>
   value ? new Date(value).toLocaleDateString("en-PH", { day: "numeric", month: "long", year: "numeric" }) : "";
 
