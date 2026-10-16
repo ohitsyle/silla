@@ -473,7 +473,7 @@ export async function updateSettings(input = {}, by = null) {
       vatRate: Number(b.vatRate ?? settings.business.vatRate),
     };
     const n = next.business;
-    if (!n.name) fields["business.name"] = "The name invoices are issued under.";
+    if (!n.name) fields["business.name"] = "Enter the name invoices are issued under.";
     else if (n.name.length > 120) fields["business.name"] = "Keep it under 120 characters.";
     if (address.length > 6 || address.some((l) => l.length > 120)) fields["business.address"] = "Up to 6 lines of 120 characters.";
     if (n.email && !EMAIL_RE.test(n.email)) fields["business.email"] = "Enter a valid email address.";
@@ -1061,19 +1061,30 @@ const DEPLOYMENT_STATUS = {
  * client's overrides, then status. The shape is the contract the product
  * enforces (server/src/services/entitlements.js; docs/control-plane.md).
  */
-export async function snapshotFor(subscription) {
-  const plan = (await planByKey(subscription.plan)) || {};
+/**
+ * What a plan plus this client's overrides allow: every feature true or
+ * false, every limit a number or null (unlimited). An override wins over
+ * the plan; a key neither mentions is allowed — the same reading the
+ * product applies (docs/control-plane.md §2).
+ */
+export function entitlementsFor(subscription, plan = {}) {
   const features = {};
   for (const key of Object.keys(FEATURES)) {
     const override = subscription.overrides?.features?.[key];
-    features[key] = override !== undefined ? Boolean(override) : plan.features?.[key] !== false;
+    features[key] = override !== undefined && override !== null ? Boolean(override) : plan?.features?.[key] !== false;
   }
   const limits = {};
   for (const key of Object.keys(LIMITS)) {
     const override = subscription.overrides?.limits?.[key];
-    const value = override !== undefined ? override : plan.limits?.[key];
+    const value = override !== undefined ? override : plan?.limits?.[key];
     limits[key] = typeof value === "number" && value >= 0 ? value : null;
   }
+  return { features, limits };
+}
+
+export async function snapshotFor(subscription) {
+  const plan = (await planByKey(subscription.plan)) || {};
+  const { features, limits } = entitlementsFor(subscription, plan);
   return {
     managed: true,
     plan: subscription.plan,
@@ -1999,6 +2010,65 @@ export async function retryFailedSyncs({ limit = 50 } = {}) {
 }
 
 /* ───────────────────────────── for the console ───────────────────────────── */
+
+/**
+ * A subscription's standing in the words its customer reads — the billing
+ * page shows these, so "past_due" never reaches a person. `tone` is for
+ * colour, which is never the only signal: the label says it too.
+ */
+export function plainStatus(sub, { now = new Date() } = {}) {
+  const ending = sub.cancelAtPeriodEnd;
+  switch (sub.status) {
+    case "pending":
+      return {
+        label: "Being set up",
+        tone: "waiting",
+        detail: "We're building your system. Your free trial starts the day it goes live.",
+      };
+    case "trialing": {
+      const end = sub.trialEndsAt ? new Date(sub.trialEndsAt) : null;
+      return {
+        label: "Free trial",
+        tone: "good",
+        detail: !end
+          ? "Free while we agree your price."
+          : end > now
+            ? `Free until ${date(end)}.${ending ? " Your subscription ends then." : ""}`
+            : `Your free trial ended on ${date(end)}.`,
+      };
+    }
+    case "active":
+      return {
+        label: "Active",
+        tone: "good",
+        detail: sub.currentPeriodEnd
+          ? `Paid through ${date(sub.currentPeriodEnd)}.${ending ? " Your subscription ends then." : ""}`
+          : "Paid up.",
+      };
+    case "past_due":
+      return {
+        label: "Payment overdue",
+        tone: "warning",
+        detail: sub.graceEndsAt
+          ? `Everything keeps working until ${date(sub.graceEndsAt)}. If it is still unpaid then, it becomes read-only until it is.`
+          : "Everything still works, but a payment is overdue.",
+      };
+    case "suspended":
+      return {
+        label: "Read-only",
+        tone: "bad",
+        detail: "Everyone can still sign in and look, but nothing can be booked or changed until it's resolved. Nothing has been deleted.",
+      };
+    case "cancelled":
+      return {
+        label: "Ended",
+        tone: "neutral",
+        detail: `${sub.cancelledAt ? `Ended on ${date(sub.cancelledAt)}. ` : ""}Your data is kept.`,
+      };
+    default:
+      return { label: sub.status, tone: "neutral", detail: "" };
+  }
+}
 
 /**
  * What needs a person, said in words — the states the job deliberately
