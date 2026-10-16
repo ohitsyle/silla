@@ -90,6 +90,13 @@ const invoiceSchema = new mongoose.Schema(
     billingPeriod: { type: String, enum: ["monthly", "yearly", null], default: null },
     /** Free text staff add to a manual invoice; printed under the lines. */
     memo: { type: String, default: "" },
+    /**
+     * The voided invoice this one re-issues. Scheduling a cancellation
+     * voids the periods the customer will no longer have; withdrawing it
+     * re-issues them, and this link is how a second withdrawal knows which
+     * ones already were.
+     */
+    replaces: { type: mongoose.Schema.Types.ObjectId, ref: "Invoice", default: null },
 
     status: { type: String, enum: INVOICE_STATUS, default: "open", index: true },
     issuedAt: { type: Date, default: Date.now },

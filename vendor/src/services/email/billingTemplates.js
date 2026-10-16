@@ -87,6 +87,8 @@ function howToPay(settings, invoice) {
   return blocks;
 }
 
+const trialDays = (settings) => Number(settings?.billing?.trialDays ?? 0);
+
 const invoiceRows = (invoice) => [
   ["Invoice", invoice.number],
   ["For", invoice.organizationName],
@@ -120,10 +122,18 @@ export const invoiceIssuedEmail = ({ invoice, account, settings }) =>
             : `Here is your invoice for ${invoice.organizationName}.`
         ),
         details(invoiceRows(invoice)),
+        // The first invoice arrives before the system is even live. Say
+        // what paying it does, so paying early doesn't look like losing
+        // the trial.
+        invoice.kind === "first" && trialDays(settings) > 0
+          ? p(
+              `Your ${trialDays(settings)}-day free trial starts when ${invoice.organizationName} goes live, and the paid period starts when the trial ends — paying early never shortens it.`
+            )
+          : null,
         button("View the invoice", invoiceLink(invoice)),
         ...howToPay(settings, invoice),
         p("Already paid? Press “I've paid” on the invoice page and tell us the reference — we'll confirm it and send your receipt."),
-      ],
+      ].filter(Boolean),
       reason: "because SILLA issued an invoice to this address",
     }
   );
@@ -291,8 +301,12 @@ export const trialEndingEmail = ({ subscription, account, invoice = null, settin
     reason: "because your SILLA free trial is ending",
   });
 
-/** When grace runs out, or SILLA staff suspend the subscription. */
-export const subscriptionSuspendedEmail = ({ subscription, account, invoice = null, reason = "" }) =>
+/**
+ * When grace runs out, or SILLA staff suspend the subscription. With an
+ * unpaid invoice it carries the payment details too (rule 3): this is the
+ * message most likely to be acted on, and the fastest way back is paying.
+ */
+export const subscriptionSuspendedEmail = ({ subscription, account, invoice = null, reason = "", settings = null }) =>
   build(billingAddress(account), `${subscription.organizationName} is now read-only`, {
     preheader: invoice
       ? `Pay invoice ${invoice.number} to switch everything back on.`
@@ -308,8 +322,13 @@ export const subscriptionSuspendedEmail = ({ subscription, account, invoice = nu
       ),
       reason ? details([["Reason", reason]]) : null,
       p("Everyone can still sign in and see everything, but nothing can be booked, checked into or changed until it is resolved."),
-      note("Nothing has been deleted. The moment the invoice is paid, everything works again exactly as it was.", "warning"),
-      invoice ? button("Pay the invoice", invoiceLink(invoice)) : button("See your billing", billingLink()),
+      note(
+        invoice
+          ? "Nothing has been deleted. The moment the invoice is paid, everything works again exactly as it was."
+          : "Nothing has been deleted. Reply to this email if you think this is a mistake.",
+        "warning"
+      ),
+      ...(invoice ? [details(invoiceRows(invoice)), ...howToPay(settings, invoice), button("Pay the invoice", invoiceLink(invoice))] : [button("See your billing", billingLink())]),
     ].filter(Boolean),
     reason: "because the status of your SILLA subscription changed",
   });
@@ -376,7 +395,7 @@ export const subscriptionCancelledEmail = ({ subscription, account, reason = "" 
     blocks: [
       p(`Your subscription for ${subscription.organizationName} has ended, and the system no longer accepts changes.`),
       reason ? details([["Reason", reason]]) : null,
-      note("Your data is kept. If you'd like to come back, reply to this email and we'll switch it back on."),
+      note("Your data is kept. If you'd like to come back, reply to this email — everything you set up is still there."),
     ].filter(Boolean),
     reason: "because your SILLA subscription ended",
   });

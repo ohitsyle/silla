@@ -79,6 +79,18 @@ const subscriptionSchema = new mongoose.Schema(
       trialEndingAt: { type: Date, default: null },
     },
 
+    /**
+     * The paid invoices whose period has been added to this subscription.
+     * A payment becomes service time exactly once: the period is extended
+     * and the invoice recorded here in ONE conditional update
+     * (services/billing.js applyPaidInvoices), so two payments landing at
+     * once both count, and a replayed one counts once. A paid invoice that
+     * extends the subscription but is not listed here has not bought its
+     * period yet — on a subscription that is still pending, that is
+     * deliberate: the paid period starts when the deployment goes live.
+     */
+    appliedInvoices: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+
     /** The last push of this subscription's snapshot to its deployment. */
     sync: {
       version: { type: Number, default: 0 },

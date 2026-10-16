@@ -32,6 +32,7 @@
  * are due for something; the transitions themselves live here, so a
  * suspension by the job and a suspension by staff are the same code.
  */
+import mongoose from "mongoose";
 import Plan from "../models/Plan.js";
 import Subscription from "../models/Subscription.js";
 import Invoice, { PAYMENT_METHODS } from "../models/Invoice.js";
@@ -106,6 +107,28 @@ async function statusAudit(sub, from, by, cause) {
     `${sub.organizationName}: ${STATUS_WORD[from] || from} → ${STATUS_WORD[sub.status] || sub.status} (${cause})`,
     { from, to: sub.status, cause }
   );
+}
+
+/**
+ * Moves a subscription out of the status it was READ in, with its history
+ * entry, in one conditional update. If anything moved it in between — the
+ * billing job, a payment, a second click on the same button — nothing is
+ * written and the caller is refused, so a suspension happens once and
+ * emails once. Returns the updated document.
+ */
+async function transition(sub, to, { set = {}, note = "", by = null } = {}) {
+  const updated = await Subscription.findOneAndUpdate(
+    { _id: sub._id, status: sub.status },
+    { $set: { ...set, status: to }, $push: { history: { at: new Date(), status: to, by: byId(by), note } } },
+    { new: true }
+  );
+  if (!updated) {
+    throw new BillingError("This subscription changed a moment ago. Reload it and try again.", {
+      status: 409,
+      code: "SUBSCRIPTION_CHANGED",
+    });
+  }
+  return updated;
 }
 
 /* ───────────────────────────── time and money ───────────────────────────── */
@@ -515,6 +538,12 @@ export async function updateSettings(input = {}, by = null) {
 
 /* ───────────────────────────── invoices ───────────────────────────── */
 
+/** The stand-in number an invoice holds for the moment between being reserved and numbered. */
+const RESERVED_PREFIX = "RESERVED-";
+export const RESERVED_NUMBER = /^RESERVED-/;
+/** For any query that lists or acts on invoices people see: only numbered ones. */
+export const NUMBERED = { number: { $not: RESERVED_NUMBER } };
+
 /**
  * The next invoice number: <prefix>-<year>-<00001>, from one atomic
  * counter per year, so two invoices issued at once can never share one.
@@ -586,11 +615,14 @@ async function issueInvoice({
   periodEnd = null,
   memo = "",
   dueDays = null,
+  dueAt = null,
+  replaces = null,
   organizationName = "",
   settings = null,
 }) {
   settings = settings || (await getSettings());
   const issuedAt = new Date();
+  const dueByTerms = addDays(issuedAt, dueDays ?? settings.invoice?.dueDays ?? 7);
   const priced = items.map((l) => ({
     description: l.description,
     quantity: l.quantity,
@@ -622,52 +654,99 @@ async function issueInvoice({
     extendsSubscription,
     billingPeriod: extendsSubscription ? billingPeriod : null,
     memo,
+    replaces,
     status: "open",
     issuedAt,
-    dueAt: addDays(issuedAt, dueDays ?? settings.invoice?.dueDays ?? 7),
+    // Never earlier than the payment terms allow; a caller may only push it later.
+    dueAt: dueAt && new Date(dueAt) > dueByTerms ? new Date(dueAt) : dueByTerms,
   };
 
-  const test = isUndeliverable(account.email);
+  // Reserve, then number. The invoice is inserted under a stand-in number
+  // first, so for a first or renewal invoice the unique indexes refuse a
+  // duplicate — a double submit, the job in a second process — BEFORE a
+  // number is drawn. Drawing first meant the loser of such a race burned
+  // a number for an invoice that never existed: a gap in a tax invoice
+  // series, which is what an auditor asks about.
+  const _id = new mongoose.Types.ObjectId();
+  let reserved;
+  try {
+    reserved = await Invoice.create({ ...base, _id, number: `${RESERVED_PREFIX}${_id}` });
+  } catch (err) {
+    if (err?.code === 11000 && (kind === "first" || kind === "renewal")) {
+      const filter = kind === "first" ? { subscription: subscription._id, kind } : { subscription: subscription._id, kind, periodStart };
+      const existing = await Invoice.findOne(filter);
+      if (existing) return { invoice: existing, created: false };
+    }
+    throw err;
+  }
+
+  const invoice = await numberInvoice(reserved, { settings, test: isUndeliverable(account.email) });
+  sendEmail(mail.invoiceIssuedEmail({ invoice, account, settings }));
+  await Invoice.updateOne({ _id: invoice._id }, { $set: { "reminders.issuedEmailAt": new Date() } });
+  return { invoice, created: true };
+}
+
+/**
+ * Gives a reserved invoice its real number — the only step that draws one,
+ * so only an invoice that already exists ever consumes a number.
+ */
+async function numberInvoice(reserved, { settings, test }) {
   for (let attempt = 1; ; attempt += 1) {
-    const number = await nextInvoiceNumber({ prefix: settings.invoice?.prefix || "SILLA", at: issuedAt, test });
+    const number = await nextInvoiceNumber({ prefix: settings.invoice?.prefix || "SILLA", at: reserved.issuedAt, test });
     try {
-      const invoice = await Invoice.create({ ...base, number });
-      sendEmail(mail.invoiceIssuedEmail({ invoice, account, settings }));
-      await Invoice.updateOne({ _id: invoice._id }, { $set: { "reminders.issuedEmailAt": new Date() } });
-      return { invoice, created: true };
+      const numbered = await Invoice.findOneAndUpdate(
+        { _id: reserved._id, number: reserved.number },
+        { $set: { number } },
+        { new: true }
+      );
+      return numbered || (await Invoice.findById(reserved._id));
     } catch (err) {
-      if (err?.code !== 11000) throw err;
-      // A number already used means the counter was reset (a restore, a
+      // A number already in use means the counter was reset (a restore, a
       // hand edit). Take the next one rather than fail the invoice.
-      if (err.keyPattern?.number && attempt < 5) continue;
-      if (kind === "first" || kind === "renewal") {
-        // Issued a moment ago by someone else — a double submit, or the
-        // job in a second process. The unique index refused the copy. The
-        // number taken above is lost: the one gap in the series a race
-        // can leave, and only a race can.
-        const filter = kind === "first" ? { subscription: subscription._id, kind } : { subscription: subscription._id, kind, periodStart };
-        const existing = await Invoice.findOne(filter);
-        if (existing) return { invoice: existing, created: false };
-      }
+      if (err?.code === 11000 && err.keyPattern?.number && attempt < 5) continue;
       throw err;
     }
   }
 }
 
 /**
+ * Numbers and sends any invoice still holding its stand-in — a process
+ * that stopped between reserving an invoice and numbering it. Run by the
+ * billing job; the age threshold keeps it clear of an issue in progress.
+ */
+export async function numberReservedInvoices({ olderThanMs = 5 * 60_000, now = new Date() } = {}) {
+  const stuck = await Invoice.find({ number: RESERVED_NUMBER, createdAt: { $lte: new Date(now.getTime() - olderThanMs) } }).limit(50);
+  if (!stuck.length) return 0;
+  const settings = await getSettings();
+  for (const reserved of stuck) {
+    const account = await Account.findById(reserved.account);
+    const invoice = await numberInvoice(reserved, { settings, test: isUndeliverable(account?.email) });
+    if (account && invoice && !RESERVED_NUMBER.test(invoice.number) && !invoice.reminders?.issuedEmailAt) {
+      sendEmail(mail.invoiceIssuedEmail({ invoice, account, settings }));
+      await Invoice.updateOne({ _id: invoice._id }, { $set: { "reminders.issuedEmailAt": new Date() } });
+    }
+  }
+  return stuck.length;
+}
+
+/**
  * The invoice that pays for a subscription's first period. Its period is
  * left open: the service starts when the deployment goes live, after the
- * trial, which nobody knows yet — applyPaidPeriod() writes it on payment.
+ * trial, which nobody knows yet — applyPaidInvoices() writes it when the
+ * payment buys its period.
  *
  * If a first invoice already exists (even a voided one) the next one is
  * a manual extending invoice instead: there is one "first" per
  * subscription, and a voided one keeps its place in the record.
  */
-async function issuePeriodInvoice(sub, { account = null, settings = null } = {}) {
+async function issuePeriodInvoice(sub, { account = null, settings = null, firstOnly = false } = {}) {
   if (sub.price?.amount == null) return { invoice: null, created: false };
   account = account || (await Account.findById(sub.account));
   if (!account) return { invoice: null, created: false };
-  const hasFirst = await Invoice.exists({ subscription: sub._id, kind: "first" });
+  // On submission it is the first invoice or nothing: a second submit racing
+  // the first must be refused by the unique index, not see the first one
+  // and issue itself as a "manual" invoice beside it — which it did.
+  const hasFirst = !firstOnly && (await Invoice.exists({ subscription: sub._id, kind: "first" }));
   return issueInvoice({
     account,
     subscription: sub,
@@ -681,7 +760,15 @@ async function issuePeriodInvoice(sub, { account = null, settings = null } = {})
   });
 }
 
-/** The renewal for the period after this one. Safe to call repeatedly; at most one exists per period. */
+/**
+ * The renewal for the period after this one. Safe to call repeatedly; at
+ * most one exists per period.
+ *
+ * Due when the period it pays for BEGINS, or by the usual terms if those
+ * run later. Due a fixed number of days after issue, a renewal sent a
+ * month ahead (renewalNoticeDays 30, dueDays 7) would be chased as overdue
+ * three weeks before the customer's paid time even ran out.
+ */
 export async function issueRenewalInvoice(sub, { settings = null } = {}) {
   if (!sub.currentPeriodEnd || sub.price?.amount == null || sub.needsPricing || sub.cancelAtPeriodEnd) {
     return { invoice: null, created: false };
@@ -702,6 +789,7 @@ export async function issueRenewalInvoice(sub, { settings = null } = {}) {
     billingPeriod: sub.billingPeriod,
     periodStart,
     periodEnd: addPeriod(periodStart, sub.billingPeriod),
+    dueAt: periodStart,
     organizationName: sub.organizationName,
     settings,
   });
@@ -718,7 +806,10 @@ export async function issueRenewalInvoice(sub, { settings = null } = {}) {
 }
 
 const openExtendingInvoices = (subscriptionId) =>
-  Invoice.find({ subscription: subscriptionId, status: "open", extendsSubscription: true }).sort({ issuedAt: 1 });
+  Invoice.find({ subscription: subscriptionId, status: "open", extendsSubscription: true, ...NUMBERED }).sort({ issuedAt: 1 });
+
+/** The void reason a scheduled cancellation writes — and the one a withdrawal looks for. */
+const SCHEDULED_END_VOID = "Subscription ends at the end of its period";
 
 /** Voids what a subscription that has ended can no longer owe: the periods it will never have. */
 async function voidOpenPeriodInvoices(sub, reason, by) {
@@ -734,6 +825,59 @@ async function voidOpenPeriodInvoices(sub, reason, by) {
     await audit(actor(by), "invoice.void", invoiceTarget(done), `Voided ${done.number}: ${reason}`, { reason, automatic: true });
   }
   return voided;
+}
+
+/**
+ * Withdrawing a scheduled cancellation makes the periods it voided owed
+ * again. Each is re-issued as a NEW invoice — a voided number is never
+ * reused — pointing at the one it replaces. Without this the customer who
+ * just decided to stay would never be billed for the period they kept: a
+ * voided renewal still occupies its period, so the billing job will not
+ * issue that renewal a second time.
+ */
+async function reissueVoidedPeriods(sub, by) {
+  const voided = await Invoice.find({
+    subscription: sub._id,
+    status: "void",
+    extendsSubscription: true,
+    voidReason: SCHEDULED_END_VOID,
+  }).sort({ issuedAt: 1 });
+  if (!voided.length) return [];
+  const replaced = new Set(
+    (await Invoice.find({ replaces: { $in: voided.map((v) => v._id) } }).distinct("replaces")).map(String)
+  );
+  const pending = voided.filter((old) => !replaced.has(String(old._id)));
+  if (!pending.length) return [];
+  const [account, settings] = await Promise.all([Account.findById(sub.account), getSettings()]);
+  if (!account) return [];
+
+  const issued = [];
+  for (const old of pending) {
+    const { invoice } = await issueInvoice({
+      account,
+      subscription: sub,
+      kind: "manual",
+      lines: old.lines.map((l) => ({ description: l.description, quantity: l.quantity, unitAmount: l.unitAmount })),
+      currency: old.currency,
+      extendsSubscription: true,
+      billingPeriod: old.billingPeriod || sub.billingPeriod,
+      periodStart: old.periodStart,
+      periodEnd: old.periodEnd,
+      dueAt: old.periodStart,
+      replaces: old._id,
+      memo: `Re-issued in place of ${old.number}, which was voided when this subscription was set to end.`,
+      organizationName: sub.organizationName,
+      settings,
+    });
+    await audit(actor(by), "invoice.issue", invoiceTarget(invoice), `Re-issued ${old.number} as ${invoice.number} for ${invoice.organizationName}`, {
+      kind: "manual",
+      replaces: old.number,
+      total: invoice.total,
+      currency: invoice.currency,
+    });
+    issued.push(invoice);
+  }
+  return issued;
 }
 
 /** Staff issue an invoice by hand: a setup fee, an agreed custom price, a correction. */
@@ -844,7 +988,7 @@ export async function onOrderSubmitted(order) {
         price: { amount, currency },
         needsPricing: amount == null,
         status: "pending",
-        history: [{ status: "pending", note: notes.join("; ") }],
+        history: [{ status: "pending", by: order.account, note: notes.join("; ") }],
       },
     },
     { upsert: true, new: true, includeResultMetadata: true }
@@ -863,7 +1007,7 @@ export async function onOrderSubmitted(order) {
 
   if (sub.status === "pending" && !sub.needsPricing && account) {
     if (!(await Invoice.exists({ subscription: sub._id, kind: "first" }))) {
-      const { invoice, created } = await issuePeriodInvoice(sub, { account });
+      const { invoice, created } = await issuePeriodInvoice(sub, { account, firstOnly: true });
       if (created) {
         await audit(actor(account), "invoice.issue", invoiceTarget(invoice),
           `Issued first invoice ${invoice.number} to ${invoice.organizationName}`, {
@@ -883,15 +1027,15 @@ export async function onOrderSubmitted(order) {
  * sending "your invoice is overdue" to someone who walked away.
  */
 export async function onOrderCancelled(order, { by = null, reason = "" } = {}) {
-  const sub = await Subscription.findOne({ order: order._id });
-  if (!sub || sub.status === "cancelled") return sub;
-  const from = sub.status;
-  sub.status = "cancelled";
-  sub.cancelledAt = new Date();
-  sub.cancelReason = reason;
-  sub.cancelAtPeriodEnd = false;
-  sub.history.push({ status: "cancelled", by: byId(by), note: reason || "Order cancelled" });
-  await sub.save();
+  const current = await Subscription.findOne({ order: order._id });
+  if (!current || current.status === "cancelled") return current;
+  const from = current.status;
+  const why = clean(reason, 300);
+  const sub = await transition(current, "cancelled", {
+    set: { cancelledAt: new Date(), cancelReason: why, cancelAtPeriodEnd: false },
+    note: why || "Order cancelled",
+    by,
+  });
   await voidOpenPeriodInvoices(sub, "Order cancelled", by);
   await statusAudit(sub, from, by, "order cancelled");
   await syncDeployment(sub);
@@ -952,20 +1096,51 @@ export async function snapshotForOrder(order) {
 
 /**
  * Pushes the subscription's snapshot to its deployment and records the
- * outcome on `sync`. Never throws: a failed push is recorded and retried
- * by the billing job, and the caller's own change still stands.
+ * outcome on `sync`. Never throws — not on a refused push, and not on a
+ * database hiccup while recording one: a failed push is recorded and
+ * retried by the billing job, and the caller's own change still stands.
+ *
+ * The snapshot is built from the subscription AS STORED, re-read here,
+ * never from the caller's copy: what a deployment enforces must be what
+ * the database says, not an in-memory object that may predate someone
+ * else's change. The outcome is written with its own update rather than
+ * a save() of the caller's document, which used to persist whatever else
+ * that document held and could throw a VersionError past the "never
+ * throws" promise. Versions only go up, so a deployment can drop a push
+ * that arrives after a newer one.
  */
 export async function syncDeployment(subscription) {
-  if (!subscription?.organizationId) return { skipped: true };
   try {
-    const snapshot = await snapshotFor(subscription);
-    await callDeployment("PUT", `/api/internal/organizations/${subscription.organizationId}/entitlements`, snapshot);
-    subscription.sync = { version: snapshot.version, syncedAt: new Date(), error: null };
+    const id = subscription?._id;
+    if (!id) return { skipped: true };
+    const fresh = await Subscription.findById(id);
+    if (!fresh?.organizationId) return { skipped: true };
+
+    let sync;
+    try {
+      const snapshot = await snapshotFor(fresh);
+      snapshot.version = Math.max(snapshot.version, (fresh.sync?.version || 0) + 1);
+      await callDeployment("PUT", `/api/internal/organizations/${fresh.organizationId}/entitlements`, snapshot);
+      sync = { version: snapshot.version, syncedAt: new Date(), error: null };
+    } catch (err) {
+      sync = {
+        version: fresh.sync?.version || 0,
+        syncedAt: fresh.sync?.syncedAt || null,
+        error: clean(err?.message || "The push failed.", 500),
+      };
+    }
+    // timestamps off: recording a push is not a change to the subscription.
+    await Subscription.updateOne({ _id: id }, { $set: { sync } }, { timestamps: false });
+    try {
+      subscription.sync = sync; // so a caller returning its document shows the outcome
+    } catch {
+      /* a frozen or foreign object; the database has it */
+    }
+    return { error: sync.error, version: sync.version };
   } catch (err) {
-    subscription.sync = { ...(subscription.sync?.toObject?.() || subscription.sync || {}), error: err.message };
+    console.error("[vendor:billing] syncDeployment could not record its outcome:", err);
+    return { error: err?.message || "The sync could not be recorded." };
   }
-  await subscription.save();
-  return { error: subscription.sync.error };
 }
 
 /** Staff pressing "Retry sync": the same push, with an audit line saying how it went. */
@@ -986,66 +1161,127 @@ export async function syncNow(sub, by) {
  * follows straight on from what came before, whether that was a paid
  * period or the trial — so paying during a trial never costs trial days,
  * and paying late for a period already being used (the grace period)
- * pays for that period, not the next one. The exception is a suspended
- * subscription: its service was switched off, so the paid time starts
- * when it is switched back on.
+ * pays for that period, not the next one.
+ *
+ * The exception is a suspended subscription: its service was switched
+ * off, so the paid time starts when it is switched back on — unless it is
+ * still paid through a date ahead (staff suspended a paid-up customer),
+ * in which case the new period follows that, and no paid day is lost.
  */
 function nextPeriodStart(sub, now) {
-  if (sub.status === "suspended") return now;
-  if (sub.currentPeriodEnd) return new Date(sub.currentPeriodEnd);
+  const paidThrough = sub.currentPeriodEnd ? new Date(sub.currentPeriodEnd) : null;
+  if (sub.status === "suspended") return paidThrough && paidThrough > now ? paidThrough : now;
+  if (paidThrough) return paidThrough;
   if (sub.trialEndsAt) return new Date(sub.trialEndsAt);
   return now;
 }
 
 /**
- * Buys the subscription one period with a paid invoice: active, paid
- * through the period's end. The invoice is stamped with the period it
- * paid for when it did not name one — a renewal's stated period is part
- * of what was sent, so it is never rewritten.
+ * Turns paid, period-buying invoices into service time — the ONE place a
+ * payment becomes a paid period. Called after a payment is recorded and
+ * after a deployment is provisioned; safe to call any number of times,
+ * from any number of processes.
+ *
+ * Each invoice is applied in a single conditional update that extends the
+ * period, records the invoice in `appliedInvoices` and writes the history
+ * entry together, and only lands if the subscription is still exactly as
+ * read. So two payments recorded at the same moment both count (the
+ * second re-reads and extends from the first's end), and a replay counts
+ * once. It used to be load, change and save(): two concurrent payments
+ * each extended from the same end date and one period was simply lost.
+ *
+ * A pending subscription is left alone on purpose — its deployment is not
+ * live, and the paid period starts at go-live (onProvisioned calls this
+ * again then). A cancelled one has nothing left to buy.
  */
-async function applyPaidPeriod(sub, invoice, now = new Date()) {
-  const start = nextPeriodStart(sub, now);
-  const end = addPeriod(start, invoice.billingPeriod || sub.billingPeriod);
-  sub.currentPeriodStart = start;
-  sub.currentPeriodEnd = end;
-  sub.graceEndsAt = null;
-  sub.status = "active";
-  if (!invoice.periodStart) {
-    invoice.periodStart = start;
-    invoice.periodEnd = end;
-    await Invoice.updateOne({ _id: invoice._id }, { $set: { periodStart: start, periodEnd: end } });
+async function applyPaidInvoices(subscriptionId, { by = null, now = new Date() } = {}) {
+  const applied = [];
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    const sub = await Subscription.findById(subscriptionId);
+    if (!sub || sub.status === "pending" || sub.status === "cancelled") break;
+    const invoice = await Invoice.findOne({
+      subscription: sub._id,
+      status: "paid",
+      extendsSubscription: true,
+      _id: { $nin: sub.appliedInvoices || [] },
+    }).sort({ paidAt: 1, issuedAt: 1 });
+    if (!invoice) break;
+
+    const from = sub.status;
+    const start = nextPeriodStart(sub, now);
+    const end = addPeriod(start, invoice.billingPeriod || sub.billingPeriod);
+    const note = `${invoice.number} paid${from === "suspended" ? " — reactivated" : ""}; paid through ${date(end)}`;
+    const updated = await Subscription.findOneAndUpdate(
+      {
+        _id: sub._id,
+        status: from,
+        currentPeriodEnd: sub.currentPeriodEnd ?? null,
+        trialEndsAt: sub.trialEndsAt ?? null,
+        appliedInvoices: { $ne: invoice._id },
+      },
+      {
+        $set: { status: "active", currentPeriodStart: start, currentPeriodEnd: end, graceEndsAt: null },
+        $addToSet: { appliedInvoices: invoice._id },
+        $push: { history: { at: new Date(), status: "active", by: byId(by), note } },
+      },
+      { new: true }
+    );
+    if (!updated) continue; // something moved it in between — read it again
+
+    // Stamp the period an open-ended invoice bought. A renewal's stated
+    // period is part of what was sent, so it is never rewritten.
+    if (!invoice.periodStart) {
+      await Invoice.updateOne({ _id: invoice._id, periodStart: null }, { $set: { periodStart: start, periodEnd: end } });
+    }
+    if (from !== "active") await statusAudit(updated, from, by, `${invoice.number} paid`);
+    applied.push({ invoice, from, start, end, subscription: updated });
   }
-  return { start, end };
+  return applied;
 }
 
 /**
  * Called after the staff-operations work provisions an order's
- * deployment. Starts the trial — or, when the first invoice was paid
- * before go-live, goes straight to active, with the paid period starting
- * where the trial would have ended: paying early never costs trial days.
+ * deployment. Starts the trial — and when the first invoice was paid
+ * before go-live, that payment buys its period now, starting where the
+ * trial ends, so the subscription goes live as active: paying early never
+ * costs trial days.
  */
 export async function onProvisioned(order, organizationId, { by = null } = {}) {
-  const sub = (await subscriptionForOrder(order._id)) || (await onOrderSubmitted(order));
-  sub.organizationId = String(organizationId);
-  if (!sub.organizationName) sub.organizationName = order.organizationName;
+  const existing = (await subscriptionForOrder(order._id)) || (await onOrderSubmitted(order));
+  // Linking the deployment is not a status change, and must land whatever the status is.
+  let sub = await Subscription.findOneAndUpdate(
+    { _id: existing._id },
+    {
+      $set: {
+        organizationId: String(organizationId),
+        ...(existing.organizationName ? {} : { organizationName: order.organizationName }),
+      },
+    },
+    { new: true }
+  );
   const from = sub.status;
 
   if (sub.status === "pending") {
     const settings = await getSettings();
     const now = new Date();
     // Staff may have set a trial end ahead of go-live; keep it if it is still ahead.
-    if (!sub.trialEndsAt || sub.trialEndsAt <= now) sub.trialEndsAt = addDays(now, settings.billing?.trialDays ?? 14);
-    const prepaid = await Invoice.find({ subscription: sub._id, status: "paid", extendsSubscription: true, periodStart: null }).sort({ paidAt: 1 });
-    if (prepaid.length) {
-      for (const invoice of prepaid) await applyPaidPeriod(sub, invoice, now);
-      sub.history.push({ status: "active", by: byId(by), note: `Deployment provisioned — already paid, through ${date(sub.currentPeriodEnd)}` });
-    } else {
-      sub.status = "trialing";
-      sub.history.push({ status: "trialing", by: byId(by), note: `Deployment provisioned — free trial until ${date(sub.trialEndsAt)}` });
+    const trialEndsAt =
+      sub.trialEndsAt && sub.trialEndsAt > now ? sub.trialEndsAt : addDays(now, settings.billing?.trialDays ?? 14);
+    try {
+      sub = await transition(sub, "trialing", {
+        set: { trialEndsAt },
+        note: `Deployment provisioned — free trial until ${date(trialEndsAt)}`,
+        by,
+      });
+      await statusAudit(sub, from, by, "deployment provisioned");
+    } catch (err) {
+      if (err?.code !== "SUBSCRIPTION_CHANGED") throw err;
+      sub = await Subscription.findById(sub._id); // moved by someone else; go with what is stored
     }
   }
-  await sub.save();
-  if (sub.status !== from) await statusAudit(sub, from, by, "deployment provisioned");
+
+  const applied = await applyPaidInvoices(sub._id, { by });
+  if (applied.length) sub = applied.at(-1).subscription;
   await syncDeployment(sub);
   return sub;
 }
@@ -1057,8 +1293,11 @@ function readPayment(input, invoice) {
   const method = String(input.method || "");
   if (!PAYMENT_METHODS.includes(method)) fields.method = "Choose how the money arrived.";
   const amount = Number(input.amount);
-  if (input.amount === "" || input.amount == null || !Number.isInteger(amount) || amount < 0) {
+  // Nothing received is not a payment — unless the invoice itself is for nothing.
+  if (input.amount === "" || input.amount == null || !Number.isInteger(amount) || amount < 0 || (amount === 0 && invoice.total > 0)) {
     fields.amount = "Enter the amount received.";
+  } else if (amount > MAX_AMOUNT) {
+    fields.amount = "That's more than any invoice — check the amount (it's in centavos).";
   }
   const receivedAt = input.receivedAt ? new Date(input.receivedAt) : new Date();
   if (Number.isNaN(receivedAt.getTime())) fields.receivedAt = "Enter the date the money arrived.";
@@ -1081,6 +1320,10 @@ function readPayment(input, invoice) {
  * processor's webhook calls it with `by` null. Exactly once: the update
  * only applies to an invoice that is still open, so a double click or a
  * replayed webhook is refused rather than counted twice.
+ *
+ * An invoice that buys a period then activates the subscription and
+ * starts or extends its period (applyPaidInvoices), and the deployment is
+ * told. The receipt is emailed either way.
  */
 export async function recordPayment(invoiceOrId, input = {}, by = null) {
   const current = await Invoice.findById(invoiceOrId?._id || invoiceOrId);
@@ -1102,21 +1345,30 @@ export async function recordPayment(invoiceOrId, input = {}, by = null) {
   if (!invoice) throw new BillingError(`${current.number} was settled a moment ago.`, { status: 409, code: "INVOICE_NOT_OPEN" });
 
   let sub = invoice.subscription ? await Subscription.findById(invoice.subscription) : null;
-  let from = null;
-  if (sub && invoice.extendsSubscription && sub.status !== "cancelled") {
-    from = sub.status;
-    if (sub.status === "pending") {
-      // Not live yet: onProvisioned() starts the paid period at go-live.
-      sub.history.push({ status: "pending", by: byId(by), note: `${invoice.number} paid — the paid period starts when the deployment goes live` });
-    } else {
-      const { end } = await applyPaidPeriod(sub, invoice, now);
-      sub.history.push({
-        status: "active",
-        by: byId(by),
-        note: `${invoice.number} paid${from === "suspended" ? " — reactivated" : ""}; paid through ${date(end)}`,
-      });
+  const from = sub?.status || null;
+  let applied = [];
+  if (sub && invoice.extendsSubscription) {
+    applied = await applyPaidInvoices(sub._id, { by, now });
+    if (applied.length) {
+      sub = applied.at(-1).subscription;
+    } else if (sub.status === "pending") {
+      // Not live yet: onProvisioned() applies this payment at go-live.
+      sub =
+        (await Subscription.findOneAndUpdate(
+          { _id: sub._id, status: "pending" },
+          {
+            $push: {
+              history: {
+                at: new Date(),
+                status: "pending",
+                by: byId(by),
+                note: `${invoice.number} paid — the paid period starts when the deployment goes live`,
+              },
+            },
+          },
+          { new: true }
+        )) || (await Subscription.findById(sub._id));
     }
-    await sub.save();
   }
 
   await audit(actor(by), "invoice.payment", invoiceTarget(invoice),
@@ -1129,13 +1381,24 @@ export async function recordPayment(invoiceOrId, input = {}, by = null) {
       reference: payment.reference,
       receivedAt: payment.receivedAt,
       confirmsClaim: Boolean(invoice.claimedPayment?.submittedAt && !invoice.claimedPayment?.dismissedAt),
+      subscriptionStatus: sub ? { from, to: sub.status } : null,
     });
-  if (sub && from && sub.status !== from) await statusAudit(sub, from, by, `${invoice.number} paid`);
-  if (sub && from) await syncDeployment(sub);
+  if (applied.length) await syncDeployment(sub);
 
+  // The period stamp may have landed after the invoice was read.
+  const receiptInvoice = (await Invoice.findById(invoice._id)) || invoice;
   const account = await Account.findById(invoice.account);
-  if (account) sendEmail(mail.paymentReceiptEmail({ invoice, account, subscription: sub, reactivated: from === "suspended" }));
-  return { invoice, subscription: sub };
+  if (account) {
+    sendEmail(
+      mail.paymentReceiptEmail({
+        invoice: receiptInvoice,
+        account,
+        subscription: sub,
+        reactivated: from === "suspended" && sub?.status === "active",
+      })
+    );
+  }
+  return { invoice: receiptInvoice, subscription: sub };
 }
 
 /** What a buyer may say they paid with. No "card": there is no card payment to claim. */
@@ -1435,32 +1698,37 @@ export async function updateSubscription(sub, patch = {}, by = null) {
   }
 
   await syncDeployment(sub);
-  if (movedFrom) {
+  if (movedFrom || (from === "suspended" && sub.status !== "suspended")) {
     const account = await Account.findById(sub.account);
-    if (account) sendEmail(mail.planChangedEmail({ subscription: sub, account, fromName: movedFrom }));
+    if (account && movedFrom) sendEmail(mail.planChangedEmail({ subscription: sub, account, fromName: movedFrom }));
+    // A new trial end lifted a suspension: they are told it works again.
+    if (account && from === "suspended" && sub.status !== "suspended") {
+      sendEmail(mail.subscriptionReactivatedEmail({ subscription: sub, account }));
+    }
   }
   return { subscription: sub, invoice };
 }
 
 /** Staff suspend a subscription: read-only, nothing deleted. The customer is told, with the reason. */
-export async function suspend(sub, { reason = "" } = {}, by = null) {
-  if (!["trialing", "active", "past_due"].includes(sub.status)) {
-    throw new BillingError(`A ${STATUS_WORD[sub.status]} subscription can't be suspended.`, { status: 409 });
+export async function suspend(current, { reason = "" } = {}, by = null) {
+  if (!["trialing", "active", "past_due"].includes(current.status)) {
+    throw new BillingError(`A ${STATUS_WORD[current.status]} subscription can't be suspended.`, { status: 409 });
   }
   const why = clean(reason, 600);
   if (!why) refuse({ reason: "Say why — the customer is told." });
   if (why.length > 300) refuse({ reason: "Keep it under 300 characters." });
 
-  const from = sub.status;
-  sub.status = "suspended";
-  sub.history.push({ status: "suspended", by: byId(by), note: `Suspended by SILLA: ${why}` });
-  await sub.save();
+  const from = current.status;
+  const sub = await transition(current, "suspended", { note: `Suspended by SILLA: ${why}`, by });
   await statusAudit(sub, from, by, `suspended by staff: ${why}`);
   await syncDeployment(sub);
 
-  const account = await Account.findById(sub.account);
-  const [invoice] = await openExtendingInvoices(sub._id);
-  if (account) sendEmail(mail.subscriptionSuspendedEmail({ subscription: sub, account, invoice: invoice || null, reason: why }));
+  const [account, [invoice], settings] = await Promise.all([
+    Account.findById(sub.account),
+    openExtendingInvoices(sub._id),
+    getSettings(),
+  ]);
+  if (account) sendEmail(mail.subscriptionSuspendedEmail({ subscription: sub, account, invoice: invoice || null, reason: why, settings }));
   return sub;
 }
 
@@ -1470,28 +1738,29 @@ export async function suspend(sub, { reason = "" } = {}, by = null) {
  * unpaid trial still running → trialing; otherwise past due with a fresh
  * grace period, so the job does not re-suspend it on its next tick.
  */
-export async function resume(sub, by = null) {
+export async function resume(current, by = null) {
   const now = new Date();
-  const from = sub.status;
+  const from = current.status;
 
-  if (sub.status === "suspended") {
+  if (current.status === "suspended") {
     const settings = await getSettings();
-    if (sub.currentPeriodEnd && sub.currentPeriodEnd > now) {
-      sub.status = "active";
-      sub.graceEndsAt = null;
-    } else if (!sub.currentPeriodEnd && sub.trialEndsAt && sub.trialEndsAt > now) {
-      sub.status = "trialing";
-      sub.graceEndsAt = null;
+    let to;
+    let set;
+    if (current.currentPeriodEnd && current.currentPeriodEnd > now) {
+      to = "active";
+      set = { graceEndsAt: null };
+    } else if (!current.currentPeriodEnd && current.trialEndsAt && current.trialEndsAt > now) {
+      to = "trialing";
+      set = { graceEndsAt: null };
     } else {
-      sub.status = "past_due";
-      sub.graceEndsAt = addDays(now, settings.billing?.graceDays ?? 7);
+      to = "past_due";
+      set = { graceEndsAt: addDays(now, settings.billing?.graceDays ?? 7) };
     }
-    sub.history.push({
-      status: sub.status,
-      by: byId(by),
-      note: sub.status === "past_due" ? `Resumed by SILLA — payment due by ${date(sub.graceEndsAt)}` : "Resumed by SILLA",
+    const sub = await transition(current, to, {
+      set,
+      note: to === "past_due" ? `Resumed by SILLA — payment due by ${date(set.graceEndsAt)}` : "Resumed by SILLA",
+      by,
     });
-    await sub.save();
     await statusAudit(sub, from, by, "resumed by staff");
     await syncDeployment(sub);
     const account = await Account.findById(sub.account);
@@ -1499,15 +1768,23 @@ export async function resume(sub, by = null) {
     return sub;
   }
 
-  if (sub.cancelAtPeriodEnd && sub.status !== "cancelled") {
-    sub.cancelAtPeriodEnd = false;
-    sub.history.push({ status: sub.status, by: byId(by), note: "Scheduled cancellation withdrawn" });
-    await sub.save();
-    await audit(actor(by), "subscription.cancel.withdraw", subjectOf(sub), `Withdrew ${sub.organizationName}'s scheduled cancellation`, {});
+  if (current.cancelAtPeriodEnd && current.status !== "cancelled") {
+    const sub = await Subscription.findOneAndUpdate(
+      { _id: current._id, cancelAtPeriodEnd: true, status: { $ne: "cancelled" } },
+      {
+        $set: { cancelAtPeriodEnd: false, cancelReason: "" },
+        $push: { history: { at: new Date(), status: current.status, by: byId(by), note: "Scheduled cancellation withdrawn" } },
+      },
+      { new: true }
+    );
+    if (!sub) throw new BillingError("This subscription changed a moment ago. Reload it and try again.", { status: 409, code: "SUBSCRIPTION_CHANGED" });
+    const reissued = await reissueVoidedPeriods(sub, by);
+    await audit(actor(by), "subscription.cancel.withdraw", subjectOf(sub), `Withdrew ${sub.organizationName}'s scheduled cancellation` +
+      (reissued.length ? ` and re-issued ${reissued.map((i) => i.number).join(", ")}` : ""), { reissued: reissued.map((i) => i.number) });
     return sub;
   }
 
-  if (sub.status === "cancelled") {
+  if (current.status === "cancelled") {
     throw new BillingError("A cancelled subscription has ended. A new order starts a new one.", { status: 409 });
   }
   throw new BillingError("There's nothing to resume — it isn't suspended or scheduled to end.", { status: 409 });
@@ -1518,34 +1795,39 @@ export async function resume(sub, by = null) {
  * Either way the periods it will never have stop being owed: their open
  * invoices are voided, so the customer is not chased for them.
  */
-export async function cancel(sub, { when = "now", reason = "" } = {}, by = null) {
-  if (sub.status === "cancelled") throw new BillingError("This subscription has already ended.", { status: 409 });
+export async function cancel(current, { when = "now", reason = "" } = {}, by = null) {
+  if (current.status === "cancelled") throw new BillingError("This subscription has already ended.", { status: 409 });
   const why = clean(reason, 600);
   if (why.length > 300) refuse({ reason: "Keep it under 300 characters." });
 
   if (when === "period_end") {
-    if (!["active", "trialing"].includes(sub.status)) {
+    if (!["active", "trialing"].includes(current.status)) {
       throw new BillingError("Only a running subscription can end at its period's end. Cancel it now instead.", { status: 409 });
     }
-    const endsAt = sub.status === "active" ? sub.currentPeriodEnd : sub.trialEndsAt;
+    if (current.cancelAtPeriodEnd) throw new BillingError("It's already set to end at the end of its period.", { status: 409 });
+    const endsAt = current.status === "active" ? current.currentPeriodEnd : current.trialEndsAt;
     if (!endsAt) throw new BillingError("This subscription has no period end yet. Cancel it now instead.", { status: 409 });
-    sub.cancelAtPeriodEnd = true;
-    sub.cancelReason = why;
-    sub.history.push({ status: sub.status, by: byId(by), note: `Will end on ${date(endsAt)}${why ? `: ${why}` : ""}` });
-    await sub.save();
-    await voidOpenPeriodInvoices(sub, "Subscription ends at the end of its period", by);
+    const sub = await Subscription.findOneAndUpdate(
+      { _id: current._id, status: current.status, cancelAtPeriodEnd: { $ne: true } },
+      {
+        $set: { cancelAtPeriodEnd: true, cancelReason: why },
+        $push: { history: { at: new Date(), status: current.status, by: byId(by), note: `Will end on ${date(endsAt)}${why ? `: ${why}` : ""}` } },
+      },
+      { new: true }
+    );
+    if (!sub) throw new BillingError("This subscription changed a moment ago. Reload it and try again.", { status: 409, code: "SUBSCRIPTION_CHANGED" });
+    await voidOpenPeriodInvoices(sub, SCHEDULED_END_VOID, by);
     await audit(actor(by), "subscription.cancel.schedule", subjectOf(sub), `${sub.organizationName} will end on ${date(endsAt)}`, { endsAt, reason: why });
     return sub;
   }
   if (when !== "now") refuse({ when: "Now, or at the end of the period." });
 
-  const from = sub.status;
-  sub.status = "cancelled";
-  sub.cancelledAt = new Date();
-  sub.cancelReason = why;
-  sub.cancelAtPeriodEnd = false;
-  sub.history.push({ status: "cancelled", by: byId(by), note: why ? `Cancelled by SILLA: ${why}` : "Cancelled by SILLA" });
-  await sub.save();
+  const from = current.status;
+  const sub = await transition(current, "cancelled", {
+    set: { cancelledAt: new Date(), cancelReason: why, cancelAtPeriodEnd: false },
+    note: why ? `Cancelled by SILLA: ${why}` : "Cancelled by SILLA",
+    by,
+  });
   await voidOpenPeriodInvoices(sub, "Subscription cancelled", by);
   await statusAudit(sub, from, by, why ? `cancelled by staff: ${why}` : "cancelled by staff");
   await syncDeployment(sub);
@@ -1564,29 +1846,35 @@ export async function cancel(sub, { when = "now", reason = "" } = {}, by = null)
  */
 
 /**
- * A paid period — or a trial — ended with its invoice still open: past
- * due, usable until `end + graceDays`. Only when there IS an open invoice:
- * a customer is never treated as late for a bill SILLA has not sent (a
- * price never agreed, a renewal voided by staff). Those are flagged for
- * staff in the console instead.
+ * A paid period — or a trial — ended with its bill unpaid: past due,
+ * still usable through a grace period. Only when there is an open,
+ * period-buying invoice that has actually FALLEN DUE: a customer is never
+ * treated as late for a bill SILLA has not sent (a price never agreed, a
+ * renewal voided by staff — those are flagged for staff instead), nor for
+ * one that is not due yet (a trial staff shortened to end before its
+ * invoice's due date). Grace runs from whichever came last, the end or
+ * the due date.
  */
 export async function lapse(sub, { kind, settings, now = new Date() }) {
-  const open = await openExtendingInvoices(sub._id);
-  if (!open.length) return null;
   const endField = kind === "trial" ? "trialEndsAt" : "currentPeriodEnd";
   const from = kind === "trial" ? "trialing" : "active";
   const end = sub[endField];
-  const graceEndsAt = addDays(end, settings.billing?.graceDays ?? 7);
+  if (!end || new Date(end) > now) return null;
+
+  const due = (await openExtendingInvoices(sub._id)).filter((i) => i.dueAt && new Date(i.dueAt) <= now);
+  if (!due.length) return null;
+  const firstDue = Math.min(...due.map((i) => new Date(i.dueAt).getTime()));
+  const graceEndsAt = addDays(new Date(Math.max(new Date(end).getTime(), firstDue)), settings.billing?.graceDays ?? 7);
 
   const updated = await Subscription.findOneAndUpdate(
-    { _id: sub._id, status: from, [endField]: end },
+    { _id: sub._id, status: from, [endField]: end, cancelAtPeriodEnd: { $ne: true } },
     {
       $set: { status: "past_due", graceEndsAt },
       $push: {
         history: {
           status: "past_due",
           at: now,
-          note: `${kind === "trial" ? "Trial" : "Paid period"} ended with ${open[0].number} unpaid — grace until ${date(graceEndsAt)}`,
+          note: `${kind === "trial" ? "Trial" : "Paid period"} ended with ${due[0].number} unpaid — grace until ${date(graceEndsAt)}`,
         },
       },
     },
@@ -1596,22 +1884,22 @@ export async function lapse(sub, { kind, settings, now = new Date() }) {
 
   // One message carries both the overdue notice and the grace period; the
   // invoice's own overdue reminder must not repeat it.
-  await Invoice.updateMany({ _id: { $in: open.map((i) => i._id) }, "reminders.overdueAt": null }, { $set: { "reminders.overdueAt": now } });
+  await Invoice.updateMany({ _id: { $in: due.map((i) => i._id) }, "reminders.overdueAt": null }, { $set: { "reminders.overdueAt": now } });
   await statusAudit(updated, from, null, `${kind === "trial" ? "trial" : "period"} ended unpaid`);
   await syncDeployment(updated);
   const account = await Account.findById(updated.account);
   if (account) {
-    sendEmail(mail.invoiceOverdueEmail({ invoice: open[0], account, settings, subscription: updated, graceEndsAt }));
+    sendEmail(mail.invoiceOverdueEmail({ invoice: due[0], account, settings, subscription: updated, graceEndsAt }));
   }
   return updated;
 }
 
 /** Grace ran out with the invoice still open: suspended. Read-only, nothing deleted. */
-export async function suspendAfterGrace(sub, { now = new Date() } = {}) {
+export async function suspendAfterGrace(sub, { settings = null, now = new Date() } = {}) {
   const open = await openExtendingInvoices(sub._id);
   if (!open.length) return null;
   const updated = await Subscription.findOneAndUpdate(
-    { _id: sub._id, status: "past_due", graceEndsAt: { $lte: now } },
+    { _id: sub._id, status: "past_due", graceEndsAt: { $ne: null, $lte: now } },
     { $set: { status: "suspended" }, $push: { history: { status: "suspended", at: now, note: `Grace period ended with ${open[0].number} unpaid` } } },
     { new: true }
   );
@@ -1619,15 +1907,21 @@ export async function suspendAfterGrace(sub, { now = new Date() } = {}) {
   await statusAudit(updated, "past_due", null, "grace period ended unpaid");
   await syncDeployment(updated);
   const account = await Account.findById(updated.account);
-  if (account) sendEmail(mail.subscriptionSuspendedEmail({ subscription: updated, account, invoice: open[0] }));
+  if (account) {
+    sendEmail(
+      mail.subscriptionSuspendedEmail({ subscription: updated, account, invoice: open[0], settings: settings || (await getSettings()) })
+    );
+  }
   return updated;
 }
 
 /** A cancellation scheduled for the end of the period (or trial), now due. */
 export async function endAtPeriodEnd(sub, { now = new Date() } = {}) {
   const from = sub.status;
+  const endField = from === "trialing" ? "trialEndsAt" : "currentPeriodEnd";
   const updated = await Subscription.findOneAndUpdate(
-    { _id: sub._id, status: from, cancelAtPeriodEnd: true },
+    // The end is part of the condition: a trial staff extended a moment ago is not ended on its old date.
+    { _id: sub._id, status: from, cancelAtPeriodEnd: true, [endField]: { $ne: null, $lte: now } },
     {
       $set: { status: "cancelled", cancelledAt: now, cancelAtPeriodEnd: false },
       $push: { history: { status: "cancelled", at: now, note: "Ended at the end of the period, as scheduled" } },
@@ -1688,9 +1982,18 @@ export async function sendTrialEndingReminder(sub, { settings, now = new Date() 
   return true;
 }
 
-/** Re-pushes deployments whose last push failed. Oldest failure first. */
+/**
+ * Re-pushes deployments whose last push failed — and any linked
+ * deployment never pushed at all (a crash between linking and pushing).
+ * Oldest first.
+ */
 export async function retryFailedSyncs({ limit = 50 } = {}) {
-  const subs = await Subscription.find({ "sync.error": { $ne: null }, organizationId: { $ne: "" } }).sort({ "sync.syncedAt": 1 }).limit(limit);
+  const subs = await Subscription.find({
+    organizationId: { $ne: "" },
+    $or: [{ "sync.error": { $ne: null } }, { "sync.syncedAt": null }],
+  })
+    .sort({ "sync.syncedAt": 1, updatedAt: 1 })
+    .limit(limit);
   for (const sub of subs) await syncDeployment(sub);
   return subs.length;
 }
