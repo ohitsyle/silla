@@ -7,7 +7,7 @@ import {
 import { Button, Modal, Notice, Panel, Segmented, Stepper, panelEnter } from "./components/ui.jsx";
 import Preview from "./components/Preview.jsx";
 import { DEFAULT_CONFIG, buildProfile, validate } from "./lib/profile.js";
-import { formatMoney, monthlyPrice, usePlans } from "./lib/plans.js";
+import { formatMoney, monthlyPrice, usePlans, yearlySaving } from "./lib/plans.js";
 import { vendorApi } from "./lib/vendorApi.js";
 import { useAccount } from "./lib/AccountContext.jsx";
 import { ROUTES } from "./lib/useHashRoute.js";
@@ -735,7 +735,8 @@ export default function Wizard({ onExit, navigate }) {
                     value={annual ? "yearly" : "monthly"}
                     onChange={(v) => setAnnual(v === "yearly")}
                     options={[
-                      { value: "yearly", label: "Yearly (−20%)" },
+                      // From the prices, like the pricing page's badge, so the two never disagree.
+                      { value: "yearly", label: yearlySaving(catalogue) > 0 ? `Yearly (−${yearlySaving(catalogue)}%)` : "Yearly" },
                       { value: "monthly", label: "Monthly" },
                     ]}
                   />

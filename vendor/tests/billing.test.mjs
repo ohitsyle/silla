@@ -132,12 +132,16 @@ async function cleanupBilling() {
 }
 
 export async function run(check) {
+  if (mongoose.connection.readyState !== 1) await connectDB();
   if (process.env.VENDOR_DB_NAME !== "silla_vendor_isolated") {
     console.log("  skipped — this suite moves dates and runs the billing job against the database,");
     console.log("  which would bill real customers. Run it with: npm run test:isolated");
+    // The other suites' submits still made subscriptions and invoices for
+    // their @test.silla buyers; those are removed either way, like their
+    // accounts and orders are by cleanup.mjs.
+    await cleanupBilling();
     return;
   }
-  if (mongoose.connection.readyState !== 1) await connectDB();
   // Deterministic: the control plane is NOT configured in this process,
   // whatever the shell exported. The API process never had it either.
   process.env.CONTROL_PLANE_SECRET = "";
