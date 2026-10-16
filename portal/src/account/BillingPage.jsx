@@ -339,9 +339,10 @@ export default function BillingPage({ navigate }) {
                       : "Pay it the usual way, then tell us so we can match it."}
                 </div>
               </div>
-              {firstOpen && !waiting(firstOpen) && (
-                <Button variant="primary" icon={Send} onClick={() => setClaiming(firstOpen)}>
-                  I've paid {firstOpen.number}
+              {/* Only for what this banner is about: an overdue bill not yet claimed. */}
+              {!allClaimed && overdue.find((i) => !waiting(i)) && (
+                <Button variant="primary" icon={Send} onClick={() => setClaiming(overdue.find((i) => !waiting(i)))}>
+                  I've paid {overdue.find((i) => !waiting(i)).number}
                 </Button>
               )}
             </motion.div>
