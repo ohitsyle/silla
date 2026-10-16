@@ -73,13 +73,21 @@ export const TONE_CHANNEL = {
   info: "--c-accent",
 };
 
+/**
+ * A buyer's "I've paid" still waiting for an answer. Only on an OPEN
+ * invoice: once the money is recorded (or the invoice voided) the claim
+ * stays on the record but there is nothing left to check.
+ */
+export const claimWaiting = (invoice) =>
+  invoice?.status === "open" && Boolean(invoice.claim?.submittedAt && !invoice.claim?.dismissedAt);
+
 /** An invoice's standing in one label: Paid, Void, Overdue, Checking payment, or due on a day. */
 export function invoiceState(invoice) {
   if (invoice.status === "paid") return { label: "Paid", tone: "good" };
   if (invoice.status === "void") return { label: "Void", tone: "neutral" };
-  const claimWaiting = invoice.claim?.submittedAt && !invoice.claim?.dismissedAt;
-  if (invoice.overdue) return { label: claimWaiting ? "Overdue · checking payment" : "Overdue", tone: "bad" };
-  if (claimWaiting) return { label: "Checking payment", tone: "waiting" };
+  const waiting = claimWaiting(invoice);
+  if (invoice.overdue) return { label: waiting ? "Overdue · checking payment" : "Overdue", tone: "bad" };
+  if (waiting) return { label: "Checking payment", tone: "waiting" };
   return { label: invoice.dueAt ? `Due ${shortDate(invoice.dueAt)}` : "Open", tone: "info" };
 }
 

@@ -35,8 +35,11 @@ export function ToneBadge({ tone = "neutral", children, className, size = "md" }
   );
 }
 
-export function InvoiceBadge({ invoice, size }) {
-  const { label, tone } = invoiceState(invoice);
+/** `withDue={false}` says "Open" rather than "Due Oct 31" — for a table that has a due column of its own. */
+export function InvoiceBadge({ invoice, size, withDue = true }) {
+  const state = invoiceState(invoice);
+  const { tone } = state;
+  const label = !withDue && /^Due /.test(state.label) ? "Open" : state.label;
   return (
     <ToneBadge tone={tone} size={size}>
       {label}
@@ -81,7 +84,7 @@ export function CopyButton({ value, label = "Copy" }) {
  * the free-text instructions, and the one rule that makes a transfer
  * findable — quote the invoice number.
  */
-export function HowToPay({ instructions = "", methods = [], contact = {}, invoiceNumber, compact = false }) {
+export function HowToPay({ instructions = "", methods = [], contact = {}, invoiceNumber, compact = false, columns = 3 }) {
   const nothing = !methods.length && !String(instructions).trim();
   return (
     <div className={compact ? "" : "rounded-xl border border-line/10 bg-bg-card p-6 shadow-sm"}>
@@ -110,7 +113,7 @@ export function HowToPay({ instructions = "", methods = [], contact = {}, invoic
             (compact ? (
               // On the invoice sheet: a document's columns, not cards — it is
               // read on paper as often as on a screen.
-              <ul className="grid gap-x-8 gap-y-4 sm:grid-cols-2 lg:grid-cols-3">
+              <ul className={`grid gap-x-8 gap-y-4 ${columns >= 3 ? "sm:grid-cols-2 lg:grid-cols-3" : columns === 2 ? "sm:grid-cols-2" : ""}`}>
                 {methods.map((m, i) => (
                   <li key={i} className="border-t border-line/10 pt-3">
                     <div className="flex items-center gap-2">

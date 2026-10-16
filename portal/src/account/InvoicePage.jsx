@@ -8,7 +8,7 @@ import { billingApi } from "../lib/billingApi.js";
 import { formatMoney } from "../lib/plans.js";
 import { useToast } from "../lib/toast.jsx";
 import { ROUTES } from "../lib/useHashRoute.js";
-import { METHOD_LABEL, longDate, shortDate } from "../billing/format.js";
+import { METHOD_LABEL, claimWaiting, longDate, shortDate } from "../billing/format.js";
 import { ClaimDialog, HowToPay } from "../billing/ui.jsx";
 import { AccountMenu } from "./kit.jsx";
 
@@ -293,7 +293,7 @@ export default function InvoicePage({ id, navigate }) {
 
   const back = () => navigate(isSilla ? `${ROUTES.staff}/invoices${id ? `/${id}` : ""}` : ROUTES.billing);
   const invoice = data?.invoice;
-  const claimWaiting = invoice?.claim?.submittedAt && !invoice?.claim?.dismissedAt;
+  const waiting = claimWaiting(invoice);
 
   return (
     <div className="silla-marketing min-h-screen print:bg-white">
@@ -338,7 +338,7 @@ export default function InvoicePage({ id, navigate }) {
               <Button icon={Printer} onClick={() => window.print()}>
                 Print / Save as PDF
               </Button>
-              {!isSilla && invoice.status === "open" && !claimWaiting && (
+              {!isSilla && invoice.status === "open" && !waiting && (
                 <Button variant="primary" icon={Send} onClick={() => setClaiming(true)}>
                   I've paid
                 </Button>

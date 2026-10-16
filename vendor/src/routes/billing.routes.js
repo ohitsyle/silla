@@ -321,10 +321,20 @@ router.get(
     );
     if (req.query.attention === "1") rows = rows.filter((r) => r.attention.length);
 
-    // Counts for the filter tabs, over everything (not just this page).
+    // Counts for the filter tabs, over everything (not just this page) —
+    // including how many need a person, which is a reading, not a status.
     const grouped = await Subscription.aggregate([{ $group: { _id: "$status", n: { $sum: 1 } } }]);
     const counts = Object.fromEntries(SUBSCRIPTION_STATUS.map((s) => [s, 0]));
     for (const g of grouped) counts[g._id] = g.n;
+    const live = await Subscription.find({ status: { $ne: "cancelled" } })
+      .select("status needsPricing organizationId sync trialEndsAt currentPeriodEnd")
+      .limit(2000);
+    const openCounts = await Invoice.aggregate([
+      { $match: { status: "open", subscription: { $in: live.map((s) => s._id) }, ...NUMBERED } },
+      { $group: { _id: "$subscription", n: { $sum: 1 } } },
+    ]);
+    const openBy = new Map(openCounts.map((c) => [String(c._id), c.n]));
+    counts.attention = live.filter((s) => billing.attentionFor(s, { openInvoices: openBy.get(String(s._id)) || 0, now }).length).length;
     res.json({ subscriptions: rows, counts });
   })
 );

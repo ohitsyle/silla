@@ -8,7 +8,7 @@ import { billingApi } from "../lib/billingApi.js";
 import { formatMoney } from "../lib/plans.js";
 import { useToast } from "../lib/toast.jsx";
 import { ROUTES } from "../lib/useHashRoute.js";
-import { longDate, shortDate, limitPhrase } from "../billing/format.js";
+import { claimWaiting, longDate, shortDate, limitPhrase } from "../billing/format.js";
 import { ClaimDialog, Fact, HowToPay, InvoiceBadge, ToneBadge } from "../billing/ui.jsx";
 import { AccountLayout } from "./shared.jsx";
 
@@ -163,7 +163,7 @@ function SubscriptionCard({ sub, vat, onClaim, navigate, delay }) {
 }
 
 function OpenInvoiceRow({ invoice, onClaim, navigate }) {
-  const claimed = invoice.claim?.submittedAt && !invoice.claim?.dismissedAt;
+  const claimed = claimWaiting(invoice);
   return (
     <li className="flex flex-wrap items-center gap-x-3 gap-y-2">
       <div className="mr-auto min-w-0">
@@ -195,7 +195,7 @@ function InvoiceList({ invoices, onClaim, navigate }) {
   return (
     <ul className="divide-y divide-line/[0.08] overflow-hidden rounded-xl border border-line/10 bg-bg-card shadow-sm">
       {invoices.map((inv) => {
-        const claimed = inv.claim?.submittedAt && !inv.claim?.dismissedAt;
+        const claimed = claimWaiting(inv);
         const dismissed = inv.status === "open" && inv.claim?.dismissedAt;
         return (
           <li
@@ -285,7 +285,7 @@ export default function BillingPage({ navigate }) {
   const open = invoices.filter((i) => i.status === "open");
   const overdue = open.filter((i) => i.overdue);
   const troubled = subs.find((s) => s.status === "suspended") || subs.find((s) => s.status === "past_due");
-  const waiting = (inv) => Boolean(inv?.claim?.submittedAt && !inv?.claim?.dismissedAt);
+  const waiting = claimWaiting;
   // The invoice to act on next: overdue first, and never one they've already told us they paid.
   const firstOpen = overdue.find((i) => !waiting(i)) || open.find((i) => !waiting(i)) || overdue[0] || open[0];
   // Once they've told us they paid, the banner stops asking and says we're on it.
