@@ -25,14 +25,20 @@ const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, ne
  * have not signed up, and nothing in a plan is a secret. `orderable` says
  * whether an order can carry it yet — the storefront offers only those.
  * `pricesExcludeVat` is true when SILLA is VAT-registered and invoices add
- * VAT on top, so the page can say so beside the price.
+ * VAT on top, so the page can say so beside the price; `trialDays` is the
+ * free trial a new deployment starts with (0: none).
  */
 router.get(
   "/",
   asyncHandler(async (_req, res) => {
     const [plans, settings] = await Promise.all([catalogue(), getSettings()]);
     res.set("Cache-Control", "public, max-age=60");
-    res.json({ plans, pricesExcludeVat: Boolean(settings.business?.vatRegistered) });
+    res.json({
+      plans,
+      pricesExcludeVat: Boolean(settings.business?.vatRegistered),
+      // So the page promises a free trial only while there is one.
+      trialDays: settings.billing?.trialDays ?? 0,
+    });
   })
 );
 

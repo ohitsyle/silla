@@ -3,61 +3,75 @@ import { motion } from "framer-motion";
 import { ArrowRight, Check } from "lucide-react";
 
 import { EASE, prefersReducedMotion, reveal, revealChild, revealGroup } from "../motion.js";
-import { CURRENCY, PLANS } from "../../lib/plans.js";
+import { formatMoney, moneyParts, monthlyPrice, periodPrice, usePlans, yearlySaving } from "../../lib/plans.js";
 
 /**
  * Plans.
  *
- * ⚠️  THE NUMBERS AND CURRENCY BELOW ARE PLACEHOLDERS.
+ * Read from SILLA's catalogue (GET /api/vendor/plans), which staff edit
+ * in the console's Plans section — so a price change is a form, not a
+ * deploy. Until the catalogue answers, or if it never does, the page shows
+ * the fallback in lib/plans.js, which mirrors the catalogue's defaults, so
+ * the cards do not jump when the live figures land.
  *
- * There is no billing system yet (see CLAUDE.md's portal roadmap), so
- * nothing here is charged and nothing is wired to a payment provider.
- * They exist so the page is complete and so the shape of the offer can
- * be argued about with something concrete on the screen. Replace
- * `PLANS` and `CURRENCY` before this is shown to anyone who might try
- * to buy — a wrong price on a live page is a promise you have to keep.
+ * ⚠️  The prices are still PLACEHOLDERS (pesos, converted guesses) until
+ * someone sets real ones in the console. A wrong price on a live page is a
+ * promise; an order freezes what it was quoted, and the invoice is billed
+ * from the catalogue at submission.
  *
  * The axis is SIZE, not features: everything is in every plan, which is
  * what the section above promises. Charging twice for the same product
  * by withholding the map editor would make that a lie.
  */
 
-function Price({ plan, annual }) {
-  const amount = annual ? plan.annual : plan.monthly;
+const GRID = {
+  1: "lg:grid-cols-1 lg:max-w-md lg:mx-auto",
+  2: "lg:grid-cols-2 lg:max-w-4xl lg:mx-auto",
+  3: "lg:grid-cols-3",
+  4: "lg:grid-cols-4",
+};
+
+function Price({ plan, annual, featured, pricesExcludeVat }) {
+  const amount = monthlyPrice(plan, annual);
+  const faint = featured ? "rgb(var(--m-paper) / 0.6)" : "rgb(var(--m-ink-faint))";
 
   if (amount === null) {
     return (
       <div className="mt-6">
         <span className="display text-[2.75rem]">Let's talk</span>
-        <p className="mt-1.5 text-sm" style={{ color: "rgb(var(--m-ink-faint))" }}>
+        <p className="mt-1.5 text-sm" style={{ color: faint }}>
           Priced on how big it actually is.
         </p>
       </div>
     );
   }
 
+  const { symbol, amount: figure } = moneyParts(amount, { currency: plan.currency });
+  const vat = pricesExcludeVat ? " Plus VAT." : "";
   return (
     <div className="mt-6">
       <div className="flex items-baseline gap-1.5">
-        <span className="text-2xl font-bold" style={{ color: "rgb(var(--m-ink-soft))" }}>
-          {CURRENCY}
+        <span className="text-2xl font-bold" style={{ color: featured ? "rgb(var(--m-paper) / 0.75)" : "rgb(var(--m-ink-soft))" }}>
+          {symbol}
         </span>
         {/* Keyed on the value so the figure re-animates when the toggle flips. */}
         <motion.span
-          key={amount}
+          key={`${plan.key}:${amount}`}
           className="display text-[3.25rem] tabular-nums"
           initial={prefersReducedMotion() ? { opacity: 0 } : { opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.35, ease: EASE }}
         >
-          {amount}
+          {figure}
         </motion.span>
-        <span className="text-base font-semibold" style={{ color: "rgb(var(--m-ink-faint))" }}>
+        <span className="text-base font-semibold" style={{ color: faint }}>
           /month
         </span>
       </div>
-      <p className="mt-1.5 text-sm" style={{ color: "rgb(var(--m-ink-faint))" }}>
-        {annual ? "Billed yearly." : "Billed monthly, cancel whenever."}
+      <p className="mt-1.5 text-sm" style={{ color: faint }}>
+        {annual
+          ? `Billed yearly — ${formatMoney(periodPrice(plan, true), { currency: plan.currency })} a year.${vat}`
+          : `Billed monthly.${vat}`}
       </p>
     </div>
   );
@@ -65,6 +79,8 @@ function Price({ plan, annual }) {
 
 export default function Pricing({ onConfigure }) {
   const [annual, setAnnual] = useState(true);
+  const { plans, pricesExcludeVat, trialDays } = usePlans();
+  const saving = yearlySaving(plans);
 
   return (
     <section id="pricing" className="px-6 py-24 sm:py-32" style={{ background: "rgb(var(--m-paper-deep))" }}>
@@ -91,6 +107,7 @@ export default function Pricing({ onConfigure }) {
                 key={label}
                 type="button"
                 onClick={() => setAnnual(value)}
+                aria-pressed={annual === value}
                 className="relative rounded-full px-6 py-2.5 text-[15px] font-semibold transition-colors"
                 style={{ color: annual === value ? "rgb(var(--m-paper))" : "rgb(var(--m-ink-soft))" }}
               >
@@ -104,7 +121,8 @@ export default function Pricing({ onConfigure }) {
                 )}
                 <span className="relative flex items-center gap-2">
                   {label}
-                  {value && (
+                  {/* Worked out from the prices, so it can't drift from them. */}
+                  {value && saving > 0 && (
                     <span
                       className="rounded-full px-2 py-0.5 text-[11px] font-bold"
                       style={{
@@ -112,7 +130,7 @@ export default function Pricing({ onConfigure }) {
                         color: annual ? "rgb(var(--m-accent-ink))" : "rgb(var(--m-accent-deep))",
                       }}
                     >
-                      −20%
+                      −{saving}%
                     </span>
                   )}
                 </span>
@@ -121,8 +139,8 @@ export default function Pricing({ onConfigure }) {
           </div>
         </motion.div>
 
-        <motion.div {...revealGroup(0.1)} className="mt-14 grid gap-6 lg:grid-cols-3">
-          {PLANS.map((plan) => (
+        <motion.div {...revealGroup(0.1)} className={`mt-14 grid gap-6 ${GRID[Math.min(plans.length, 4)] || GRID[3]}`}>
+          {plans.map((plan) => (
             <motion.div
               key={plan.key}
               {...revealChild()}
@@ -153,10 +171,10 @@ export default function Pricing({ onConfigure }) {
                 {plan.tagline}
               </p>
 
-              <Price plan={plan} annual={annual} />
+              <Price plan={plan} annual={annual} featured={plan.featured} pricesExcludeVat={pricesExcludeVat} />
 
               <ul className="mt-7 space-y-3 flex-1">
-                {plan.highlights.map((item) => (
+                {(plan.highlights || []).map((item) => (
                   <li key={item} className="flex gap-3 text-[15px]">
                     <Check
                       size={18}
@@ -187,7 +205,7 @@ export default function Pricing({ onConfigure }) {
                     : { background: "rgb(var(--m-ink))", color: "rgb(var(--m-paper))" }
                 }
               >
-                {plan.monthly === null ? "Get in touch" : "Configure this"}
+                {monthlyPrice(plan, false) === null ? "Get in touch" : "Configure this"}
                 <ArrowRight size={16} />
               </button>
             </motion.div>
@@ -199,8 +217,9 @@ export default function Pricing({ onConfigure }) {
           className="mt-10 text-center text-sm"
           style={{ color: "rgb(var(--m-ink-faint))" }}
         >
-          Every plan includes the whole product. Configure yours first — you only talk to us when you're
-          ready to switch it on.
+          Every plan includes the whole product
+          {trialDays > 0 ? `, and starts with a ${trialDays}-day free trial the day your system goes live` : ""}.
+          Configure yours first — you only talk to us when you're ready to switch it on.
         </motion.p>
       </div>
     </section>
