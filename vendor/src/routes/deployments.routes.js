@@ -117,9 +117,19 @@ function explain(err) {
       },
     };
   }
-  // The product's own answer: a bad profile (400 with `fields`), a taken
-  // address (409 SLUG_TAKEN with `suggestion`), an unknown organization.
-  return { status: err.status, body: { ...data, error: data.error || err.message } };
+  // The product's own answer: a bad profile (400 INVALID_PROFILE), a
+  // reserved address (400 INVALID_SLUG), a taken one (409 SLUG_TAKEN with
+  // `suggestion`), an unknown organization. The product lists problems as
+  // [{ field, message }] — the importer's own words — while every form in
+  // the portal reads `fields` as { field: message }, so both are sent:
+  // `fields` keyed for the form, `problems` in full for the list.
+  const body = { ...data, error: data.error || err.message };
+  if (Array.isArray(data.fields)) {
+    body.problems = data.fields.map((f) => ({ field: String(f?.field ?? ""), message: String(f?.message ?? "") }));
+    body.fields = {};
+    for (const { field, message } of body.problems) if (!(field in body.fields)) body.fields[field] = message;
+  }
+  return { status: err.status, body };
 }
 
 /** Runs a control-plane call, answering with the explanation when it fails. */
@@ -235,8 +245,9 @@ router.get(
  * A failure before step 4 leaves the order exactly as it was (and is
  * audited, since the product may have been reached). A timeout is the one
  * ambiguous case — the organization may exist — and pressing again is
- * safe: its address is now taken, so the product answers SLUG_TAKEN
- * rather than building a twin.
+ * safe: the product keys provisioning on the order id and answers
+ * ALREADY_PROVISIONED with the organization it built, which this records
+ * exactly as if the first answer had arrived (`adopted`).
  */
 router.post(
   "/provision",
@@ -290,6 +301,13 @@ router.post(
 
     const target = { type: "deployment", id: order._id, label: order.organizationName };
     let created;
+    // True when the product already holds an organization for this order:
+    // an earlier press reached it, but its answer never came back (a
+    // timeout, a dropped connection). The product keys provisioning on
+    // source.orderId and refuses to build a twin, so the honest move is
+    // to record the one that exists — whose PIN went out with that lost
+    // answer, and can only be replaced (owner access), never recovered.
+    let adopted = false;
     try {
       const entitlements = await billing.snapshotForOrder(claimed);
       created = await callDeployment("POST", "/api/internal/organizations", {
@@ -299,17 +317,28 @@ router.post(
         source: { orderId: claimed._id.toString() },
       });
     } catch (err) {
-      await Order.updateOne({ _id: claimed._id }, { $set: { provisioningClaim: { at: null, by: null } } });
       const explained = explain(err);
-      await audit(
-        req,
-        "deployment.provision.failed",
-        target,
-        `Provisioning ${order.organizationName} failed: ${explained?.body.error || err.message}`,
-        { slug, status: explained?.status || 500, code: explained?.body.code || null }
-      );
-      if (!explained) throw err;
-      return res.status(explained.status).json(explained.body);
+      if (explained?.body.code === "ALREADY_PROVISIONED" && explained.body.organizationId) {
+        adopted = true;
+        created = { organizationId: explained.body.organizationId, slug: explained.body.slug || slug, owner: null, summary: null };
+      } else {
+        await Order.updateOne({ _id: claimed._id }, { $set: { provisioningClaim: { at: null, by: null } } });
+        await audit(
+          req,
+          "deployment.provision.failed",
+          target,
+          `Provisioning ${order.organizationName} failed: ${explained?.body.error || err.message}`,
+          { slug, status: explained?.status || 500, code: explained?.body.code || null }
+        );
+        if (!explained) throw err;
+        // The one ambiguous failure: the request may have arrived. Saying
+        // so is what makes pressing again feel safe rather than reckless.
+        if (explained.body.code === "CONTROL_PLANE_UNREACHABLE") {
+          explained.body.retry =
+            "If the product received the request before the connection failed, pressing Provision again links this order to the organization it built rather than building a second one.";
+        }
+        return res.status(explained.status).json(explained.body);
+      }
     }
 
     const finalSlug = created.slug || slug;
@@ -325,7 +354,7 @@ router.post(
         status: next,
         at: now,
         by: req.account._id,
-        note: next === "live" ? `Provisioned at ${url}` : "Provisioning from the staff console",
+        note: next === "live" ? `Live at ${url}` : "Provisioning from the staff console",
       });
       from = next;
     }
@@ -333,8 +362,9 @@ router.post(
     const updated = await Order.findOneAndUpdate(
       // Guarded on the organization id so a stale-claim takeover (which
       // the TTL makes practically impossible) can never overwrite a
-      // deployment someone else just recorded.
-      { _id: claimed._id, provisionedOrganizationId: "" },
+      // deployment someone else just recorded — and on the status, so an
+      // order cancelled while this call was out never comes back live.
+      { _id: claimed._id, provisionedOrganizationId: "", status: { $in: ["submitted", "provisioning"] } },
       {
         $set: {
           status: "live",
@@ -349,11 +379,22 @@ router.post(
       { new: true }
     );
     if (!updated) {
-      console.error("[vendor:deployments] organization", created.organizationId, "was created for", order._id.toString(), "but the order was provisioned concurrently");
-      return reject(res, 409, "This order was provisioned by someone else at the same moment. Check the deployments list.", {
-        code: "ALREADY_PROVISIONED",
-        organizationId: created.organizationId,
-      });
+      // The organization exists and the order no longer wants it, or holds
+      // another. Nothing here can undo the product's side, so it is said
+      // plainly and put on the record where the next person will find it.
+      const now = await Order.findById(claimed._id).select("status provisionedOrganizationId");
+      console.error("[vendor:deployments] organization", created.organizationId, "was created for", order._id.toString(), "but the order moved on:", now?.status);
+      await audit(req, "deployment.provision.failed", target,
+        `Built organization ${created.organizationId} for ${order.organizationName}, but the order had moved on (${now?.status || "gone"}) — it needs a person`,
+        { slug: finalSlug, organizationId: String(created.organizationId), status: 409, code: "ORDER_MOVED_ON" });
+      return reject(
+        res,
+        409,
+        now?.provisionedOrganizationId
+          ? "This order was provisioned by someone else at the same moment. Check the deployments list."
+          : `This order was ${now?.status || "removed"} while it was being provisioned. The organization was still built (${created.organizationId}) — decide what happens to it before going further.`,
+        { code: "ALREADY_PROVISIONED", organizationId: created.organizationId }
+      );
     }
 
     // Billing must not un-provision a built organization: a failure is
@@ -369,12 +410,15 @@ router.post(
 
     if (order.account) sendEmail(orderLiveEmail({ account: order.account, order: updated }));
 
-    await audit(req, "deployment.provision", target, `Provisioned ${updated.organizationName} at ${url}`, {
-      organizationId: String(created.organizationId),
-      slug: finalSlug,
-      url,
-      owner: created.owner?.email || null,
-    });
+    await audit(
+      req,
+      "deployment.provision",
+      target,
+      adopted
+        ? `Linked ${updated.organizationName} to the organization an earlier attempt built, at ${url}`
+        : `Provisioned ${updated.organizationName} at ${url}`,
+      { organizationId: String(created.organizationId), slug: finalSlug, url, owner: created.owner?.email || null, adopted }
+    );
 
     res.status(201).json({
       order: orderSummary(updated),
@@ -382,6 +426,13 @@ router.post(
       // The only time this PIN exists outside the product. Not stored.
       owner: created.owner ? { email: created.owner.email, temporaryPin: created.owner.temporaryPin } : null,
       summary: created.summary || null,
+      adopted,
+      ...(adopted
+        ? {
+            notice:
+              "This order's organization already existed — an earlier attempt reached the product but its answer never arrived. The owner's temporary PIN went out with that attempt and can't be shown again; re-issue owner access if they don't have it.",
+          }
+        : {}),
       billingWarning,
     });
   })

@@ -24,6 +24,15 @@
  * testing, for a browser walk: point the portal at it with
  * VITE_VENDOR_API_URL and allow the portal's origin with CORS_ORIGINS.
  * Stop it with Ctrl+C.
+ *
+ * To walk it against the REAL product instead of the fake — a disposable
+ * one, such as server/tests/tenancy-preview.mjs — give --serve that
+ * product's address and secret, and where its client is served:
+ *
+ *   SERVER_INTERNAL_URL=http://127.0.0.1:4040 CONTROL_PLANE_SECRET=<same as the product's> \
+ *   PRODUCT_URL=http://localhost:5185 npm run test:isolated -- --serve
+ *
+ * Only --serve reads them. A test run always provisions against the fake.
  */
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -44,6 +53,9 @@ const STAFF_PASSWORD = "isolated-owner-passphrase";
 // signs) and the fake product API (which verifies), and by nothing real.
 const CONTROL_PLANE_SECRET = "isolated-control-plane-secret-for-tests-only";
 const PRODUCT_URL = process.env.PRODUCT_URL || "http://localhost:5173";
+const SERVING = process.argv.includes("--serve");
+/** A --serve walk against a real product API, when given one with its secret. */
+const SERVE_AGAINST_PRODUCT = SERVING && Boolean(process.env.SERVER_INTERNAL_URL && process.env.CONTROL_PLANE_SECRET);
 
 /* ───────────────────────── the fake product API ───────────────────────── */
 
@@ -65,9 +77,14 @@ function startFakeControlPlane(secret) {
   const received = []; // every request, with whether its signature verified
   const issued = []; // every temporary PIN handed out, so a suite can look for leaks
   const orgs = new Map();
+  const byOrder = new Map(); // source.orderId → organization id, as Organization.provisioning.orderId
   const taken = new Set(["taken-already"]);
   const seen = new Set();
-  let drill = null; // { kind: "unconfigured" | "drop" } — failure drills the suites switch on
+  // Failure drills the suites switch on:
+  //   unconfigured  the product has no secret (503)
+  //   drop          the product is down: every connection is cut
+  //   lose-answer   the NEXT provision is built, then its answer is lost
+  let drill = null;
 
   const fakeServer = http.createServer(async (req, res) => {
     const chunks = [];
@@ -133,16 +150,42 @@ function startFakeControlPlane(secret) {
     }
 
     if (req.method === "POST" && path === "/api/internal/organizations") {
-      const { profile, slug, entitlements } = entry.body || {};
+      // In the order server/src/services/provisioning.js checks, with its
+      // shapes: problems as [{ field, message }], the order before the address.
+      const { profile, slug, entitlements, source } = entry.body || {};
       if (!profile || typeof profile !== "object" || !profile.organizationName) {
-        return send(400, { error: "The profile has problems.", fields: { organizationName: "Required." } });
+        return send(400, {
+          error: "This profile can't be provisioned — 1 field(s) need fixing.",
+          code: "INVALID_PROFILE",
+          fields: [{ field: "organizationName", message: "is required" }],
+        });
+      }
+      if (!profile.owner?.email) {
+        return send(400, {
+          error: "A deployment provisioned for a customer must name its owner.",
+          code: "INVALID_PROFILE",
+          fields: [{ field: "owner", message: "is required: the founding superadmin's firstName, lastName and email" }],
+        });
+      }
+      const orderId = source?.orderId ? String(source.orderId) : null;
+      if (orderId && byOrder.has(orderId)) {
+        const existing = orgs.get(byOrder.get(orderId));
+        return send(409, {
+          error: "This order already has a deployment.",
+          code: "ALREADY_PROVISIONED",
+          organizationId: existing.organization.id,
+          slug: existing.organization.slug,
+        });
       }
       const problem = slugProblem(String(slug || ""));
-      if (problem) return send(400, { error: problem, fields: { slug: problem } });
+      if (problem) {
+        return send(400, { error: problem, code: "INVALID_SLUG", fields: [{ field: "slug", message: problem }], suggestion: `${slug}-org` });
+      }
       if (taken.has(slug)) return send(409, { error: "That address is taken.", code: "SLUG_TAKEN", suggestion: `${slug}-2` });
 
       const id = crypto.randomBytes(12).toString("hex");
       taken.add(slug);
+      if (orderId) byOrder.set(orderId, id);
       const owner = profile.owner?.email ? { email: profile.owner.email, temporaryPin: pin() } : null;
       if (owner) issued.push({ organizationId: id, email: owner.email, temporaryPin: owner.temporaryPin });
       const floors = Array.isArray(profile.floors) ? profile.floors.length : 0;
@@ -155,6 +198,10 @@ function startFakeControlPlane(secret) {
           ? [{ email: owner.email, firstName: profile.owner.firstName, lastName: profile.owner.lastName, mustChangePin: true }]
           : [],
       });
+      if (drill?.kind === "lose-answer") {
+        drill = null; // once: the retry gets a real answer
+        return req.socket.destroy(); // built, and the answer never arrives
+      }
       return send(201, { organizationId: id, slug, owner, summary: { floors, resources: 48 } });
     }
 
@@ -210,9 +257,10 @@ try {
     SILLA_ORDERS_EMAIL: "",
     CORS_ORIGINS: process.env.CORS_ORIGINS || "http://localhost:5174",
     NODE_ENV: "test",
-    // The control plane points at the fake, never at a real product API.
-    SERVER_INTERNAL_URL: fakeUrl,
-    CONTROL_PLANE_SECRET,
+    // The control plane points at the fake, never at a real product API —
+    // except a --serve walk that names a (disposable) one, see the header.
+    SERVER_INTERNAL_URL: SERVE_AGAINST_PRODUCT ? process.env.SERVER_INTERNAL_URL : fakeUrl,
+    CONTROL_PLANE_SECRET: SERVE_AGAINST_PRODUCT ? process.env.CONTROL_PLANE_SECRET : CONTROL_PLANE_SECRET,
     PRODUCT_URL,
   };
   Object.assign(process.env, env);
@@ -236,13 +284,17 @@ try {
   const { createApp } = await import("../src/app.js");
   server = http.createServer(createApp());
 
-  if (process.argv.includes("--serve")) {
+  if (SERVING) {
     const port = Number(process.env.VENDOR_PORT || 4100);
     await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
     console.log(`\n  Throwaway vendor API on http://127.0.0.1:${port}`);
     console.log(`  Staff owner: ${STAFF_EMAIL} / ${STAFF_PASSWORD}`);
     console.log(`  CORS allows: ${env.CORS_ORIGINS}`);
-    console.log(`  Fake product API (control plane): ${fakeUrl} — what it received: ${fakeUrl}/__received`);
+    console.log(
+      SERVE_AGAINST_PRODUCT
+        ? `  Control plane: the product API at ${env.SERVER_INTERNAL_URL}`
+        : `  Fake product API (control plane): ${fakeUrl} — what it received: ${fakeUrl}/__received`
+    );
     console.log(`  Deployments are addressed at ${PRODUCT_URL}/<slug>`);
     // Invitation and verification codes are only ever emailed. To walk an
     // invitation in the browser, plant a known one (246810):

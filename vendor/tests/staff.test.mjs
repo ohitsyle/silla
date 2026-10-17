@@ -504,6 +504,51 @@ export async function run(check) {
     check(S, "A profile with no owner is never provisioned (it would plant the public demo accounts)",
       noOwner.status === 409 && noOwner.body?.code === "NO_OWNER" && (await fake()).received.length === before);
 
+    // The product refuses an address it reserves: its [{ field, message }]
+    // list arrives keyed for the form, with the full list beside it.
+    const reservedOrder = await submittedOrder(buyer, `Reserved Test ${tag}`);
+    const reserved = await post("/api/vendor/deployments/provision", { orderId: reservedOrder, slug: "admin" }, ownerToken);
+    check(S, "A reserved address is refused by the product, said under the address field",
+      reserved.status === 400 && reserved.body?.code === "INVALID_SLUG" && typeof reserved.body?.fields?.slug === "string" &&
+        reserved.body?.problems?.[0]?.field === "slug", JSON.stringify(reserved.body));
+
+    // The ambiguous failure: the product builds the organization, and the
+    // answer never arrives. Pressing again must link the order to it, not
+    // build a second.
+    const lostOrder = await submittedOrder(buyer, `Lost Answer ${tag}`);
+    const lostSlug = `lost-${tag}`.slice(0, 40);
+    await drill({ kind: "lose-answer" });
+    const lost = await post("/api/vendor/deployments/provision", { orderId: lostOrder, slug: lostSlug }, ownerToken);
+    const afterLost = await get(`/api/vendor/orders/queue/${lostOrder}`, ownerToken);
+    check(S, "A provision whose answer is lost is explained as unreachable, says a retry is safe, and leaves the order as it was",
+      lost.status === 502 && lost.body?.code === "CONTROL_PLANE_UNREACHABLE" && Boolean(lost.body?.retry) &&
+        afterLost.body?.order?.status === "submitted" && !afterLost.body?.order?.provisionedOrganizationId, JSON.stringify(lost.body));
+    const retried = await post("/api/vendor/deployments/provision", { orderId: lostOrder, slug: lostSlug }, ownerToken);
+    const lostCreates = (await fake()).received.filter((r) => r.path === "/api/internal/organizations" && r.body?.source?.orderId === lostOrder);
+    const builtFor = (await fake()).issued.filter((i) => lostCreates.length && i.email === lostCreates[0].body?.profile?.owner?.email);
+    check(S, "…and pressing again links the order to the organization that was built, rather than building a twin",
+      retried.status === 201 && retried.body?.adopted === true && retried.body?.owner === null && Boolean(retried.body?.notice) &&
+        retried.body?.order?.status === "live" && retried.body?.deployment?.slug === lostSlug && builtFor.length === 1,
+      `${retried.status} ${retried.body?.error || ""}; ${builtFor.length} organization(s) built`);
+    const lostSub = await (await import("../src/models/Subscription.js")).default.findOne({ order: lostOrder }).lean();
+    check(S, "…with its subscription linked and its trial started, as for any provision",
+      lostSub?.organizationId === builtFor[0]?.organizationId && lostSub?.status === "trialing", lostSub?.status);
+
+    // By hand, for when the control plane is down: the same billing step.
+    const manualOrder = await submittedOrder(buyer, `Manual Test ${tag}`);
+    await patch(`/api/vendor/orders/queue/${manualOrder}`, { status: "provisioning", note: "Seeding by hand" }, ownerToken);
+    const manualLive = await patch(`/api/vendor/orders/queue/${manualOrder}`,
+      { status: "live", deploymentUrl: `${PRODUCT_URL}/manual-${tag}`, provisionedOrganizationId: `manual-org-${tag}` }, ownerToken);
+    const manualSub = await (await import("../src/models/Subscription.js")).default.findOne({ order: manualOrder }).lean();
+    check(S, "Going live by hand starts the trial and links the organization, like the one-press path",
+      manualLive.status === 200 && manualSub?.status === "trialing" && manualSub?.organizationId === `manual-org-${tag}`,
+      `${manualLive.status} ${manualLive.body?.error || ""} ${manualSub?.status}`);
+    const repoint = await patch(`/api/vendor/orders/queue/${orderId}`, { provisionedOrganizationId: `manual-org-${tag}` }, ownerToken);
+    check(S, "A console-provisioned order's organization can't be re-pointed by hand", repoint.status === 409 && Boolean(repoint.body?.fields?.provisionedOrganizationId));
+    const sameOrg = await patch(`/api/vendor/orders/queue/${noOwnerOrder}`, { provisionedOrganizationId: `manual-org-${tag}` }, ownerToken);
+    check(S, "…and two orders can never be linked to one organization", sameOrg.status === 409 && Boolean(sameOrg.body?.fields?.provisionedOrganizationId),
+      sameOrg.body?.error);
+
     const detail = await get(`/api/vendor/deployments/${orderId}`, supportToken);
     check(S, "Deployment detail carries the product's live usage, activity and owners",
       typeof detail.body?.live?.usage?.resources === "number" && detail.body?.live?.owners?.[0]?.email === createCall?.body?.profile?.owner?.email &&

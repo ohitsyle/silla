@@ -324,7 +324,20 @@ export async function provisionFromProfile(input, { slug: requested, entitlement
     });
   }
 
-  // ---- 2. the address ----
+  // ---- 2. one order, one deployment ----
+  // A control-plane call that timed out on the vendor's side may have
+  // succeeded here. Answering a retry with a SECOND organization would
+  // leave a buyer with two deployments and a founder email for each.
+  // Checked BEFORE the address: a retry naturally asks for the same one,
+  // which the first attempt now holds, and "that address is taken" would
+  // send staff off to pick another for an organization that already exists.
+  const orderId = source?.orderId ? String(source.orderId) : null;
+  if (orderId) {
+    const existing = await Organization.findOne({ "provisioning.orderId": orderId }).select("_id slug").lean();
+    if (existing) throw alreadyProvisioned(existing);
+  }
+
+  // ---- 3. the address ----
   let slug;
   if (requested !== undefined && requested !== null && String(requested).trim() !== "") {
     slug = String(requested).trim().toLowerCase();
@@ -340,16 +353,6 @@ export async function provisionFromProfile(input, { slug: requested, entitlement
     if (await Organization.exists({ slug })) throw await slugTaken(slug);
   } else {
     slug = await availableSlug(profile.organizationName);
-  }
-
-  // ---- 3. one order, one deployment ----
-  // A control-plane call that timed out on the vendor's side may have
-  // succeeded here. Answering a retry with a SECOND organization would
-  // leave a buyer with two deployments and a founder email for each.
-  const orderId = source?.orderId ? String(source.orderId) : null;
-  if (orderId) {
-    const existing = await Organization.findOne({ "provisioning.orderId": orderId }).select("_id slug").lean();
-    if (existing) throw alreadyProvisioned(existing);
   }
 
   // ---- 4. the organization itself ----

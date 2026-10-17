@@ -327,8 +327,18 @@ router.get(
  * This is also the MANUAL provisioning path — the profile run through
  * `npm run seed:file` by hand, then the URL and organization id recorded
  * here — for when the control plane is not available. PROVISION in the
- * console (deployments.routes.js) is the one-press path.
+ * console (deployments.routes.js) is the one-press path. Either way, going
+ * live is what starts the subscription's trial (billing.onProvisioned):
+ * a customer with a working system is on the clock however it was built.
+ *
+ * The write is CONDITIONAL on the order still being as it was read — its
+ * status, its address, its organization, and nobody mid-way through
+ * provisioning it. Two staff members acting on one order at once (one
+ * cancelling while another presses Provision) would otherwise each save
+ * over the other, and a cancelled order could come back live.
  */
+const CLAIM_FRESH_MS = 2 * 60 * 1000; // deployments.routes.js CLAIM_TTL_MS
+
 router.patch(
   "/queue/:id",
   requirePermission("orders.manage"),
@@ -341,19 +351,21 @@ router.patch(
     const note = String(req.body?.note || "").trim().slice(0, 1000);
     const previous = order.status;
     const before = { deploymentUrl: order.deploymentUrl, provisionedOrganizationId: order.provisionedOrganizationId };
+    const after = { ...before };
+    const moving = Boolean(status) && status !== previous;
 
-    if (status && status !== order.status) {
-      if (!ALLOWED_TRANSITIONS[order.status]?.includes(status)) {
+    if (moving) {
+      if (!ALLOWED_TRANSITIONS[previous]?.includes(status)) {
         return res.status(409).json({
-          error: `Cannot go from ${order.status} to ${status}.`,
-          allowed: ALLOWED_TRANSITIONS[order.status],
+          error: `Cannot go from ${previous} to ${status}.`,
+          allowed: ALLOWED_TRANSITIONS[previous],
         });
       }
       // Cancelling a LIVE order ends a running deployment: its subscription
       // is cancelled and the organization goes read-only. That is the
       // reach of deployments.manage (owners, admins) — orders.manage lets
       // support clear away a duplicate order, not switch a customer off.
-      if (status === "cancelled" && order.status === "live" && !can(req.account, "deployments.manage")) {
+      if (status === "cancelled" && previous === "live" && !can(req.account, "deployments.manage")) {
         return res.status(403).json({
           error: "Cancelling a live order switches the customer's system off. Ask an owner or an admin.",
           code: "STAFF_PERMISSION",
@@ -369,61 +381,115 @@ router.patch(
           fields: { note: "Say why it's being cancelled — the customer is emailed the reason." },
         });
       }
-      order.status = status;
-      order.history.push({ status, by: req.account._id, note });
     }
 
-    if (deploymentUrl !== undefined) order.deploymentUrl = String(deploymentUrl).trim();
+    if (deploymentUrl !== undefined) {
+      after.deploymentUrl = String(deploymentUrl).trim().slice(0, 500);
+      if (after.deploymentUrl && !/^https?:\/\/\S+$/i.test(after.deploymentUrl)) {
+        const message = "Enter the full address, starting with https://";
+        return res.status(400).json({ error: message, fields: { deploymentUrl: message } });
+      }
+    }
     if (provisionedOrganizationId !== undefined) {
-      order.provisionedOrganizationId = String(provisionedOrganizationId).trim();
+      after.provisionedOrganizationId = String(provisionedOrganizationId).trim().slice(0, 64);
+      if (after.provisionedOrganizationId !== before.provisionedOrganizationId) {
+        // An organization the console provisioned is linked to its
+        // subscription and its address; re-pointing it by hand would send
+        // this customer's plan to someone else's deployment.
+        if (order.deploymentSlug) {
+          const message = "This order was provisioned from the console, so its organization can't be changed by hand.";
+          return res.status(409).json({ error: message, fields: { provisionedOrganizationId: message } });
+        }
+        if (
+          after.provisionedOrganizationId &&
+          (await Order.exists({ _id: { $ne: order._id }, provisionedOrganizationId: after.provisionedOrganizationId }))
+        ) {
+          const message = "Another order is already linked to that organization.";
+          return res.status(409).json({ error: message, fields: { provisionedOrganizationId: message } });
+        }
+      }
     }
 
+    const nextStatus = moving ? status : previous;
     // Going live without saying where is the one mistake this flow
     // invites, and it is the field the customer actually needs.
-    if (order.status === "live" && !order.deploymentUrl) {
-      return res.status(400).json({ error: "A live order needs its deployment URL." });
+    if (nextStatus === "live" && !after.deploymentUrl) {
+      const message = "A live order needs its deployment URL.";
+      return res.status(400).json({ error: message, fields: { deploymentUrl: message } });
     }
 
-    await order.save();
+    const changed = Object.keys(before).filter((k) => before[k] !== after[k]);
+    if (!moving && !changed.length) return res.json({ order: summary(order) });
 
-    const target = { type: "order", id: order._id, label: order.organizationName };
-    if (status && status !== previous) {
+    const saved = await Order.findOneAndUpdate(
+      {
+        _id: order._id,
+        status: previous,
+        deploymentUrl: before.deploymentUrl,
+        provisionedOrganizationId: before.provisionedOrganizationId,
+        $or: [{ "provisioningClaim.at": null }, { "provisioningClaim.at": { $lt: new Date(Date.now() - CLAIM_FRESH_MS) } }],
+      },
+      {
+        $set: { status: nextStatus, ...after },
+        ...(moving ? { $push: { history: { status, at: new Date(), by: req.account._id, note } } } : {}),
+      },
+      { new: true }
+    );
+    if (!saved) {
+      const now = await Order.findById(order._id).select("provisioningClaim");
+      const claimed = now?.provisioningClaim?.at && Date.now() - new Date(now.provisioningClaim.at).getTime() < CLAIM_FRESH_MS;
+      return res.status(409).json(
+        claimed
+          ? { error: "Someone is provisioning this order right now. Give it a moment, then refresh.", code: "PROVISIONING_IN_PROGRESS" }
+          : { error: "This order changed while you were looking at it. Refresh it and try again.", code: "ORDER_CHANGED" }
+      );
+    }
+
+    const target = { type: "order", id: saved._id, label: saved.organizationName };
+    if (moving) {
       await audit(
         req,
         "order.status",
         target,
-        `Moved ${order.organizationName} from ${previous} to ${status}${note ? ` — ${note}` : ""}`,
+        `Moved ${saved.organizationName} from ${previous} to ${status}${note ? ` — ${note}` : ""}`,
         { from: previous, to: status, note }
       );
     }
-    const changed = Object.keys(before).filter((k) => before[k] !== order[k]);
     if (changed.length) {
-      await audit(req, "order.update", target, `Updated ${changed.join(" and ")} on ${order.organizationName}`, {
-        before,
-        after: { deploymentUrl: order.deploymentUrl, provisionedOrganizationId: order.provisionedOrganizationId },
-      });
+      await audit(req, "order.update", target, `Updated ${changed.join(" and ")} on ${saved.organizationName}`, { before, after });
     }
 
-    if (status === "cancelled" && previous !== "cancelled") {
+    if (status === "cancelled" && moving) {
       try {
-        await billing.onOrderCancelled(order, { by: req.account, reason: note });
+        await billing.onOrderCancelled(saved, { by: req.account, reason: note });
       } catch (err) {
-        console.error("[vendor:billing] onOrderCancelled failed for", order._id.toString(), err);
+        console.error("[vendor:billing] onOrderCancelled failed for", saved._id.toString(), err);
+      }
+    }
+
+    // Live by hand: the same billing step as the one-press path — the
+    // trial starts, and the deployment (once its id is known) is told its
+    // plan. Again if the organization id is filled in afterwards.
+    if (saved.status === "live" && (moving || changed.includes("provisionedOrganizationId"))) {
+      try {
+        await billing.onProvisioned(saved, saved.provisionedOrganizationId || "", { by: req.account });
+      } catch (err) {
+        console.error("[vendor:billing] onProvisioned failed for", saved._id.toString(), err);
       }
     }
 
     // Only on an actual change of state — re-saving a URL should not
     // email somebody again.
-    if (status && status !== previous) {
-      const account = await Account.findById(order.account).select("firstName name email");
+    if (moving) {
+      const account = await Account.findById(saved.account).select("firstName name email");
       if (account) {
-        if (status === "provisioning") sendEmail(orderProvisioningEmail({ account, order }));
-        if (status === "live") sendEmail(orderLiveEmail({ account, order }));
-        if (status === "cancelled") sendEmail(orderCancelledEmail({ account, order, reason: note }));
+        if (status === "provisioning") sendEmail(orderProvisioningEmail({ account, order: saved }));
+        if (status === "live") sendEmail(orderLiveEmail({ account, order: saved }));
+        if (status === "cancelled") sendEmail(orderCancelledEmail({ account, order: saved, reason: note }));
       }
     }
 
-    res.json({ order: summary(order) });
+    res.json({ order: summary(saved) });
   })
 );
 

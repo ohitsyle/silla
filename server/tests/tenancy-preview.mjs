@@ -48,8 +48,21 @@ const PLAN_STATE = process.argv.find((arg) => arg.startsWith("--plan="))?.slice(
 const OUT = process.argv.find((arg) => arg.startsWith("--out="))?.slice("--out=".length);
 const LEGACY_DEMO = process.argv.includes("--legacy-demo");
 
-/** Exists only for this throwaway database, like the one in isolated.mjs. */
-const CONTROL_PLANE_SECRET = "tenancy-preview-control-plane-secret-not-for-real-use";
+/**
+ * Exists only for this throwaway database, like the one in isolated.mjs.
+ * CONTROL_PLANE_SECRET in the environment replaces it (32+ characters), so
+ * a disposable vendor can be pointed at this preview with the same one —
+ * the staff console provisioning into the real product, end to end:
+ *
+ *   CONTROL_PLANE_SECRET=<32+ chars> PREVIEW_CLIENT_URL=http://localhost:5185 \
+ *     node tests/tenancy-preview.mjs --port=4040
+ *   (vendor) SERVER_INTERNAL_URL=http://127.0.0.1:4040 CONTROL_PLANE_SECRET=<the same> \
+ *     PRODUCT_URL=http://localhost:5185 npm run test:isolated -- --serve
+ */
+const CONTROL_PLANE_SECRET =
+  (process.env.CONTROL_PLANE_SECRET || "").length >= 32
+    ? process.env.CONTROL_PLANE_SECRET
+    : "tenancy-preview-control-plane-secret-not-for-real-use";
 const CLIENT_URL = process.env.PREVIEW_CLIENT_URL || "http://localhost:5180";
 const DAY = 86_400_000;
 
