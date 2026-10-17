@@ -13,6 +13,7 @@
     "start": "node src/server.js",
     "seed:staff": "node src/scripts/seedStaff.js",
     "test": "node tests/run.mjs",
+    "test:clean": "node tests/cleanup.mjs",
     "email:preview": "node src/scripts/emailPreview.js",
     "migrate:accounts": "node src/scripts/migrateAccounts.js",
     "test:isolated": "node tests/isolated.mjs"
