@@ -39,6 +39,14 @@ const subscriptionSchema = new mongoose.Schema(
       amount: { type: Number, default: null },
       currency: { type: String, default: "PHP" },
     },
+    /**
+     * True while nobody has agreed what this customer pays — a plan
+     * "priced with you" (the Campus plan), or a move onto one. No invoice
+     * is issued automatically until staff set `price`, and the billing job
+     * never treats the customer as late for an invoice SILLA has not sent:
+     * the console lists these as needing attention instead.
+     */
+    needsPricing: { type: Boolean, default: false, index: true },
 
     status: { type: String, enum: SUBSCRIPTION_STATUS, default: "pending", index: true },
     trialEndsAt: { type: Date, default: null },
@@ -60,6 +68,28 @@ const subscriptionSchema = new mongoose.Schema(
     },
     /** A line shown to the organization's administrators in the product. */
     notice: { type: String, default: null },
+
+    /**
+     * Subscription-level reminders already sent, so the billing job sends
+     * each once. Invoice reminders live on the invoice (Invoice.reminders).
+     * Moving the trial end clears `trialEndingAt`, so a new end gets its
+     * own warning.
+     */
+    reminders: {
+      trialEndingAt: { type: Date, default: null },
+    },
+
+    /**
+     * The paid invoices whose period has been added to this subscription.
+     * A payment becomes service time exactly once: the period is extended
+     * and the invoice recorded here in ONE conditional update
+     * (services/billing.js applyPaidInvoices), so two payments landing at
+     * once both count, and a replayed one counts once. A paid invoice that
+     * extends the subscription but is not listed here has not bought its
+     * period yet — on a subscription that is still pending, that is
+     * deliberate: the paid period starts when the deployment goes live.
+     */
+    appliedInvoices: { type: [mongoose.Schema.Types.ObjectId], default: [] },
 
     /** The last push of this subscription's snapshot to its deployment. */
     sync: {

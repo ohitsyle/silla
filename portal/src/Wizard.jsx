@@ -7,7 +7,7 @@ import {
 import { Button, Modal, Notice, Panel, Segmented, Stepper, panelEnter } from "./components/ui.jsx";
 import Preview from "./components/Preview.jsx";
 import { DEFAULT_CONFIG, buildProfile, validate } from "./lib/profile.js";
-import { PLANS, formatMoney, priceFor } from "./lib/plans.js";
+import { formatMoney, monthlyPrice, usePlans, yearlySaving } from "./lib/plans.js";
 import { vendorApi } from "./lib/vendorApi.js";
 import { useAccount } from "./lib/AccountContext.jsx";
 import { ROUTES } from "./lib/useHashRoute.js";
@@ -225,6 +225,20 @@ export default function Wizard({ onExit, navigate }) {
   useEffect(() => {
     takeIntent();
   }, []);
+
+  /**
+   * The plans on sale right now — the live catalogue staff edit in the
+   * console, or lib/plans.js's fallback until it answers. The quote is
+   * read from the SAME list the cards below show, so what a buyer saw is
+   * what their order records.
+   */
+  const { plans: catalogue, trialDays } = usePlans();
+  const chosenPlan = catalogue.find((p) => p.key === plan) || null;
+  // A plan that is no longer sold (retired since a draft was saved, say)
+  // can't be ordered; fall back to the one most people take.
+  useEffect(() => {
+    if (!chosenPlan && catalogue.length) setPlan((catalogue.find((p) => p.featured) || catalogue[0]).key);
+  }, [chosenPlan, catalogue]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [confirmReset, setConfirmReset] = useState(false);
@@ -369,8 +383,11 @@ export default function Wizard({ onExit, navigate }) {
         profile: buildProfile(config),
         plan,
         billingPeriod: annual ? "yearly" : "monthly",
-        quotedAmount: priceFor(plan, annual),
-        currency: "USD",
+        // Per month, in minor units, in the plan's own currency — the
+        // figure on the card. The invoice is priced from the catalogue on
+        // the server; this records what the buyer was shown.
+        quotedAmount: monthlyPrice(chosenPlan, annual),
+        currency: chosenPlan?.currency || "PHP",
       });
       navigate?.(`${ROUTES.orders}/${order.order.id}`);
     } catch (e) {
@@ -691,7 +708,7 @@ export default function Wizard({ onExit, navigate }) {
                 subtitle="Priced by how much room you have. You can change this before we build it."
               >
                 <div className="grid gap-2 sm:grid-cols-3">
-                  {PLANS.map((p) => {
+                  {catalogue.map((p) => {
                     const chosen = p.key === plan;
                     return (
                       <button
@@ -706,7 +723,7 @@ export default function Wizard({ onExit, navigate }) {
                       >
                         <span className="block text-sm font-bold">{p.name}</span>
                         <span className="mt-0.5 block text-sm text-ink-secondary">
-                          {formatMoney(priceFor(p.key, annual), { period: "month" })}
+                          {formatMoney(monthlyPrice(p, annual), { period: "month", currency: p.currency })}
                         </span>
                       </button>
                     );
@@ -718,12 +735,14 @@ export default function Wizard({ onExit, navigate }) {
                     value={annual ? "yearly" : "monthly"}
                     onChange={(v) => setAnnual(v === "yearly")}
                     options={[
-                      { value: "yearly", label: "Yearly (−20%)" },
+                      // From the prices, like the pricing page's badge, so the two never disagree.
+                      { value: "yearly", label: yearlySaving(catalogue) > 0 ? `Yearly (−${yearlySaving(catalogue)}%)` : "Yearly" },
                       { value: "monthly", label: "Monthly" },
                     ]}
                   />
                   <span className="text-xs text-ink-muted">
-                    Nothing is charged yet — an order records what you were quoted.
+                    Nothing is charged now. Submitting sends your first invoice
+                    {trialDays > 0 ? `, and the ${trialDays}-day free trial starts when your system goes live` : ""}.
                   </span>
                 </div>
                 {saveError && (
