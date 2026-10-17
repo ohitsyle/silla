@@ -384,9 +384,12 @@ Decisions worth keeping:
 - **One `Account` model, two roles** (`buyer` / `silla`). One login form,
   one session, one place authorization is decided. A second parallel
   auth system is how you get a back door nobody audits.
-- **Staff exist only through `seed:staff`.** There is no HTTP route that
-  creates one — an endpoint able to grant itself the queue is a back
-  door however carefully it is guarded.
+- **The FIRST staff owner exists only through `seed:staff`;** owners
+  invite the rest from the console (Staff section). No route lets anyone
+  grant THEMSELVES staff access: an invitation needs an existing owner's
+  session (`staff.manage`), the code is single-use and expires, every
+  invite, role change and deactivation is in the activity log, and the
+  last active owner can be neither demoted nor deactivated.
 - **A draft IS an order**, distinguished by `status`. A separate drafts
   collection would mean copying the profile on submit and reconciling
   two shapes forever.
@@ -656,10 +659,15 @@ until the staff console needs it. Still to do on AWS: restrict port 80 to
 CloudFront's origin-facing prefix list; until then a request sent straight
 to the origin can still pick its own X-Forwarded-For.
 
-The routes `#/staff`, `#/billing`, `#/messages` exist but stay UNLINKED
-until built. Unfinished: billing on branch `billing` (a workflow is
-finishing it), the staff console on `worktree-wf_5e3385eb-597-4` (WIP
-commits, not reviewed).
+**Billing and the staff console are on main (17 Oct 2026) but NOT live
+yet.** Staff sign in at `#/staff/sign-in` and land on `#/staff`; buyers
+have `#/billing`, `#/invoices/<id>` and `#/messages`, all linked from the
+account menu; `#/queue` redirects to `#/staff/orders`. Provisioning is a
+button (Orders → Provision): address check, then the owner's one-time
+PIN, then `billing.onProvisioned` starts the trial. Deploying needs
+`CONTROL_PLANE_SECRET` on BOTH services and `PRODUCT_URL` on the vendor.
+Vendor suite: 283 checks (`npm run test:isolated`); the billing suite
+runs only there, because it drives the billing job.
 
 ### Organization addresses (client)
 
