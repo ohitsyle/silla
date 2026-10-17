@@ -39,16 +39,6 @@ export async function requireAccount(req, res, next) {
   }
 }
 
-/**
- * SILLA staff only — the order queue, and every status transition.
- *
- * 404 rather than 403 on the staff routes would be tidier about not
- * confirming they exist, but these are advertised in our own product;
- * a clear 403 is more useful than a confusing 404.
- */
-export function requireSilla(req, res, next) {
-  if (req.account?.role !== "silla") {
-    return res.status(403).json({ error: "SILLA staff only" });
-  }
-  next();
-}
+// Staff routes are gated by permission, not by "is SILLA staff": see
+// requirePermission() in middleware/staff.js. A second, coarser guard here
+// is how a route ends up checking the wrong one.

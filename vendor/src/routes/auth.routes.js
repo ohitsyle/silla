@@ -86,6 +86,18 @@ function nameProblems(body) {
 
 const reject = (res, status, error, fields) => res.status(status).json({ error, ...(fields ? { fields } : {}) });
 
+/**
+ * A staff member invited from the console who has not accepted yet
+ * (routes/staff.routes.js). Their way in is the invitation code — which
+ * is single-use, lapses after three days and dies when an owner revokes
+ * the invitation. Password reset must not be a second way in: it would
+ * set a password on an invitation that had expired, skip the audit entry
+ * that says who accepted, and — because an account holds ONE live code —
+ * issuing a reset code would silently destroy the invitation code, so
+ * anyone who knew the invited address could cancel the invitation.
+ */
+const pendingInvitation = (account) => Boolean(account?.invitedAt) && !account.emailVerified;
+
 /* ──────────────────────────── availability ──────────────────────────── */
 
 /**
@@ -112,10 +124,11 @@ router.get(
 /**
  * Sign up.
  *
- * Always creates a `buyer`. There is deliberately no way to create a
- * SILLA staff account over HTTP — staff are minted by the seed script,
- * because an endpoint that can grant itself the queue is a back door
- * however carefully it is guarded.
+ * Always creates a `buyer`. Nothing a stranger can send here makes a
+ * SILLA staff account: the first owner comes from `npm run seed:staff`,
+ * and everyone after is invited by a signed-in owner from the console
+ * (routes/staff.routes.js), audited. An open form that could grant
+ * itself the queue would be a back door however carefully it was guarded.
  *
  * The account is created UNVERIFIED and signed in. The person can keep
  * exploring and configuring immediately; only placing an order needs
@@ -218,7 +231,8 @@ router.post(
     if (!EMAIL_RE.test(email)) return res.json(answer);
 
     const account = await Account.findOne({ email, active: true });
-    if (account && cooldownRemaining(account, "password-reset") === 0) {
+    // A pending invitation gets the same answer and no code — see pendingInvitation.
+    if (account && !pendingInvitation(account) && cooldownRemaining(account, "password-reset") === 0) {
       const code = await issueCode(account, "password-reset");
       await account.save();
       sendEmail(passwordResetEmail({ account, code, expiryMinutes: CODE_TTL_MINUTES }));
@@ -241,8 +255,9 @@ router.post(
     if (pwProblem) return reject(res, 400, pwProblem, { newPassword: pwProblem });
 
     const account = await Account.findOne({ email: normEmail(email), active: true });
-    // Same wording as a wrong code, so this doesn't confirm the account.
-    if (!account) return reject(res, 400, "There's no code waiting. Send a new one.");
+    // Same wording as a wrong code, so this doesn't confirm the account —
+    // or that an invitation is waiting at it.
+    if (!account || pendingInvitation(account)) return reject(res, 400, "There's no code waiting. Send a new one.");
 
     const result = await consumeCode(account, "password-reset", code);
     if (!result.ok) {

@@ -60,8 +60,8 @@ function passwordProblem(password) {
 
 /**
  * Said in an invitation email, so the person knows what they are being
- * let into. Mirrors the table in docs/control-plane.md §5 and the
- * console's portal/src/staff/permissions.js.
+ * let into. Mirrors the table in docs/control-plane.md §5, which
+ * middleware/staff.js enforces.
  */
 const ROLE_LABEL = { owner: "Owner", admin: "Admin", billing: "Billing", support: "Support" };
 const ROLE_SUMMARY = {
@@ -292,14 +292,16 @@ router.post(
     if (!STAFF_ROLES.includes(body.staffRole)) fields.staffRole = "Choose a role.";
     if (Object.keys(fields).length) return reject(res, 400, Object.values(fields)[0], { fields });
 
-    const existing = await Account.findOne({ email }).select("role");
+    const existing = await Account.findOne({ email }).select("role active");
     if (existing) {
       // A customer is never quietly turned into staff: the same address
       // would then carry both a buyer's orders and the whole queue.
       const message =
         existing.role === "buyer"
           ? "That address belongs to a customer account. Invite a different address."
-          : "That person is already on the staff list.";
+          : existing.active
+            ? "That person is already on the staff list."
+            : "That person is on the staff list, deactivated. Reactivate them there instead.";
       return reject(res, 409, message, { fields: { email: message } });
     }
 
@@ -470,6 +472,15 @@ router.patch(
       throw err;
     }
 
+    // Their open threads go back to the shared inbox. Left assigned to
+    // someone who can no longer sign in, a customer's next message would
+    // notify nobody and sit under a name nobody answers to.
+    let unassigned = 0;
+    if (before.active && !after.active) {
+      const result = await Conversation.updateMany({ assignee: req.params.id, status: "open" }, { $set: { assignee: null } });
+      unassigned = result.modifiedCount || 0;
+    }
+
     const target = { type: "staff", id: req.params.id, label };
     if (before.staffRole !== after.staffRole) {
       await audit(
@@ -481,8 +492,9 @@ router.patch(
       );
     }
     if (before.active !== after.active) {
+      const back = unassigned ? ` — ${unassigned} open conversation${unassigned === 1 ? "" : "s"} back to the shared inbox` : "";
       await audit(req, after.active ? "staff.reactivate" : "staff.deactivate", target,
-        `${after.active ? "Reactivated" : "Deactivated"} ${label}`);
+        `${after.active ? "Reactivated" : "Deactivated"} ${label}${back}`, after.active ? {} : { unassignedConversations: unassigned });
     }
 
     const fresh = await Account.findById(req.params.id).populate("invitedBy", "name email");

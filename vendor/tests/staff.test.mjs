@@ -24,6 +24,9 @@ export const name = "Staff — roles, invites, clients, deployments, activity";
 
 const API = process.env.VENDOR_API_URL || "http://localhost:4100";
 const FAKE = process.env.FAKE_CONTROL_PLANE_URL || "";
+// Read at import, before any suite runs: the billing suite blanks the
+// variable in this shared process while it calls billing directly.
+const CONTROL_PLANE_SECRET = process.env.CONTROL_PLANE_SECRET || "";
 const PRODUCT_URL = (process.env.PRODUCT_URL || "http://localhost:5173").replace(/\/+$/, "");
 
 const unique = () => `${Date.now()}${Math.floor(Math.random() * 1e4)}`;
@@ -228,6 +231,28 @@ export async function run(check) {
   const strangerAccept = await post("/api/vendor/staff/invitations/accept", { email: buyer.email, code: KNOWN_CODE, password: PASSWORD });
   check(S, "A customer's address has no invitation to accept", strangerAccept.status === 400);
 
+  // An invitation lapses: after three days its code is worthless.
+  const lapsedEmail = `lapsed-${tag}@test.silla`;
+  await post("/api/vendor/staff/invite", { firstName: "Lee", lastName: "Lapsed", email: lapsedEmail, staffRole: "support" }, ownerToken);
+  await plantCode(lapsedEmail, "invite", { expired: true });
+  const lapsed = await post("/api/vendor/staff/invitations/accept", { email: lapsedEmail, code: KNOWN_CODE, password: PASSWORD });
+  check(S, "An invitation code stops working when it expires", lapsed.status === 410 && /expired/i.test(lapsed.body?.error || ""),
+    lapsed.body?.error);
+
+  // Password reset is not a second way into an invitation — nor a way for
+  // anyone who knows the address to wipe the invitation code out.
+  const resetEmail = `reset-${tag}@test.silla`;
+  await post("/api/vendor/staff/invite", { firstName: "Rae", lastName: "Reset", email: resetEmail, staffRole: "admin" }, ownerToken);
+  const inviteHash = (await readAccount(resetEmail))?.verification?.codeHash;
+  const forgot = await post("/api/vendor/auth/forgot-password", { email: resetEmail });
+  const afterForgot = await readAccount(resetEmail);
+  check(S, "Forgot-password answers as usual and leaves a pending invitation's code untouched",
+    forgot.status === 200 && afterForgot?.verification?.purpose === "invite" && afterForgot?.verification?.codeHash === inviteHash);
+  await plantCode(resetEmail, "password-reset");
+  const resetIn = await post("/api/vendor/auth/reset-password", { email: resetEmail, code: KNOWN_CODE, newPassword: PASSWORD });
+  check(S, "…and a reset code cannot set a password on an invitation nobody accepted",
+    resetIn.status === 400 && (await readAccount(resetEmail))?.emailVerified === false && !(await login(resetEmail, PASSWORD)));
+
   // The admin: a re-send inside the cooldown is refused; after it, the
   // old code stops working and the new one is the only way in.
   const tooSoon = await post(`/api/vendor/staff/${adminId}/resend-invite`, {}, ownerToken);
@@ -323,11 +348,19 @@ export async function run(check) {
   const back = await get("/api/vendor/staff/me", ownerToken);
   check(S, "…and is restored the same way", back.body?.staffRole === "owner");
 
+  // Someone's open thread, to see where it goes when they leave.
+  const theirs = await post("/api/vendor/conversations", { subject: `Help with my order ${tag}`, body: "Hello?" }, buyer.token);
+  const theirsId = theirs.body?.conversation?.id;
+  await patch(`/api/vendor/conversations/${theirsId}`, { assignee: supportId }, ownerToken);
+
   const off = await patch(`/api/vendor/staff/${supportId}`, { active: false }, ownerToken);
   const offSession = await get("/api/vendor/staff/me", supportToken);
   const offLogin = await post("/api/vendor/auth/login", { email: supportEmail, password: PASSWORD });
   check(S, "Deactivating staff ends their session and their sign-in",
     off.body?.staff?.status === "deactivated" && offSession.status === 401 && offLogin.status === 401);
+  const orphan = await get(`/api/vendor/conversations/${theirsId}`, ownerToken);
+  check(S, "…and their open conversations go back to the shared inbox", Boolean(theirsId) && orphan.body?.conversation?.assignee === null,
+    JSON.stringify(orphan.body?.conversation?.assignee));
   const on = await patch(`/api/vendor/staff/${supportId}`, { active: true, staffRole: "support" }, ownerToken);
   supportToken = await login(supportEmail, PASSWORD);
   check(S, "Reactivating restores them", on.body?.staff?.status === "active" && Boolean(supportToken));
@@ -410,7 +443,7 @@ export async function run(check) {
     check(S, "The product API verified the request's signature", createCall?.verified === true);
     const [, t, sig] = /^SILLA-HMAC t=(\d+),sig=([a-f0-9]{64})$/.exec(createCall?.authorization || "") || [];
     const expected = crypto
-      .createHmac("sha256", process.env.CONTROL_PLANE_SECRET || "")
+      .createHmac("sha256", CONTROL_PLANE_SECRET)
       .update(`${t}\nPOST\n/api/internal/organizations\n${crypto.createHash("sha256").update(createCall?.rawBody || "").digest("hex")}`)
       .digest("hex");
     check(S, "…and the signature is HMAC-SHA256 over time, method, path and body hash, as documented", Boolean(sig) && sig === expected);
@@ -447,6 +480,10 @@ export async function run(check) {
       }
     }
     check(S, "The temporary PIN is not stored anywhere", found.length === 0, found.slice(0, 3).join("; "));
+
+    const supportCancel = await patch(`/api/vendor/orders/queue/${orderId}`, { status: "cancelled", note: "Trying" }, supportToken);
+    check(S, "Support cannot cancel a live order — that switches the customer's system off",
+      supportCancel.status === 403 && supportCancel.body?.permission === "deployments.manage");
 
     const twice = await post("/api/vendor/deployments/provision", { orderId, slug: `${slug}-x`.slice(0, 40) }, ownerToken);
     check(S, "An order cannot be provisioned twice", twice.status === 409 && twice.body?.code === "ALREADY_PROVISIONED");
@@ -509,6 +546,19 @@ export async function run(check) {
       cp?.client?.email === buyer.email && cp?.orders?.some((o) => o.id === orderId) && cp?.subscriptions?.length >= 1 &&
         cp?.deployments?.some((d) => d.orderId === orderId) && cp?.activity?.some((e) => e.action === "deployment.provision"));
     check(S, "…with invoice amounts withheld from a role without billing.read", cp?.invoices === null);
+    check(S, "…and kept out of its activity trail too",
+      !(cp?.activity || []).some((e) => e.action.startsWith("invoice.") || e.target?.type === "invoice") &&
+        (cp?.activity || []).every((e) => !e.meta || !Object.keys(e.meta).length));
+    const ownerPicture = await get(`/api/vendor/clients/${buyer.id}`, ownerToken);
+    check(S, "An owner sees the invoices and their trail", Array.isArray(ownerPicture.body?.invoices) &&
+      (ownerPicture.body?.activity || []).some((e) => e.action === "invoice.issue"));
+
+    const putsBeforeEnd = (await fake()).received.filter((r) => r.method === "PUT").length;
+    const ended = await patch(`/api/vendor/orders/queue/${orderId}`, { status: "cancelled", note: "Customer moved on" }, ownerToken);
+    const putsAfterEnd = (await fake()).received.filter((r) => r.method === "PUT" && r.verified);
+    check(S, "An owner can cancel a live order: its subscription ends and the deployment is told",
+      ended.status === 200 && ended.body?.order?.status === "cancelled" && putsAfterEnd.length > putsBeforeEnd &&
+        putsAfterEnd.at(-1)?.body?.status === "cancelled", ended.body?.error);
   }
 
   /* ── the overview ── */

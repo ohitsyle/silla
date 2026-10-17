@@ -14,8 +14,9 @@
  *           POST /:id/read           clears the caller's side's unread count
  *
  * The shared paths serve whoever asks, but through two separate handlers
- * chosen by role, so the buyer's code path never touches a query that
- * could return an internal note. THE PRIVACY RULE:
+ * chosen by role (bySide, below), so the buyer's code path never touches a
+ * query that could return an internal note, and the staff one sits behind
+ * requirePermission exactly like every other staff route. THE PRIVACY RULE:
  *
  *   - A buyer's thread is found by { _id, account: <them> } — another
  *     buyer's id simply does not match (404), the same IDOR rule as
@@ -36,7 +37,7 @@ import Order from "../models/Order.js";
 import Account from "../models/Account.js";
 import { requireAccount } from "../middleware/auth.js";
 import { rateLimit } from "../middleware/rateLimit.js";
-import { can, requirePermission } from "../middleware/staff.js";
+import { requirePermission } from "../middleware/staff.js";
 import { audit } from "../lib/audit.js";
 
 const router = Router();
@@ -66,6 +67,21 @@ function messageProblems({ subject, body }, { needsSubject }) {
   if (!b) fields.body = "Write a message.";
   else if (b.length > BODY_MAX) fields.body = `Keep it under ${BODY_MAX.toLocaleString("en")} characters.`;
   return fields;
+}
+
+/**
+ * One path, two handlers: a buyer's request goes to `buyer`, a staff
+ * member's to `staff` — and only through requirePermission(permission),
+ * so a staff role without it gets the same 403 as on any staff route.
+ */
+function bySide({ buyer, staff, permission }) {
+  const guard = requirePermission(permission);
+  const forBuyer = asyncHandler(buyer);
+  const forStaff = asyncHandler(staff);
+  return (req, res, next) => {
+    if (!isStaff(req)) return forBuyer(req, res, next);
+    return guard(req, res, (err) => (err ? next(err) : forStaff(req, res, next)));
+  };
 }
 
 /* ─────────────────────────────── shapes ─────────────────────────────── */
@@ -132,11 +148,17 @@ const populateForStaff = (query) =>
 const buyersOnly = (req, res, next) =>
   isStaff(req) ? reject(res, 403, "This is the customer side of conversations. Use the staff inbox.") : next();
 
+/** `?orderId=` narrows it to the threads about one of THEIR orders — the account is still in the query. */
 router.get(
   "/mine",
   buyersOnly,
   asyncHandler(async (req, res) => {
-    const conversations = await Conversation.find({ account: req.account._id })
+    const filter = { account: req.account._id };
+    if (req.query.orderId !== undefined) {
+      if (!mongoose.isValidObjectId(req.query.orderId)) return reject(res, 400, "Invalid order id");
+      filter.order = req.query.orderId;
+    }
+    const conversations = await Conversation.find(filter)
       .sort({ lastMessageAt: -1 })
       .limit(200)
       .populate("order", "organizationName status");
@@ -210,6 +232,67 @@ router.get(
 
 /* ───────────────────────────── starting one ───────────────────────────── */
 
+/**
+ * Opens a thread with its first message — always a PUBLIC one, whoever
+ * starts it. `customer` is whose thread it is; `order`, if any, has
+ * already been found scoped to that customer.
+ */
+async function openThread(req, res, { customer, order, staff }) {
+  const now = new Date();
+  const text = String(req.body.body).trim();
+  const conversation = await Conversation.create({
+    account: customer._id,
+    order: order?._id || null,
+    subject: String(req.body.subject).trim(),
+    status: "open",
+    // Whoever reaches out first owns the thread until someone reassigns it.
+    assignee: staff ? req.account._id : null,
+    startedBy: staff ? "staff" : "buyer",
+    lastMessageAt: now,
+    lastMessagePreview: preview(text),
+    lastMessageBy: staff ? "staff" : "buyer",
+    lastBuyerMessageAt: staff ? null : now,
+    lastStaffMessageAt: staff ? now : null,
+    unread: { buyer: staff ? 1 : 0, staff: staff ? 0 : 1 },
+  });
+  await Message.create({
+    conversation: conversation._id,
+    author: req.account._id,
+    authorRole: staff ? "staff" : "buyer",
+    authorName: req.account.name,
+    body: text,
+    internal: false,
+  });
+  return conversation;
+}
+
+/**
+ * The order a new thread is about, found with the CUSTOMER in the query:
+ * a buyer cannot attach their thread to someone else's order by guessing
+ * its id, and staff cannot file one customer's thread under another's.
+ * A draft may be asked about — the buyer is choosing to share it.
+ */
+async function orderFor(res, orderId, customer) {
+  if (!orderId) return { ok: true, order: null };
+  if (!mongoose.isValidObjectId(orderId)) {
+    reject(res, 400, "Invalid order id");
+    return { ok: false };
+  }
+  const order = await Order.findOne({ _id: orderId, account: customer._id }).select("organizationName status");
+  if (!order) {
+    reject(res, 404, "Order not found");
+    return { ok: false };
+  }
+  return { ok: true, order };
+}
+
+const startProblems = (req, res) => {
+  const fields = messageProblems(req.body || {}, { needsSubject: true });
+  if (!Object.keys(fields).length) return false;
+  reject(res, 400, Object.values(fields)[0], { fields });
+  return true;
+};
+
 router.post(
   "/",
   rateLimit({
@@ -218,74 +301,41 @@ router.post(
     max: 20,
     keyFor: (req) => req.account._id.toString(),
   }),
-  asyncHandler(async (req, res) => {
-    const body = req.body || {};
-    const fields = messageProblems(body, { needsSubject: true });
-    if (Object.keys(fields).length) return reject(res, 400, Object.values(fields)[0], { fields });
+  bySide({
+    permission: "conversations.reply",
 
-    const staff = isStaff(req);
-    if (staff && !can(req.account, "conversations.reply")) {
-      return reject(res, 403, "You don't have access to that.", { code: "STAFF_PERMISSION", permission: "conversations.reply" });
-    }
+    // A buyer, from their account or an order.
+    buyer: async (req, res) => {
+      if (startProblems(req, res)) return;
+      const found = await orderFor(res, req.body.orderId, req.account);
+      if (!found.ok) return;
+      const conversation = await openThread(req, res, { customer: req.account, order: found.order, staff: false });
+      await conversation.populate("order", "organizationName status");
+      res.status(201).json({ conversation: buyerSummary(conversation) });
+    },
 
-    // Whose thread it is: the buyer themselves, or — when staff reach out
-    // first — the customer they name.
-    let customer = req.account;
-    if (staff) {
-      if (!mongoose.isValidObjectId(body.accountId)) return reject(res, 400, "Choose the customer to write to.");
-      customer = await Account.findOne({ _id: body.accountId, role: "buyer" });
+    // Staff reaching out first, to the customer they name.
+    staff: async (req, res) => {
+      if (startProblems(req, res)) return;
+      if (!mongoose.isValidObjectId(req.body.accountId)) {
+        return reject(res, 400, "Choose the customer to write to.", { fields: { accountId: "Choose the customer to write to." } });
+      }
+      const customer = await Account.findOne({ _id: req.body.accountId, role: "buyer" });
       if (!customer) return reject(res, 404, "Customer not found");
-    }
+      const found = await orderFor(res, req.body.orderId, customer);
+      if (!found.ok) return;
 
-    let order = null;
-    if (body.orderId) {
-      if (!mongoose.isValidObjectId(body.orderId)) return reject(res, 400, "Invalid order id");
-      // Scoped to the customer in the QUERY: a buyer cannot attach their
-      // thread to someone else's order by guessing its id.
-      order = await Order.findOne({ _id: body.orderId, account: customer._id }).select("organizationName status");
-      if (!order) return reject(res, 404, "Order not found");
-    }
-
-    const now = new Date();
-    const text = String(body.body).trim();
-    const conversation = await Conversation.create({
-      account: customer._id,
-      order: order?._id || null,
-      subject: String(body.subject).trim(),
-      status: "open",
-      // Whoever reaches out first owns the thread until someone reassigns it.
-      assignee: staff ? req.account._id : null,
-      startedBy: staff ? "staff" : "buyer",
-      lastMessageAt: now,
-      lastMessagePreview: preview(text),
-      lastMessageBy: staff ? "staff" : "buyer",
-      lastBuyerMessageAt: staff ? null : now,
-      lastStaffMessageAt: staff ? now : null,
-      unread: { buyer: staff ? 1 : 0, staff: staff ? 0 : 1 },
-    });
-    await Message.create({
-      conversation: conversation._id,
-      author: req.account._id,
-      authorRole: staff ? "staff" : "buyer",
-      authorName: req.account.name,
-      body: text,
-      internal: false,
-    });
-
-    if (staff) {
+      const conversation = await openThread(req, res, { customer, order: found.order, staff: true });
       await audit(
         req,
         "conversation.start",
         { type: "conversation", id: conversation._id, label: conversation.subject },
         `Wrote to ${customer.name} <${customer.email}>: “${conversation.subject}”`,
-        { accountId: customer._id.toString(), orderId: order?._id?.toString() || null }
+        { accountId: customer._id.toString(), orderId: found.order?._id?.toString() || null }
       );
       const full = await populateForStaff(Conversation.findById(conversation._id));
-      return res.status(201).json({ conversation: staffSummary(full) });
-    }
-
-    await conversation.populate("order", "organizationName status");
-    res.status(201).json({ conversation: buyerSummary(conversation) });
+      res.status(201).json({ conversation: staffSummary(full) });
+    },
   })
 );
 
@@ -306,20 +356,13 @@ async function buyerThread(req, res) {
 }
 
 async function staffThread(req, res) {
-  if (!can(req.account, "conversations.read")) {
-    return reject(res, 403, "You don't have access to that.", { code: "STAFF_PERMISSION", permission: "conversations.read" });
-  }
   const conversation = await populateForStaff(Conversation.findById(req.params.id));
   if (!conversation) return reject(res, 404, "Conversation not found");
   const messages = await Message.find({ conversation: conversation._id }).sort({ createdAt: 1 });
   res.json({ conversation: staffSummary(conversation), messages: messages.map(staffMessage) });
 }
 
-router.get(
-  "/:id",
-  validId,
-  asyncHandler(async (req, res) => (isStaff(req) ? staffThread(req, res) : buyerThread(req, res)))
-);
+router.get("/:id", validId, bySide({ buyer: buyerThread, staff: staffThread, permission: "conversations.read" }));
 
 /* ───────────────────────────── writing ───────────────────────────── */
 
@@ -363,9 +406,6 @@ async function buyerReply(req, res) {
 }
 
 async function staffReply(req, res) {
-  if (!can(req.account, "conversations.reply")) {
-    return reject(res, 403, "You don't have access to that.", { code: "STAFF_PERMISSION", permission: "conversations.reply" });
-  }
   const fields = messageProblems(req.body || {}, { needsSubject: false });
   if (Object.keys(fields).length) return reject(res, 400, Object.values(fields)[0], { fields });
 
@@ -426,26 +466,32 @@ router.post(
   "/:id/messages",
   validId,
   rateLimit({ name: "conversation-message", windowMs: 10 * 60 * 1000, max: 60, keyFor: (req) => req.account._id.toString() }),
-  asyncHandler(async (req, res) => (isStaff(req) ? staffReply(req, res) : buyerReply(req, res)))
+  bySide({ buyer: buyerReply, staff: staffReply, permission: "conversations.reply" })
 );
 
-/** Clears the CALLER's side only: a buyer reading never marks the staff side read, and vice versa. */
+/**
+ * Clears the CALLER's side only: a buyer reading never marks the staff side
+ * read, and vice versa. Not audited — reading is not a change to anything
+ * the customer has, and a log entry per glance would bury the ones that are.
+ */
 router.post(
   "/:id/read",
   validId,
-  asyncHandler(async (req, res) => {
-    if (isStaff(req)) {
-      if (!can(req.account, "conversations.read")) return reject(res, 403, "You don't have access to that.");
+  bySide({
+    permission: "conversations.read",
+    buyer: async (req, res) => {
+      const result = await Conversation.updateOne(
+        { _id: req.params.id, account: req.account._id },
+        { $set: { "unread.buyer": 0 } }
+      );
+      if (!result.matchedCount) return reject(res, 404, "Conversation not found");
+      res.json({ ok: true });
+    },
+    staff: async (req, res) => {
       const result = await Conversation.updateOne({ _id: req.params.id }, { $set: { "unread.staff": 0 } });
       if (!result.matchedCount) return reject(res, 404, "Conversation not found");
-      return res.json({ ok: true });
-    }
-    const result = await Conversation.updateOne(
-      { _id: req.params.id, account: req.account._id },
-      { $set: { "unread.buyer": 0 } }
-    );
-    if (!result.matchedCount) return reject(res, 404, "Conversation not found");
-    res.json({ ok: true });
+      res.json({ ok: true });
+    },
   })
 );
 

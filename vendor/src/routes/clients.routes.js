@@ -31,6 +31,9 @@ router.use(requireAccount, requirePermission("clients.read"));
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const PAGE_SIZE = 50;
 
+/** Activity whose summary says what someone pays (services/billing.js writes these). */
+const MONEY_ACTIONS = /^(invoice\.|subscription\.(create|price|plan|period)$)/;
+
 /**
  * GET /api/vendor/clients
  *   ?q=harborview           name, email or organization
@@ -176,9 +179,14 @@ router.get(
       ...conversations.map((c) => c._id.toString()),
       ...invoices.map((i) => i._id.toString()),
     ];
-    const activity = await AuditEvent.find({
-      $or: [{ "target.type": "account", "target.id": account._id.toString() }, { "target.id": { $in: ids } }],
-    })
+    // Without billing.read the money stays out of the trail as it stays out
+    // of `invoices`: invoice entries and the subscription changes whose
+    // summaries carry a price are left out IN THE QUERY, and no entry's
+    // `meta` is sent here at all (the activity log has it, for audit.read).
+    const trail = { $or: [{ "target.type": "account", "target.id": account._id.toString() }, { "target.id": { $in: ids } }] };
+    const activity = await AuditEvent.find(
+      showMoney ? trail : { $and: [trail, { action: { $not: MONEY_ACTIONS } }, { "target.type": { $ne: "invoice" } }] }
+    )
       .sort({ at: -1 })
       .limit(60)
       .lean();
@@ -264,7 +272,7 @@ router.get(
           provisionedAt: o.provisionedAt || null,
           subscriptionStatus: subs.find((s) => s.order?.equals(o._id))?.status || null,
         })),
-      activity: activity.map(eventShape),
+      activity: activity.map(({ meta, ...event }) => eventShape({ ...event, meta: {} })),
     });
   })
 );

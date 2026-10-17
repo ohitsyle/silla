@@ -142,8 +142,12 @@ export async function run(check) {
     await cleanupBilling();
     return;
   }
-  // Deterministic: the control plane is NOT configured in this process,
-  // whatever the shell exported. The API process never had it either.
+  // Deterministic: the control plane is NOT configured in THIS process —
+  // the one calling billing directly below — whatever the shell exported.
+  // (The API process has one, for the fake product API the staff suite
+  // provisions against.) Put back afterwards: the suites share this
+  // process, and the staff suite signs with the secret this would erase.
+  const secretBefore = process.env.CONTROL_PLANE_SECRET;
   process.env.CONTROL_PLANE_SECRET = "";
 
   const tag = unique();
@@ -419,6 +423,8 @@ export async function run(check) {
     const planAudit = await AuditEvent.findOne({ action: "plan.update", "target.id": "room" }).sort({ at: -1 });
     check("BIL-23", "Settings and plan changes are on the activity log", Boolean(settingsAudit && planAudit));
   } finally {
+    if (secretBefore === undefined) delete process.env.CONTROL_PLANE_SECRET;
+    else process.env.CONTROL_PLANE_SECRET = secretBefore;
     // Leave the database as it was found: the settings and the plan this suite touched, and its records.
     await billing.updateSettings({ business: settingsBefore.business, invoice: settingsBefore.invoice, billing: settingsBefore.billing }).catch(() => {});
     if (roomTagline !== null) await billing.updatePlan("room", { tagline: roomTagline, active: true }).catch(() => {});

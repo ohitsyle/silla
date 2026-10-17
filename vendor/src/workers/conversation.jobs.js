@@ -20,9 +20,11 @@
  * only a PUBLIC staff message moves, and quotes the newest public message
  * found with { internal: false } in the query.
  *
- * Never to test addresses: the transport already drops @test.silla, and
- * the staff-side email — which goes to a REAL inbox — is skipped
- * outright when the customer is a test account, as order submission does.
+ * Never to test addresses: the buyer's email goes through sendEmail, whose
+ * transport drops @test.silla and @example.* (services/email/index.js —
+ * enforced there so no caller can forget), and the outcome says it was
+ * dropped. The staff-side email goes to a REAL inbox, so it is skipped
+ * outright when the CUSTOMER is a test account, as order submission does.
  *
  * Idempotent: each email is claimed with a conditional update before it
  * is sent, so two overlapping ticks (or two processes) cannot both send it.
@@ -42,8 +44,13 @@ const BATCH = 100;
  * someone else did, or a new message arrived since it was read. The
  * filter repeats exactly what was seen, so the update succeeds only if
  * nothing moved in between.
+ *
+ * The claim records the REAL moment, not the pass's `now`: it is compared
+ * with real message times ("anything newer than the last email?"), so a
+ * pass run with a clock stepped forward must not stamp a time from the
+ * future that every later reply would seem to predate.
  */
-function claim(conversation, side, now) {
+function claim(conversation, side) {
   const lastField = side === "buyer" ? "lastStaffMessageAt" : "lastBuyerMessageAt";
   return Conversation.findOneAndUpdate(
     {
@@ -52,16 +59,21 @@ function claim(conversation, side, now) {
       [lastField]: conversation[lastField],
       [`notified.${side}At`]: conversation.notified?.[`${side}At`] ?? null,
     },
-    { $set: { [`notified.${side}At`]: now } },
+    { $set: { [`notified.${side}At`]: new Date() } },
     { new: true }
   );
 }
 
-/** Threads where `side` has unread messages that have settled and that nobody has been emailed about. */
-function due(side, now) {
+/**
+ * Threads where `side` has unread messages that have settled and that
+ * nobody has been emailed about. `only` limits the pass to some threads —
+ * the suite's own, so a test run never claims a real customer's email.
+ */
+function due(side, now, only) {
   const lastField = side === "buyer" ? "lastStaffMessageAt" : "lastBuyerMessageAt";
   const settled = new Date(now.getTime() - QUIET_MINUTES * 60 * 1000);
   return Conversation.find({
+    ...(only ? { _id: { $in: only } } : {}),
     [`unread.${side}`]: { $gt: 0 },
     [lastField]: { $ne: null, $lte: settled },
     $or: [
@@ -77,14 +89,19 @@ function due(side, now) {
  * One pass. Returns what it decided, per thread, so the suite can assert
  * on behaviour without an inbox to read.
  *
- * @param {{ now?: Date }} [options] — `now` lets a test step past the quiet period without waiting for it
+ * @param {object} [options]
+ * @param {Date} [options.now]       lets a test step past the quiet period without waiting for it
+ * @param {Function} [options.send]  where the built email goes — sendEmail, or a test's collector,
+ *                                   so the suite can read what WOULD have been sent (and that no
+ *                                   internal note is in it) without a mailbox
+ * @param {Array} [options.only]     conversation ids to consider; every thread when absent
  */
-export async function notifyUnread({ now = new Date() } = {}) {
+export async function notifyUnread({ now = new Date(), send = sendEmail, only = null } = {}) {
   const outcome = { buyer: [], staff: [] };
 
   /* ── buyers: SILLA has replied ── */
-  for (const conversation of await due("buyer", now)) {
-    const claimed = await claim(conversation, "buyer", now);
+  for (const conversation of await due("buyer", now, only)) {
+    const claimed = await claim(conversation, "buyer");
     if (!claimed) continue;
     const id = conversation._id.toString();
 
@@ -93,15 +110,11 @@ export async function notifyUnread({ now = new Date() } = {}) {
       outcome.buyer.push({ conversation: id, skipped: "account inactive" });
       continue;
     }
-    if (isUndeliverable(account.email)) {
-      outcome.buyer.push({ conversation: id, to: account.email, skipped: "test address" });
-      continue;
-    }
     // The newest PUBLIC staff reply — never a note.
     const latest = await Message.findOne({ conversation: conversation._id, authorRole: "staff", internal: false }).sort({
       createdAt: -1,
     });
-    sendEmail(
+    send(
       conversationReplyEmail({
         account,
         conversation,
@@ -110,17 +123,24 @@ export async function notifyUnread({ now = new Date() } = {}) {
         organizationName: conversation.order?.organizationName || "",
       })
     );
-    outcome.buyer.push({ conversation: id, to: account.email });
+    // A test address is dropped by the transport, never delivered.
+    outcome.buyer.push({ conversation: id, to: account.email, ...(isUndeliverable(account.email) ? { dropped: "test address" } : {}) });
   }
 
   /* ── staff: a customer has written ── */
-  for (const conversation of await due("staff", now)) {
-    const claimed = await claim(conversation, "staff", now);
+  for (const conversation of await due("staff", now, only)) {
+    const claimed = await claim(conversation, "staff");
     if (!claimed) continue;
     const id = conversation._id.toString();
 
     const account = await Account.findById(conversation.account).select("firstName lastName name email organizationName");
-    if (!account || isUndeliverable(account.email)) {
+    if (!account) {
+      outcome.staff.push({ conversation: id, skipped: "customer account missing" });
+      continue;
+    }
+    // This one goes to a real SILLA inbox, which the transport cannot know
+    // to protect: a test customer's message must not reach it.
+    if (isUndeliverable(account.email)) {
       outcome.staff.push({ conversation: id, skipped: "test customer" });
       continue;
     }
@@ -136,7 +156,7 @@ export async function notifyUnread({ now = new Date() } = {}) {
       continue;
     }
     const latest = await Message.findOne({ conversation: conversation._id, authorRole: "buyer" }).sort({ createdAt: -1 });
-    sendEmail(
+    send(
       conversationStaffNoticeEmail({
         to,
         account,

@@ -4,7 +4,7 @@ import Order, { ALLOWED_TRANSITIONS } from "../models/Order.js";
 import Account from "../models/Account.js";
 import Conversation from "../models/Conversation.js";
 import { requireAccount } from "../middleware/auth.js";
-import { requirePermission } from "../middleware/staff.js";
+import { can, requirePermission } from "../middleware/staff.js";
 import { audit } from "../lib/audit.js";
 import { sendEmail, isUndeliverable } from "../services/email/index.js";
 import * as billing from "../services/billing.js";
@@ -347,6 +347,17 @@ router.patch(
         return res.status(409).json({
           error: `Cannot go from ${order.status} to ${status}.`,
           allowed: ALLOWED_TRANSITIONS[order.status],
+        });
+      }
+      // Cancelling a LIVE order ends a running deployment: its subscription
+      // is cancelled and the organization goes read-only. That is the
+      // reach of deployments.manage (owners, admins) — orders.manage lets
+      // support clear away a duplicate order, not switch a customer off.
+      if (status === "cancelled" && order.status === "live" && !can(req.account, "deployments.manage")) {
+        return res.status(403).json({
+          error: "Cancelling a live order switches the customer's system off. Ask an owner or an admin.",
+          code: "STAFF_PERMISSION",
+          permission: "deployments.manage",
         });
       }
       // A cancellation is emailed to the customer with its reason, and is
