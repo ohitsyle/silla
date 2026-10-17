@@ -412,6 +412,11 @@ export async function run(check) {
   } else {
     const status = await get("/api/vendor/deployments/status?ping=1", ownerToken);
     check(S, "The control plane reports configured and reachable", status.body?.configured === true && status.body?.reachable === true);
+    // The product accepts each signature once. Identical calls in the same
+    // second must still be two signatures, or the second is refused as a replay.
+    const twins = await Promise.all([1, 2, 3].map(() => get("/api/vendor/deployments/status?ping=1", ownerToken)));
+    check(S, "Identical control-plane calls in the same second are each accepted, not refused as replays",
+      twins.every((r) => r.body?.reachable === true), twins.map((r) => r.body?.problem?.code || "ok").join(", "));
 
     const takenCheck = await get("/api/vendor/deployments/slug-check?slug=taken-already", ownerToken);
     check(S, "A taken address is reported with a suggestion",
@@ -444,9 +449,10 @@ export async function run(check) {
     const [, t, sig] = /^SILLA-HMAC t=(\d+),sig=([a-f0-9]{64})$/.exec(createCall?.authorization || "") || [];
     const expected = crypto
       .createHmac("sha256", CONTROL_PLANE_SECRET)
-      .update(`${t}\nPOST\n/api/internal/organizations\n${crypto.createHash("sha256").update(createCall?.rawBody || "").digest("hex")}`)
+      .update(`${t}\nPOST\n${createCall?.url}\n${crypto.createHash("sha256").update(createCall?.rawBody || "").digest("hex")}`)
       .digest("hex");
-    check(S, "…and the signature is HMAC-SHA256 over time, method, path and body hash, as documented", Boolean(sig) && sig === expected);
+    check(S, "…and the signature is HMAC-SHA256 over time, method, path (with its query) and body hash, as documented",
+      Boolean(sig) && sig === expected && /^\/api\/internal\/organizations\?n=[0-9a-f]{16}$/.test(createCall?.url || ""), createCall?.url);
     check(S, "It sent the profile, the address, the entitlements and the order it came from",
       createCall?.body?.profile?.organizationName === orgName && createCall?.body?.entitlements?.managed === true &&
         createCall?.body?.source?.orderId === orderId);

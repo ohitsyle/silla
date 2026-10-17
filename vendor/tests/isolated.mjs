@@ -109,7 +109,10 @@ function startFakeControlPlane(secret) {
     const entry = {
       at: new Date().toISOString(),
       method: req.method,
-      path: req.url,
+      // The route, and the exact URL that was signed (it carries the
+      // vendor's one-off `n` parameter — lib/controlPlane.js).
+      path: req.url.split("?")[0],
+      url: req.url,
       authorization: req.headers.authorization || "",
       rawBody: raw,
       body: raw ? JSON.parse(raw) : null,
