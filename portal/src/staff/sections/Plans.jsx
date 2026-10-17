@@ -106,11 +106,7 @@ function PlanCard({ plan, onOpen, delay }) {
         <span className="inline-flex items-center gap-1.5 text-ink-secondary">
           <Users size={14} /> {plan.subscriptions} live subscription{plan.subscriptions === 1 ? "" : "s"}
         </span>
-        {!plan.orderable && plan.active && (
-          <span className="text-xs font-semibold" style={{ color: "rgb(var(--c-state-reserved))" }}>
-            · not on the storefront yet
-          </span>
-        )}
+
       </div>
     </motion.button>
   );
@@ -292,10 +288,10 @@ function PlanEditor({ planKey, navigate }) {
           </span>
         )}
       </div>
-      {!creating && !plan.orderable && (
+      {!creating && !plan.active && (
         <Notice className="mb-5">
-          Orders can only carry the room, building and campus plans today, so the storefront doesn't offer this one yet. Staff can
-          still move a subscription onto it.
+          Retired: the storefront doesn't offer it and no new order can carry it. The subscriptions already on it carry on, and staff
+          can still move one onto it.
         </Notice>
       )}
 

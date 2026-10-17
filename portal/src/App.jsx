@@ -6,7 +6,6 @@ import EntryDialog from "./marketing/EntryDialog.jsx";
 import Wizard from "./Wizard.jsx";
 import AuthScreen from "./account/AuthScreen.jsx";
 import Orders from "./account/Orders.jsx";
-import Queue from "./account/Queue.jsx";
 import ProfilePage from "./account/ProfilePage.jsx";
 import { TermsPage } from "./account/Terms.jsx";
 import BillingPage from "./account/BillingPage.jsx";
@@ -16,17 +15,23 @@ import StaffConsole from "./staff/StaffConsole.jsx";
 import StaffSignIn from "./staff/StaffSignIn.jsx";
 import { AccountProvider, useAccount } from "./lib/AccountContext.jsx";
 import { ROUTES, useHashRoute } from "./lib/useHashRoute.js";
+import { usePollUnread } from "./lib/useUnreadMessages.js";
 import { saveIntent } from "./lib/entryIntent.js";
 import { ToastProvider } from "./lib/toast.jsx";
 
 /**
  * The portal's views.
  *
- *   /               the storefront — what SILLA is, what it costs
- *   #/configure     the seven-step configurator
- *   #/sign-in       · #/sign-up
- *   #/orders[/id]   a buyer's saved configurations and their progress
- *   #/queue[/id]    SILLA's order queue (staff only)
+ *   /                    the storefront — what SILLA is, what it costs
+ *   #/configure          the seven-step configurator
+ *   #/sign-in            · #/sign-up
+ *   #/orders[/id]        a buyer's saved configurations and their progress
+ *   #/billing            · #/invoices/<id>   a buyer's plan, subscription and invoices
+ *   #/messages[/id]      a buyer's conversations with SILLA
+ *   #/account            · #/terms
+ *   #/staff/<section>[/<id>][?filters]       the staff console
+ *   #/staff/sign-in[/invitation]             its door, and an invited person's
+ *   #/queue[/id]         the old order queue — now #/staff/orders, which it redirects to
  *
  * Hash routing rather than a router: these are flat, have no nested
  * layouts and one id parameter between them. See lib/useHashRoute.js.
@@ -52,7 +57,7 @@ import { ToastProvider } from "./lib/toast.jsx";
 /** How long the panel takes to close over the page. The swap happens then. */
 const COVER_MS = 320;
 
-const GUARDED = ["orders", "queue", "account", "billing", "invoices", "messages", "staff"];
+const GUARDED = ["orders", "account", "billing", "invoices", "messages", "staff"];
 
 /**
  * What is on screen is not only the address. A signed-out visitor at
@@ -73,6 +78,8 @@ const pageKey = (p) => `${p.name}/${p.section || ""}/${p.id || ""}/${p.gate}`;
  */
 const group = (p) => {
   if (p.name === "signIn" || p.name === "signUp") return "auth";
+  // The staff door and its invitation form are one screen with two faces.
+  if (p.name === "staffSignIn") return "staffDoor";
   // The staff console is a tool with a fixed sidebar; wiping the whole
   // screen between its sections would be a page load for a tab click.
   // Entering or leaving it still wipes.
@@ -154,7 +161,11 @@ function usePageWipe(target) {
 
 function Routed() {
   const { route, navigate } = useHashRoute();
-  const { isSignedIn, isSilla, booting } = useAccount();
+  const { account, isSignedIn, isSilla, booting } = useAccount();
+
+  // A buyer's unread replies from SILLA, for the account menu's badge —
+  // kept here, above every page, so navigating never resets it.
+  usePollUnread(isSignedIn && !isSilla, account?.id);
 
   /**
    * The doorway (journey step 4). Every "build" CTA on the storefront
@@ -199,7 +210,12 @@ function Routed() {
     }
     // Staff arriving at their own door while signed in go straight to work.
     if (route.name === "staffSignIn" && isSignedIn && isSilla && !booting) {
-      navigate(ROUTES.queue, { replace: true }); // the console is still being built
+      navigate(ROUTES.staff, { replace: true });
+    }
+    // The queue moved into the console. Old links — bookmarks, and the
+    // new-order emails sent before it moved — land on the same order there.
+    if (route.name === "queue") {
+      navigate(route.id ? `${ROUTES.staff}/orders/${route.id}` : `${ROUTES.staff}/orders`, { replace: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route.name, booting]);
@@ -230,10 +246,8 @@ function Routed() {
       case "orders":
         return <Orders id={page.id} navigate={navigate} />;
       case "queue":
-        // A buyer who guesses the URL gets their own orders rather than a
-        // dead end. The API refuses them regardless — this is only about
-        // not presenting a page that was never theirs to reach.
-        return isSilla ? <Queue id={page.id} navigate={navigate} /> : <Orders id={null} navigate={navigate} />;
+        // Redirecting to #/staff/orders (above); nothing to show for a frame.
+        return <div className="silla-marketing min-h-screen" />;
       case "account":
         return <ProfilePage navigate={navigate} />;
       case "terms":
@@ -245,15 +259,15 @@ function Routed() {
       case "messages":
         return <MessagesPage id={page.id} navigate={navigate} />;
       case "staff":
-        // A buyer who guesses the address is sent to their own orders,
-        // like #/queue; the API refuses them regardless.
+        // A buyer who guesses the address is sent to their own orders
+        // rather than a dead end; the API refuses them regardless.
         return isSilla ? (
-          <StaffConsole section={page.section} id={page.id} navigate={navigate} />
+          <StaffConsole section={page.section} id={page.id} query={route.query || {}} navigate={navigate} />
         ) : (
           <Orders id={null} navigate={navigate} />
         );
       case "staffSignIn":
-        return <StaffSignIn navigate={navigate} />;
+        return <StaffSignIn navigate={navigate} mode={page.id} />;
       default:
         return (
           <Landing

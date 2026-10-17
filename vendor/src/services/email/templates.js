@@ -12,15 +12,21 @@
  * people to type codes they did not request.
  */
 import { button, code, details, note, p, renderEmail } from "./layout.js";
+import { formatMoney } from "./billingTemplates.js";
 
 const PORTAL = () => (process.env.PORTAL_URL || "http://localhost:5174").replace(/\/+$/, "");
 
-const planName = { room: "One Room", building: "Whole Building", campus: "Campus" };
+/** The names the first three plans had, for orders saved before an order carried its plan's name. */
+const LEGACY_PLAN_NAMES = { room: "One Room", building: "Whole Building", campus: "Campus" };
+const planOf = (order) => order.planName || LEGACY_PLAN_NAMES[order.plan] || order.plan;
 
-const money = (amount, currency = "USD") =>
-  amount == null
-    ? "To be confirmed with you"
-    : `${currency === "USD" ? "$" : `${currency} `}${(amount / 100).toFixed(0)} / month`;
+/**
+ * What the order was quoted at, per month. Minor units in, through the
+ * ONE formatter the billing emails use — "₱6,900.00 a month", never
+ * "PHP 6900", which is what a peso order printed when this assumed dollars.
+ */
+const quoted = (order) =>
+  order.quotedAmount == null ? "To be agreed with you" : `${formatMoney(order.quotedAmount, order.currency || "PHP")} a month`;
 
 /** First name for a greeting, from the split fields or the legacy single name. */
 const first = (account) => account.firstName || String(account.name || "").split(" ")[0] || "there";
@@ -131,9 +137,9 @@ export const passwordResetEmail = ({ account, code: value, expiryMinutes }) =>
 
 const orderRows = (order) => [
   ["Organization", order.organizationName],
-  ["Plan", planName[order.plan] || order.plan],
+  ["Plan", planOf(order)],
   ["Billing", order.billingPeriod === "monthly" ? "Monthly" : "Yearly"],
-  ["Quoted", money(order.quotedAmount, order.currency)],
+  ["Quoted", quoted(order)],
 ];
 
 const orderLink = (order) => `${PORTAL()}/#/orders/${order._id}`;
@@ -152,20 +158,26 @@ export const orderSubmittedEmail = ({ account, order }) =>
         "We'll build it from exactly what you configured — the same names, colours and floors — and email you as it moves along."
       ),
       button("View your order", orderLink(order)),
-      note("Nothing has been charged. We'll confirm pricing with you before anything is billed."),
+      // In step with billing, which issues the first invoice the moment an
+      // order is submitted — unless the plan is priced with each customer.
+      note(
+        order.quotedAmount == null
+          ? "Nothing has been charged. We'll agree a price with you before anything is billed."
+          : "Your first invoice follows in a separate email, with how to pay. Nothing is taken automatically — there's no card on file."
+      ),
     ],
   });
 
 /** To SILLA, so a submitted order is not waiting on someone refreshing a page. */
 export const orderSubmittedInternalEmail = ({ account, order, to }) => {
   const buyer = [account.firstName, account.lastName].filter(Boolean).join(" ") || account.name;
-  return build(to, `New order: ${order.organizationName} (${planName[order.plan] || order.plan})`, {
+  return build(to, `New order: ${order.organizationName} (${planOf(order)})`, {
     preheader: `${buyer} submitted a configuration for ${order.organizationName}.`,
     eyebrow: "Internal · new order",
     title: "A buyer submitted an order",
     blocks: [
       details([["Buyer", `${buyer} <${account.email}>`], ...orderRows(order)]),
-      button("Open the queue", `${PORTAL()}/#/queue/${order._id}`),
+      button("Open it in the console", `${PORTAL()}/#/staff/orders/${order._id}`),
     ],
     reason: "because an order was submitted to the SILLA queue",
   });

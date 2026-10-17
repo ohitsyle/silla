@@ -1,14 +1,17 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { ArrowRight, ExternalLink, MailWarning, Plus, Send } from "lucide-react";
+import { ArrowRight, ExternalLink, MailWarning, MessagesSquare, PenLine, Plus, Send } from "lucide-react";
 
 import { Button, Card, Notice, Skeleton } from "../components/ui.jsx";
 import { vendorApi } from "../lib/vendorApi.js";
+import { staffApi } from "../lib/staffApi.js";
+import { NewMessageDialog } from "./MessagesPage.jsx";
+import { Ago, UnreadPill } from "../staff/kit.jsx";
 import { useAccount } from "../lib/AccountContext.jsx";
 import { useToast } from "../lib/toast.jsx";
 import { VerifyEmailModal } from "./modals.jsx";
 import { ROUTES } from "../lib/useHashRoute.js";
-import { AccountLayout, BackLink, PLAN_LABEL, StatusBadge, money, when } from "./shared.jsx";
+import { AccountLayout, BackLink, StatusBadge, planLabel, quoteOf, when } from "./shared.jsx";
 
 /**
  * A buyer's own orders — the answer to "I configured it, now what?".
@@ -94,7 +97,7 @@ function OrderDetail({ id, navigate }) {
     <AccountLayout
       navigate={navigate}
       title={order.organizationName}
-      subtitle={`${PLAN_LABEL[order.plan]} · ${order.billingPeriod} · ${money(order.quotedAmount, order.currency)}/month`}
+      subtitle={`${planLabel(order)} · ${order.billingPeriod} · ${quoteOf(order)}`}
       action={<StatusBadge status={order.status} />}
     >
       <BackLink onClick={() => navigate(ROUTES.orders)} children="All orders" />
@@ -157,6 +160,8 @@ function OrderDetail({ id, navigate }) {
         }}
       />
 
+      <OrderMessages order={order} navigate={navigate} />
+
       <Card className="mt-4">
         <h2 className="font-semibold">What you configured</h2>
         <dl className="mt-4 grid gap-x-8 gap-y-3 sm:grid-cols-2">
@@ -192,6 +197,83 @@ function OrderDetail({ id, navigate }) {
         </ol>
       </Card>
     </AccountLayout>
+  );
+}
+
+/**
+ * "Message SILLA about this order" — the threads already about it, and a
+ * way to start one that arrives in the staff inbox filed under this order.
+ */
+function OrderMessages({ order, navigate }) {
+  const [threads, setThreads] = useState(null);
+  const [writing, setWriting] = useState(false);
+
+  useEffect(() => {
+    staffApi
+      .myConversations({ orderId: order.id })
+      .then((d) => setThreads(d.conversations || []))
+      .catch(() => setThreads([]));
+  }, [order.id]);
+
+  return (
+    <Card className="mt-4">
+      <div className="flex flex-wrap items-start gap-3">
+        <span
+          className="grid h-9 w-9 shrink-0 place-items-center rounded-[12px]"
+          style={{ background: "rgb(var(--c-accent) / 0.11)", color: "var(--color-accent)" }}
+        >
+          <MessagesSquare size={17} strokeWidth={2.3} />
+        </span>
+        <div className="mr-auto min-w-0">
+          <h2 className="font-semibold">Questions about this order?</h2>
+          <p className="mt-0.5 text-sm text-ink-secondary">
+            Message SILLA here — a person on our team answers, and you're emailed when they do.
+          </p>
+        </div>
+        <Button icon={PenLine} onClick={() => setWriting(true)}>
+          Message SILLA
+        </Button>
+      </div>
+
+      {threads?.length > 0 && (
+        <ul className="mt-4 divide-y divide-line/[0.07] border-t border-line/[0.07]">
+          {threads.map((c) => (
+            <li key={c.id}>
+              <a
+                href={`${ROUTES.messages}/${c.id}`}
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigate(`${ROUTES.messages}/${c.id}`);
+                }}
+                className="flex items-center gap-3 py-3 transition-opacity hover:opacity-75"
+              >
+                <span className="min-w-0 flex-1">
+                  <span className={`block truncate text-sm ${c.unread ? "font-extrabold" : "font-semibold"}`}>{c.subject}</span>
+                  <span className="block truncate text-sm text-ink-muted">
+                    {c.lastMessageBy === "buyer" ? "You: " : "SILLA: "}
+                    {c.lastMessagePreview}
+                  </span>
+                </span>
+                <span className="flex shrink-0 items-center gap-2 text-xs text-ink-muted">
+                  <Ago value={c.lastMessageAt} />
+                  <UnreadPill n={c.unread} label="unread replies" />
+                </span>
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <NewMessageDialog
+        open={writing}
+        order={{ id: order.id, organizationName: order.organizationName }}
+        onClose={() => setWriting(false)}
+        onSent={(conversation) => {
+          setWriting(false);
+          navigate(`${ROUTES.messages}/${conversation.id}`);
+        }}
+      />
+    </Card>
   );
 }
 
@@ -259,8 +341,8 @@ export default function Orders({ id, navigate }) {
               <StatusBadge status={o.status} />
             </div>
             <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-ink-secondary">
-              <span>{PLAN_LABEL[o.plan]}</span>
-              <span>{money(o.quotedAmount, o.currency)}/month</span>
+              <span>{planLabel(o)}</span>
+              <span>{quoteOf(o)}</span>
               <span className="text-ink-muted">updated {when(o.updatedAt)}</span>
             </div>
           </motion.button>

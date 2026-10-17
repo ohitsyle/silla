@@ -34,9 +34,10 @@ const money = (inv, minor = inv.total) => formatMoney(minor, { currency: inv.cur
 
 /* ───────────────────────────── the list ───────────────────────────── */
 
-function InvoiceList({ navigate, can }) {
+function InvoiceList({ navigate, can, query: address = {} }) {
   const toast = useToast();
-  const [tab, setTab] = useState("open");
+  // Arriving from the overview's "overdue" figure opens on that tab.
+  const [tab, setTab] = useState(() => (["open", "overdue", "claimed", "paid", "void", "all"].includes(address.tab) ? address.tab : "open"));
   const [q, setQ] = useState("");
   const query = useDebounced(q);
   const [data, setData] = useState(null);
@@ -454,6 +455,6 @@ function InvoiceDetail({ id, navigate, can }) {
   );
 }
 
-export default function Invoices({ navigate, id, can }) {
-  return id ? <InvoiceDetail id={id} navigate={navigate} can={can} /> : <InvoiceList navigate={navigate} can={can} />;
+export default function Invoices({ navigate, id, can, query }) {
+  return id ? <InvoiceDetail id={id} navigate={navigate} can={can} /> : <InvoiceList navigate={navigate} can={can} query={query} />;
 }

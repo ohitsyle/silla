@@ -296,6 +296,21 @@ export async function run(check) {
       again.status === 409 && again.body.code === "ALREADY_PROVISIONED" && again.body.organizationId === orgId,
       `${again.status} ${again.body?.code}`
     );
+    // What a retry after a timeout really sends: the same address as the
+    // first attempt, which that attempt now holds.
+    const sameAddress = await internal("POST", "/api/internal/organizations", {
+      profile: profileFor(`${tag}-same`),
+      slug,
+      source: { orderId: `order-${tag}` },
+    });
+    if (sameAddress.body?.organizationId && sameAddress.status === 201) provisioned.push(sameAddress.body.organizationId);
+    check(
+      "CP-2",
+      "…even at the same address: the order is recognised before the address is called taken",
+      sameAddress.status === 409 && sameAddress.body.code === "ALREADY_PROVISIONED" && sameAddress.body.organizationId === orgId &&
+        sameAddress.body.slug === slug,
+      `${sameAddress.status} ${sameAddress.body?.code}`
+    );
 
     /* ───────────── tenancy: config by address ───────────── */
 

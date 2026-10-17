@@ -1,5 +1,6 @@
 /**
- * One-time codes: email verification, email change, password reset.
+ * One-time codes: email verification, email change, password reset, and
+ * staff invitations.
  *
  * Stored bcrypt-hashed, never in the clear — a leaked database must not
  * hand anyone a working code. That also means nobody, including our own
@@ -16,6 +17,16 @@ import { randomInt } from "node:crypto";
 export const CODE_TTL_MINUTES = 10;
 export const MAX_ATTEMPTS = 5;
 export const RESEND_COOLDOWN_SECONDS = 60;
+
+/**
+ * Purposes that outlive the ten-minute default. A sign-up code is typed
+ * while the tab is still open; an invitation is read whenever the person
+ * gets to their inbox, which may be after a weekend. Every other purpose
+ * keeps the default, and the attempt limit still applies to all of them.
+ */
+const TTL_MINUTES_BY_PURPOSE = { invite: 72 * 60 };
+
+export const ttlMinutesFor = (purpose) => TTL_MINUTES_BY_PURPOSE[purpose] ?? CODE_TTL_MINUTES;
 
 /** Uniform over 000000–999999. randomInt is cryptographic; Math.random is not. */
 const generate = () => String(randomInt(0, 1_000_000)).padStart(6, "0");
@@ -38,7 +49,7 @@ export async function issueCode(account, purpose, { pendingEmail = null } = {}) 
   account.verification = {
     purpose,
     codeHash: await bcrypt.hash(code, 10),
-    expiresAt: new Date(Date.now() + CODE_TTL_MINUTES * 60 * 1000),
+    expiresAt: new Date(Date.now() + ttlMinutesFor(purpose) * 60 * 1000),
     attempts: 0,
     sentAt: new Date(),
     pendingEmail,

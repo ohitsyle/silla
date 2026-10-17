@@ -77,7 +77,6 @@ async function drain() {
   draining = false;
 }
 
-/** Fire-and-forget by design — see rule 1 above. */
 /**
  * Addresses that must never be handed to a real mail provider.
  *
@@ -93,6 +92,7 @@ const UNDELIVERABLE = /@test\.silla$|@example\.(com|org|net)$/i;
 /** True for the test domains the transport drops — for callers deciding whether to notify a REAL inbox about them. */
 export const isUndeliverable = (email) => UNDELIVERABLE.test(String(email || ""));
 
+/** Fire-and-forget by design — see rule 1 above. */
 export function sendEmail({ to, subject, text, html }) {
   if (!to) return;
   if (UNDELIVERABLE.test(to)) return;

@@ -1,10 +1,11 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  Check, ChevronDown, Eye, EyeOff, ListChecks, LogOut, Receipt, ShieldCheck, UserRound,
+  Check, ChevronDown, CreditCard, Eye, EyeOff, LayoutDashboard, LogOut, MessagesSquare, Receipt, ShieldCheck, UserRound,
 } from "lucide-react";
 
 import { initialsOf, useAccount } from "../lib/AccountContext.jsx";
+import { useUnreadMessages } from "../lib/useUnreadMessages.js";
 import { ROUTES } from "../lib/useHashRoute.js";
 
 /**
@@ -392,6 +393,7 @@ export function AgreeToTerms({ checked, onChange, onOpenTerms, error }) {
  */
 export function AccountMenu({ navigate, tone = "light" }) {
   const { account, isSilla, isVerified, signOut } = useAccount();
+  const { unread } = useUnreadMessages();
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
 
@@ -414,14 +416,20 @@ export function AccountMenu({ navigate, tone = "light" }) {
     navigate(to);
   };
 
-  const items = [
-    { icon: UserRound, label: "Profile", to: ROUTES.account },
-    { icon: Receipt, label: "My orders", to: ROUTES.orders },
-    // Billing (#/billing), Messages (#/messages) and the staff console
-    // (#/staff) exist as routes but are still being built, so they are not
-    // linked yet. Link them here when they land.
-    isSilla && { icon: ListChecks, label: "Order queue", to: ROUTES.queue },
-  ].filter(Boolean);
+  // Staff work from the console; the buyer's pages are for buyers.
+  const items = (
+    isSilla
+      ? [
+          { icon: LayoutDashboard, label: "Staff console", to: ROUTES.staff },
+          { icon: UserRound, label: "Profile", to: ROUTES.account },
+        ]
+      : [
+          { icon: UserRound, label: "Profile", to: ROUTES.account },
+          { icon: Receipt, label: "My orders", to: ROUTES.orders },
+          { icon: CreditCard, label: "Billing", to: ROUTES.billing },
+          { icon: MessagesSquare, label: "Messages", to: ROUTES.messages, count: unread },
+        ]
+  ).filter(Boolean);
 
   return (
     <div ref={ref} className="relative">
@@ -439,12 +447,24 @@ export function AccountMenu({ navigate, tone = "light" }) {
           >
             {initialsOf(account)}
           </span>
-          {!isVerified && !isSilla && (
+          {!isSilla && unread > 0 ? (
+            // A reply from SILLA outranks the verification nudge: someone is waiting on them.
             <span
-              className="absolute -right-0.5 -top-0.5 h-3 w-3 rounded-full border-2"
-              style={{ background: "rgb(var(--c-state-reserved))", borderColor: "rgb(var(--c-bg-page))" }}
-              aria-label="Email not verified"
-            />
+              className="absolute -right-1.5 -top-1.5 grid h-[18px] min-w-[18px] place-items-center rounded-full border-2 px-1 text-[10px] font-bold leading-none"
+              style={{ background: "rgb(var(--c-ink-primary))", color: "rgb(var(--c-bg-card))", borderColor: "rgb(var(--c-bg-page))" }}
+              aria-label={`${unread} unread ${unread === 1 ? "reply" : "replies"} from SILLA`}
+            >
+              {unread > 9 ? "9+" : unread}
+            </span>
+          ) : (
+            !isVerified &&
+            !isSilla && (
+              <span
+                className="absolute -right-0.5 -top-0.5 h-3 w-3 rounded-full border-2"
+                style={{ background: "rgb(var(--c-state-reserved))", borderColor: "rgb(var(--c-bg-page))" }}
+                aria-label="Email not verified"
+              />
+            )
           )}
         </span>
         <span className={cx("hidden max-w-[10rem] truncate text-[15px] font-semibold sm:inline", tone === "light" && "text-ink-primary")}>
@@ -485,7 +505,7 @@ export function AccountMenu({ navigate, tone = "light" }) {
               )}
             </div>
             <div className="p-1.5">
-              {items.map(({ icon: Icon, label, to }) => (
+              {items.map(({ icon: Icon, label, to, count }) => (
                 <button
                   key={label}
                   type="button"
@@ -496,6 +516,15 @@ export function AccountMenu({ navigate, tone = "light" }) {
                 >
                   <Icon size={16} className="text-ink-muted" />
                   {label}
+                  {count > 0 && (
+                    <span
+                      className="ml-auto min-w-[1.375rem] rounded-full px-1.5 py-0.5 text-center text-[11px] font-bold tabular-nums"
+                      style={{ background: "var(--color-accent)", color: "var(--color-accent-ink)" }}
+                      aria-label={`${count} unread`}
+                    >
+                      {count}
+                    </span>
+                  )}
                 </button>
               ))}
             </div>

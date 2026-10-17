@@ -30,16 +30,36 @@ export const ROUTES = {
   staffSignIn: "#/staff/sign-in",
 };
 
-/** `#/staff/clients/abc` → { name: "staff", section: "clients", id: "abc" } */
+/**
+ * `#/staff/clients/abc` → { name: "staff", section: "clients", id: "abc" }.
+ * `#/staff/sign-in/invitation` is the staff door opened on "I have an
+ * invitation" — the link an invitation email carries.
+ */
 function parseStaff(rest) {
   const [section = "", id = null] = rest;
-  if (section === "sign-in") return { name: "staffSignIn", id: null, section: null };
+  if (section === "sign-in") return { name: "staffSignIn", id, section: null };
   return { name: "staff", section: section || "dashboard", id };
 }
 
-/** `#/orders/abc123` → { name: "orders", id: "abc123" } */
+/**
+ * A list's filters, kept in the address after a "?" — `#/staff/orders?status=open`
+ * — so a filtered view can be linked, bookmarked, refreshed and reached
+ * from the overview, the same reason the sections are routes at all.
+ */
+export const withQuery = (path, params = {}) => {
+  const pairs = Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== "" && v !== false);
+  return pairs.length ? `${path}?${new URLSearchParams(pairs.map(([k, v]) => [k, v === true ? "1" : String(v)]))}` : path;
+};
+
+/** `#/orders/abc123` → { name: "orders", id: "abc123", query: {} } */
 export function parseHash(hash) {
-  const clean = String(hash || "").replace(/^#\/?/, "");
+  const raw = String(hash || "").replace(/^#\/?/, "");
+  const [clean, search = ""] = raw.split("?");
+  const query = Object.fromEntries(new URLSearchParams(search));
+  return { ...parsePath(clean), query };
+}
+
+function parsePath(clean) {
   if (!clean) return { name: "home", id: null };
 
   const [head, id = null, ...rest] = clean.split("/");
@@ -86,7 +106,7 @@ export function useHashRoute() {
     if (!target) {
       // Clear the hash without leaving a bare "#" behind.
       window.history.pushState("", document.title, window.location.pathname + window.location.search);
-      setRoute({ name: "home", id: null });
+      setRoute({ name: "home", id: null, query: {} });
       return;
     }
 

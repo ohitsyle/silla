@@ -2,7 +2,10 @@ import { Router } from "express";
 import mongoose from "mongoose";
 import Order, { ALLOWED_TRANSITIONS } from "../models/Order.js";
 import Account from "../models/Account.js";
-import { requireAccount, requireSilla } from "../middleware/auth.js";
+import Conversation from "../models/Conversation.js";
+import { requireAccount } from "../middleware/auth.js";
+import { can, requirePermission } from "../middleware/staff.js";
+import { audit } from "../lib/audit.js";
 import { sendEmail, isUndeliverable } from "../services/email/index.js";
 import * as billing from "../services/billing.js";
 import {
@@ -15,11 +18,19 @@ const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, ne
 
 router.use(requireAccount);
 
+/**
+ * Orders from before `planName` was stored carry only a key — one of the
+ * three plans that existed then, under the names they had.
+ */
+const LEGACY_PLAN_NAMES = { room: "One Room", building: "Whole Building", campus: "Campus" };
+export const planNameOf = (order) => order.planName || LEGACY_PLAN_NAMES[order.plan] || order.plan;
+
 /** What the buyer's own list needs — never the whole profile. */
 const summary = (order) => ({
   id: order._id.toString(),
   organizationName: order.organizationName,
   plan: order.plan,
+  planName: planNameOf(order),
   billingPeriod: order.billingPeriod,
   quotedAmount: order.quotedAmount,
   currency: order.currency,
@@ -28,6 +39,28 @@ const summary = (order) => ({
   createdAt: order.createdAt,
   updatedAt: order.updatedAt,
 });
+
+/** The same row for staff surfaces elsewhere (deployments.routes.js), so the two never disagree. */
+export const orderSummary = summary;
+
+/**
+ * The plan an order may be saved with: any ACTIVE plan in the catalogue —
+ * the three SILLA started with, or one staff created in the console.
+ * A retired plan is still in the catalogue (subscriptions on it carry on)
+ * but is no longer sold. Answers the plan, or null with the reason.
+ */
+const PLAN_KEY = /^[a-z0-9-]{2,40}$/;
+async function orderablePlan(key) {
+  const wanted = String(key || "").trim().toLowerCase();
+  if (!PLAN_KEY.test(wanted)) return { plan: null, problem: "Pick a plan." };
+  const plan = await billing.planByKey(wanted);
+  if (!plan) return { plan: null, problem: "Pick a plan — that one isn't in the catalogue." };
+  if (plan.active === false) return { plan: null, problem: "That plan isn't offered any more. Pick another." };
+  return { plan, problem: null };
+}
+
+/** An order's currency: what the buyer was shown, else the plan's. Three letters or nothing. */
+const currencyFor = (sent, plan) => (/^[A-Z]{3}$/.test(String(sent || "")) ? String(sent) : plan?.currency || "PHP");
 
 /* ─────────────────────────── A buyer's own ─────────────────────────── */
 
@@ -64,18 +97,18 @@ router.post(
     if (!profile.organizationName) {
       return res.status(400).json({ error: "The configuration has no organization name." });
     }
-    if (!["room", "building", "campus"].includes(plan)) {
-      return res.status(400).json({ error: "Pick a plan." });
-    }
+    const chosen = await orderablePlan(plan);
+    if (!chosen.plan) return res.status(400).json({ error: chosen.problem, fields: { plan: chosen.problem } });
 
     const order = await Order.create({
       account: req.account._id,
       profile,
       organizationName: String(profile.organizationName),
-      plan,
+      plan: chosen.plan.key,
+      planName: chosen.plan.name,
       billingPeriod: billingPeriod === "monthly" ? "monthly" : "yearly",
       quotedAmount: Number.isFinite(quotedAmount) ? quotedAmount : null,
-      currency: currency || "USD",
+      currency: currencyFor(currency, chosen.plan),
       status: "draft",
       history: [{ status: "draft", by: req.account._id, note: "Created" }],
     });
@@ -103,10 +136,14 @@ router.patch(
       order.profile = profile;
       order.organizationName = String(profile.organizationName);
     }
-    if (plan) {
-      if (!["room", "building", "campus"].includes(plan)) return res.status(400).json({ error: "Unknown plan." });
-      order.plan = plan;
+    if (plan && plan !== order.plan) {
+      const chosen = await orderablePlan(plan);
+      if (!chosen.plan) return res.status(400).json({ error: chosen.problem, fields: { plan: chosen.problem } });
+      order.plan = chosen.plan.key;
+      order.planName = chosen.plan.name;
+      if (!req.body.currency) order.currency = chosen.plan.currency || order.currency;
     }
+    if (req.body.currency !== undefined) order.currency = currencyFor(req.body.currency, { currency: order.currency });
     if (billingPeriod) order.billingPeriod = billingPeriod === "monthly" ? "monthly" : "yearly";
     if (Number.isFinite(quotedAmount)) order.quotedAmount = quotedAmount;
 
@@ -164,116 +201,358 @@ router.post(
 );
 
 /* ───────────────────────── SILLA's queue ───────────────────────── */
+/*
+ * The staff console's Orders section. Gated by permission
+ * (middleware/staff.js), not by "is SILLA staff": every staff role may
+ * read the queue, but a billing clerk cannot move an order along.
+ */
+
+/**
+ * Drafts are a buyer's private working copy — they are not an order
+ * until submitted, and listing them would put half-finished thinking in
+ * front of the vendor.
+ *
+ * The guard used to be `ALLOWED_TRANSITIONS[status] !== undefined`,
+ * which reads like a validity check and is one — but "draft" IS a key in
+ * that table, so `?status=draft` sailed through it and returned every
+ * buyer's private draft along with their email. Verified against the
+ * running API before this was changed. Being a known status and being
+ * listable are different questions.
+ */
+const LISTABLE = ["submitted", "provisioning", "live", "cancelled"];
+/** "Open" is what still needs someone: submitted, or being built. */
+const OPEN = ["submitted", "provisioning"];
+
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const who = (a) =>
+  a && typeof a === "object" && a.email ? { id: a._id.toString(), name: a.name, email: a.email } : null;
 
 router.get(
   "/queue/all",
-  requireSilla,
+  requirePermission("orders.read"),
   asyncHandler(async (req, res) => {
-    // Drafts are a buyer's private working copy — they are not an order
-    // until submitted, and listing them would put half-finished thinking
-    // in front of the vendor.
-    //
-    // The guard used to be `ALLOWED_TRANSITIONS[status] !== undefined`,
-    // which reads like a validity check and is one — but "draft" IS a
-    // key in that table, so `?status=draft` sailed through it and
-    // returned every buyer's private draft along with their email.
-    // Verified against the running API before this was changed.
-    // Being a known status and being listable are different questions.
-    const LISTABLE = ["submitted", "provisioning", "live", "cancelled"];
+    const { status, q, plan } = req.query;
 
     const filter = {};
-    if (req.query.status && LISTABLE.includes(req.query.status)) {
-      filter.status = req.query.status;
-    } else {
-      filter.status = { $ne: "draft" };
+    if (status === "open") filter.status = { $in: OPEN };
+    else if (status && LISTABLE.includes(status)) filter.status = status;
+    else filter.status = { $ne: "draft" };
+    if (plan && PLAN_KEY.test(String(plan))) filter.plan = String(plan);
+
+    if (q && String(q).trim()) {
+      const rx = { $regex: escapeRegex(String(q).trim().slice(0, 80)), $options: "i" };
+      const buyers = await Account.find({ role: "buyer", $or: [{ email: rx }, { name: rx }, { organizationName: rx }] })
+        .select("_id")
+        .limit(500);
+      filter.$or = [{ organizationName: rx }, { deploymentSlug: rx }, { account: { $in: buyers.map((b) => b._id) } }];
     }
 
-    const orders = await Order.find(filter).sort({ updatedAt: -1 }).limit(200).populate("account", "name email");
+    const [orders, byStatus] = await Promise.all([
+      Order.find(filter).sort({ updatedAt: -1 }).limit(200).populate("account", "name email"),
+      Order.aggregate([{ $match: { status: { $ne: "draft" } } }, { $group: { _id: "$status", n: { $sum: 1 } } }]),
+    ]);
+
+    // Unread customer messages per order, so a thread about an order is
+    // visible from the queue without opening the inbox.
+    const unread = await Conversation.aggregate([
+      { $match: { order: { $in: orders.map((o) => o._id) }, status: "open" } },
+      { $group: { _id: "$order", open: { $sum: 1 }, unread: { $sum: "$unread.staff" } } },
+    ]);
+    const talk = new Map(unread.map((u) => [u._id.toString(), { open: u.open, unread: u.unread }]));
+
+    const counts = { submitted: 0, provisioning: 0, live: 0, cancelled: 0 };
+    for (const row of byStatus) if (row._id in counts) counts[row._id] = row.n;
+    counts.open = counts.submitted + counts.provisioning;
+    counts.all = counts.open + counts.live + counts.cancelled;
+
     res.json({
       orders: orders.map((o) => ({
         ...summary(o),
-        account: o.account ? { name: o.account.name, email: o.account.email } : null,
+        account: o.account ? { name: o.account.name, email: o.account.email, id: o.account._id.toString() } : null,
+        provisionedAt: o.provisionedAt || null,
+        notes: o.notes?.length || 0,
+        conversations: talk.get(o._id.toString()) || { open: 0, unread: 0 },
       })),
+      counts,
     });
   })
 );
+
+/** Everything a person needs to act on one order. */
+async function queueDetail(id) {
+  const order = await Order.findById(id)
+    .populate("account", "name email organizationName emailVerified")
+    .populate("history.by", "name email")
+    .populate("notes.by", "name email")
+    .populate("provisioningClaim.by", "name email");
+  if (!order || order.status === "draft") return null;
+
+  const [sub, conversations] = await Promise.all([
+    billing.subscriptionForOrder(order._id),
+    Conversation.find({ order: order._id }).sort({ lastMessageAt: -1 }).limit(20),
+  ]);
+
+  return {
+    ...summary(order),
+    profile: order.profile,
+    history: (order.history || []).map((h) => ({ status: h.status, at: h.at, note: h.note, by: who(h.by) })),
+    notes: (order.notes || [])
+      .map((n) => ({ id: n._id.toString(), at: n.at, body: n.body, by: who(n.by) }))
+      .reverse(),
+    account: order.account
+      ? {
+          id: order.account._id.toString(),
+          name: order.account.name,
+          email: order.account.email,
+          organizationName: order.account.organizationName,
+          emailVerified: Boolean(order.account.emailVerified),
+        }
+      : null,
+    provisionedOrganizationId: order.provisionedOrganizationId,
+    deploymentSlug: order.deploymentSlug || "",
+    provisionedAt: order.provisionedAt || null,
+    provisioning:
+      order.provisioningClaim?.at && Date.now() - new Date(order.provisioningClaim.at).getTime() < 2 * 60 * 1000
+        ? { since: order.provisioningClaim.at, by: who(order.provisioningClaim.by) }
+        : null,
+    allowed: ALLOWED_TRANSITIONS[order.status] || [],
+    // Read for display: what billing knows about this order. Money lives
+    // in the Subscriptions section; this is status only.
+    subscription: sub
+      ? {
+          id: sub._id.toString(),
+          status: sub.status,
+          planName: sub.planName,
+          trialEndsAt: sub.trialEndsAt,
+          currentPeriodEnd: sub.currentPeriodEnd,
+          sync: { syncedAt: sub.sync?.syncedAt || null, error: sub.sync?.error || null },
+        }
+      : null,
+    conversations: conversations.map((c) => ({
+      id: c._id.toString(),
+      subject: c.subject,
+      status: c.status,
+      unread: c.unread?.staff || 0,
+      lastMessageAt: c.lastMessageAt,
+      lastMessagePreview: c.lastMessagePreview,
+      lastMessageBy: c.lastMessageBy,
+    })),
+  };
+}
 
 router.get(
   "/queue/:id",
-  requireSilla,
+  requirePermission("orders.read"),
   asyncHandler(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid order id" });
-    const order = await Order.findById(req.params.id).populate("account", "name email organizationName");
-    if (!order || order.status === "draft") return res.status(404).json({ error: "Order not found" });
-    res.json({
-      order: {
-        ...summary(order),
-        profile: order.profile,
-        history: order.history,
-        account: order.account
-          ? { name: order.account.name, email: order.account.email, organizationName: order.account.organizationName }
-          : null,
-      },
-    });
+    const order = await queueDetail(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    res.json({ order });
   })
 );
 
-/** Move an order along. Only through a legal transition. */
+/**
+ * Move an order along. Only through a legal transition.
+ *
+ * This is also the MANUAL provisioning path — the profile run through
+ * `npm run seed:file` by hand, then the URL and organization id recorded
+ * here — for when the control plane is not available. PROVISION in the
+ * console (deployments.routes.js) is the one-press path. Either way, going
+ * live is what starts the subscription's trial (billing.onProvisioned):
+ * a customer with a working system is on the clock however it was built.
+ *
+ * The write is CONDITIONAL on the order still being as it was read — its
+ * status, its address, its organization, and nobody mid-way through
+ * provisioning it. Two staff members acting on one order at once (one
+ * cancelling while another presses Provision) would otherwise each save
+ * over the other, and a cancelled order could come back live.
+ */
+const CLAIM_FRESH_MS = 2 * 60 * 1000; // deployments.routes.js CLAIM_TTL_MS
+
 router.patch(
   "/queue/:id",
-  requireSilla,
+  requirePermission("orders.manage"),
   asyncHandler(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid order id" });
     const order = await Order.findById(req.params.id);
     if (!order || order.status === "draft") return res.status(404).json({ error: "Order not found" });
 
-    const { status, note, deploymentUrl, provisionedOrganizationId } = req.body || {};
+    const { status, deploymentUrl, provisionedOrganizationId } = req.body || {};
+    const note = String(req.body?.note || "").trim().slice(0, 1000);
     const previous = order.status;
+    const before = { deploymentUrl: order.deploymentUrl, provisionedOrganizationId: order.provisionedOrganizationId };
+    const after = { ...before };
+    const moving = Boolean(status) && status !== previous;
 
-    if (status && status !== order.status) {
-      if (!ALLOWED_TRANSITIONS[order.status]?.includes(status)) {
+    if (moving) {
+      if (!ALLOWED_TRANSITIONS[previous]?.includes(status)) {
         return res.status(409).json({
-          error: `Cannot go from ${order.status} to ${status}.`,
-          allowed: ALLOWED_TRANSITIONS[order.status],
+          error: `Cannot go from ${previous} to ${status}.`,
+          allowed: ALLOWED_TRANSITIONS[previous],
         });
       }
-      order.status = status;
-      order.history.push({ status, by: req.account._id, note: String(note || "") });
+      // Cancelling a LIVE order ends a running deployment: its subscription
+      // is cancelled and the organization goes read-only. That is the
+      // reach of deployments.manage (owners, admins) — orders.manage lets
+      // support clear away a duplicate order, not switch a customer off.
+      if (status === "cancelled" && previous === "live" && !can(req.account, "deployments.manage")) {
+        return res.status(403).json({
+          error: "Cancelling a live order switches the customer's system off. Ask an owner or an admin.",
+          code: "STAFF_PERMISSION",
+          permission: "deployments.manage",
+        });
+      }
+      // A cancellation is emailed to the customer with its reason, and is
+      // the one transition they will want explained. Nobody should get
+      // "your order was cancelled" and nothing else.
+      if (status === "cancelled" && !note) {
+        return res.status(400).json({
+          error: "Say why it's being cancelled — the customer is emailed the reason.",
+          fields: { note: "Say why it's being cancelled — the customer is emailed the reason." },
+        });
+      }
     }
 
-    if (deploymentUrl !== undefined) order.deploymentUrl = String(deploymentUrl).trim();
+    if (deploymentUrl !== undefined) {
+      after.deploymentUrl = String(deploymentUrl).trim().slice(0, 500);
+      if (after.deploymentUrl && !/^https?:\/\/\S+$/i.test(after.deploymentUrl)) {
+        const message = "Enter the full address, starting with https://";
+        return res.status(400).json({ error: message, fields: { deploymentUrl: message } });
+      }
+    }
     if (provisionedOrganizationId !== undefined) {
-      order.provisionedOrganizationId = String(provisionedOrganizationId).trim();
+      after.provisionedOrganizationId = String(provisionedOrganizationId).trim().slice(0, 64);
+      if (after.provisionedOrganizationId !== before.provisionedOrganizationId) {
+        // An organization the console provisioned is linked to its
+        // subscription and its address; re-pointing it by hand would send
+        // this customer's plan to someone else's deployment.
+        if (order.deploymentSlug) {
+          const message = "This order was provisioned from the console, so its organization can't be changed by hand.";
+          return res.status(409).json({ error: message, fields: { provisionedOrganizationId: message } });
+        }
+        if (
+          after.provisionedOrganizationId &&
+          (await Order.exists({ _id: { $ne: order._id }, provisionedOrganizationId: after.provisionedOrganizationId }))
+        ) {
+          const message = "Another order is already linked to that organization.";
+          return res.status(409).json({ error: message, fields: { provisionedOrganizationId: message } });
+        }
+      }
     }
 
+    const nextStatus = moving ? status : previous;
     // Going live without saying where is the one mistake this flow
     // invites, and it is the field the customer actually needs.
-    if (order.status === "live" && !order.deploymentUrl) {
-      return res.status(400).json({ error: "A live order needs its deployment URL." });
+    if (nextStatus === "live" && !after.deploymentUrl) {
+      const message = "A live order needs its deployment URL.";
+      return res.status(400).json({ error: message, fields: { deploymentUrl: message } });
     }
 
-    await order.save();
+    const changed = Object.keys(before).filter((k) => before[k] !== after[k]);
+    if (!moving && !changed.length) return res.json({ order: summary(order) });
 
-    if (status === "cancelled" && previous !== "cancelled") {
+    const saved = await Order.findOneAndUpdate(
+      {
+        _id: order._id,
+        status: previous,
+        deploymentUrl: before.deploymentUrl,
+        provisionedOrganizationId: before.provisionedOrganizationId,
+        $or: [{ "provisioningClaim.at": null }, { "provisioningClaim.at": { $lt: new Date(Date.now() - CLAIM_FRESH_MS) } }],
+      },
+      {
+        $set: { status: nextStatus, ...after },
+        ...(moving ? { $push: { history: { status, at: new Date(), by: req.account._id, note } } } : {}),
+      },
+      { new: true }
+    );
+    if (!saved) {
+      const now = await Order.findById(order._id).select("provisioningClaim");
+      const claimed = now?.provisioningClaim?.at && Date.now() - new Date(now.provisioningClaim.at).getTime() < CLAIM_FRESH_MS;
+      return res.status(409).json(
+        claimed
+          ? { error: "Someone is provisioning this order right now. Give it a moment, then refresh.", code: "PROVISIONING_IN_PROGRESS" }
+          : { error: "This order changed while you were looking at it. Refresh it and try again.", code: "ORDER_CHANGED" }
+      );
+    }
+
+    const target = { type: "order", id: saved._id, label: saved.organizationName };
+    if (moving) {
+      await audit(
+        req,
+        "order.status",
+        target,
+        `Moved ${saved.organizationName} from ${previous} to ${status}${note ? ` — ${note}` : ""}`,
+        { from: previous, to: status, note }
+      );
+    }
+    if (changed.length) {
+      await audit(req, "order.update", target, `Updated ${changed.join(" and ")} on ${saved.organizationName}`, { before, after });
+    }
+
+    if (status === "cancelled" && moving) {
       try {
-        await billing.onOrderCancelled(order, { by: req.account, reason: String(note || "") });
+        await billing.onOrderCancelled(saved, { by: req.account, reason: note });
       } catch (err) {
-        console.error("[vendor:billing] onOrderCancelled failed for", order._id.toString(), err);
+        console.error("[vendor:billing] onOrderCancelled failed for", saved._id.toString(), err);
+      }
+    }
+
+    // Live by hand: the same billing step as the one-press path — the
+    // trial starts, and the deployment (once its id is known) is told its
+    // plan. Again if the organization id is filled in afterwards.
+    if (saved.status === "live" && (moving || changed.includes("provisionedOrganizationId"))) {
+      try {
+        await billing.onProvisioned(saved, saved.provisionedOrganizationId || "", { by: req.account });
+      } catch (err) {
+        console.error("[vendor:billing] onProvisioned failed for", saved._id.toString(), err);
       }
     }
 
     // Only on an actual change of state — re-saving a URL should not
     // email somebody again.
-    if (status && status !== previous) {
-      const account = await Account.findById(order.account).select("name email");
+    if (moving) {
+      const account = await Account.findById(saved.account).select("firstName name email");
       if (account) {
-        if (status === "provisioning") sendEmail(orderProvisioningEmail({ account, order }));
-        if (status === "live") sendEmail(orderLiveEmail({ account, order }));
-        if (status === "cancelled") sendEmail(orderCancelledEmail({ account, order, reason: note }));
+        if (status === "provisioning") sendEmail(orderProvisioningEmail({ account, order: saved }));
+        if (status === "live") sendEmail(orderLiveEmail({ account, order: saved }));
+        if (status === "cancelled") sendEmail(orderCancelledEmail({ account, order: saved, reason: note }));
       }
     }
 
-    res.json({ order: summary(order) });
+    res.json({ order: summary(saved) });
+  })
+);
+
+/**
+ * A staff-only note on an order. Never returned by a buyer route — see
+ * the `notes` field in models/Order.js for why it is not a history note.
+ */
+router.post(
+  "/queue/:id/notes",
+  requirePermission("orders.manage"),
+  asyncHandler(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid order id" });
+    const body = String(req.body?.body || "").trim();
+    if (!body) return res.status(400).json({ error: "Write the note first.", fields: { body: "Write the note first." } });
+    if (body.length > 4000) {
+      return res.status(400).json({ error: "Keep a note under 4,000 characters.", fields: { body: "Keep a note under 4,000 characters." } });
+    }
+
+    const order = await Order.findOneAndUpdate(
+      { _id: req.params.id, status: { $ne: "draft" } },
+      { $push: { notes: { at: new Date(), by: req.account._id, body } } },
+      { new: true }
+    );
+    if (!order) return res.status(404).json({ error: "Order not found" });
+
+    await audit(
+      req,
+      "order.note",
+      { type: "order", id: order._id, label: order.organizationName },
+      `Added a note to ${order.organizationName}`
+    );
+    res.status(201).json({ order: await queueDetail(order._id) });
   })
 );
 

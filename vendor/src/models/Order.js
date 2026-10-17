@@ -47,7 +47,16 @@ const orderSchema = new mongoose.Schema(
     /** Denormalised for the queue, so listing orders needs no profile parsing. */
     organizationName: { type: String, required: true, trim: true },
 
-    plan: { type: String, enum: ["room", "building", "campus"], required: true },
+    /**
+     * A plan key from the catalogue (models/Plan.js). Not an enum: staff
+     * create plans in the console, and an order for one has to be
+     * possible. order.routes.js checks the key against the catalogue
+     * (billing.planByKey) — an ACTIVE plan for anything new — which is the
+     * rule a fixed list here could only ever approximate.
+     */
+    plan: { type: String, required: true, trim: true, lowercase: true, maxlength: 40 },
+    /** The plan's name when the order was saved, so a list or an email needs no lookup — and a renamed plan doesn't rename history. */
+    planName: { type: String, default: "", trim: true },
     billingPeriod: { type: String, enum: ["monthly", "yearly"], default: "yearly" },
 
     /**
@@ -57,7 +66,7 @@ const orderSchema = new mongoose.Schema(
      * say what this customer was actually offered.
      */
     quotedAmount: { type: Number, default: null },
-    currency: { type: String, default: "USD" },
+    currency: { type: String, default: "PHP" },
 
     status: { type: String, enum: ORDER_STATUS, default: "draft", index: true },
 
@@ -74,9 +83,40 @@ const orderSchema = new mongoose.Schema(
       },
     ],
 
+    /**
+     * Staff-only notes — what was agreed on a call, why an order is on
+     * hold. Separate from `history[].note` on purpose: a transition's note
+     * is part of the record the BUYER reads on their order page (and a
+     * cancellation reason is emailed to them), while these are never
+     * returned by any buyer-facing route. Two fields, so nobody has to
+     * remember which kind of note is safe to write where.
+     */
+    notes: [
+      {
+        at: { type: Date, default: Date.now },
+        by: { type: mongoose.Schema.Types.ObjectId, ref: "Account" },
+        body: { type: String, required: true, trim: true, maxlength: 4000 },
+      },
+    ],
+
     /** Filled in by SILLA once the deployment exists. */
     deploymentUrl: { type: String, default: "" },
     provisionedOrganizationId: { type: String, default: "" },
+    /** The organization's address segment (`<PRODUCT_URL>/<slug>`), when provisioned through the control plane. */
+    deploymentSlug: { type: String, default: "" },
+    provisionedAt: { type: Date, default: null },
+
+    /**
+     * Held while one staff member's PROVISION call is in flight
+     * (routes/deployments.routes.js). Two people pressing the button at
+     * once would otherwise build two organizations for one order. Taken
+     * with a conditional update, released when the call returns; a claim
+     * older than the call's own timeout is stale and may be taken over.
+     */
+    provisioningClaim: {
+      at: { type: Date, default: null },
+      by: { type: mongoose.Schema.Types.ObjectId, ref: "Account", default: null },
+    },
 
     // ---- Billing seam ----
     // Nullable now, populated when Stripe lands. Kept on the order

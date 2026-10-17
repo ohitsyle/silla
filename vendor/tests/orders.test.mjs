@@ -165,6 +165,17 @@ export async function run(check) {
   });
   check("VEN-4", "…nor move their own order through it", buyerMove.status === 403);
 
+  /* ── Money in the order emails ── */
+
+  // The receipt used to assume dollars: a peso order read "PHP 6900 / month".
+  const { orderSubmittedEmail } = await import("../src/services/email/templates.js");
+  const receipt = orderSubmittedEmail({
+    account: { firstName: "Ana", email: buyerEmail },
+    order: { _id: orderId, organizationName: "Peso Co", plan: "building", planName: "Whole Building", billingPeriod: "yearly", quotedAmount: 690000, currency: "PHP" },
+  });
+  check("VEN-7", "An order email prints a peso quote from minor units, as pesos",
+    receipt.text.includes("₱6,900.00") && receipt.html.includes("₱6,900.00") && !/PHP\s*6900/.test(receipt.text), receipt.text.match(/Quoted.*/)?.[0]);
+
   /* ── The queue, as SILLA ── */
 
   const staffLogin = await req("/api/vendor/auth/login", {

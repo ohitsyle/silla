@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { ArrowUpRight, Menu, ShieldAlert, X } from "lucide-react";
 
@@ -8,6 +8,7 @@ import { useAccount } from "../lib/AccountContext.jsx";
 import { staffApi } from "../lib/staffApi.js";
 import { ROUTES } from "../lib/useHashRoute.js";
 import { STAFF_SECTIONS, sectionFor } from "./sections.js";
+import { useAutoRefresh } from "./kit.jsx";
 
 /**
  * The SILLA staff console: #/staff/<section>[/<id>].
@@ -22,11 +23,12 @@ import { STAFF_SECTIONS, sectionFor } from "./sections.js";
  * forbidden section falls back to the first one they may open rather
  * than rendering nothing, the same rule as the product's admin console.
  */
-export default function StaffConsole({ section, id, navigate }) {
+export default function StaffConsole({ section, id, query = {}, navigate }) {
   const { account } = useAccount();
   const [me, setMe] = useState(null);
   const [error, setError] = useState(null);
   const [navOpen, setNavOpen] = useState(false);
+  const [badges, setBadges] = useState({});
 
   useEffect(() => {
     let live = true;
@@ -40,8 +42,30 @@ export default function StaffConsole({ section, id, navigate }) {
   }, [account?.id]);
 
   const permissions = useMemo(() => new Set(me?.permissions || []), [me]);
-  const can = (permission) => permissions.has(permission);
+  const can = useCallback((permission) => permissions.has(permission), [permissions]);
   const visible = STAFF_SECTIONS.filter((s) => can(s.permission));
+
+  /**
+   * What is waiting, on the sidebar itself: orders nobody has finished and
+   * customer messages nobody has read. Polled while the tab is visible, and
+   * refreshed at once by a section that changes either.
+   */
+  const refreshBadges = useCallback(() => {
+    if (!permissions.has("orders.read")) return;
+    staffApi
+      .overview()
+      .then((o) =>
+        setBadges({
+          orders: (o.orders?.submitted || 0) + (o.orders?.provisioning || 0),
+          conversations: o.conversations?.unread || 0,
+        })
+      )
+      .catch(() => {});
+  }, [permissions]);
+  useEffect(() => {
+    if (me) refreshBadges();
+  }, [me, refreshBadges]);
+  useAutoRefresh(refreshBadges, 30_000);
 
   const requested = sectionFor(section);
   const current = requested && can(requested.permission) ? requested : visible[0] || null;
@@ -128,6 +152,19 @@ export default function StaffConsole({ section, id, navigate }) {
                     )}
                     <Icon size={17} className="relative" />
                     <span className="relative">{s.label}</span>
+                    {badges[s.key] ? (
+                      <span
+                        className="relative ml-auto min-w-[1.375rem] rounded-full px-1.5 py-0.5 text-center text-[11px] font-bold tabular-nums"
+                        style={
+                          s.key === "conversations"
+                            ? { background: "var(--color-accent)", color: "var(--color-accent-ink)" }
+                            : { background: "rgb(var(--c-line) / 0.08)", color: "rgb(var(--c-ink-secondary))" }
+                        }
+                        aria-label={s.key === "conversations" ? `${badges[s.key]} unread` : `${badges[s.key]} waiting`}
+                      >
+                        {badges[s.key]}
+                      </span>
+                    ) : null}
                   </button>
                 );
               })}
@@ -201,7 +238,7 @@ export default function StaffConsole({ section, id, navigate }) {
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
             >
-              <Section navigate={navigate} id={id} permissions={permissions} can={can} me={me} />
+              <Section navigate={navigate} id={id} query={query} permissions={permissions} can={can} me={me} refreshBadges={refreshBadges} />
             </motion.div>
           ) : (
             <EmptyState title="Nothing here for your role">Ask a SILLA owner for access.</EmptyState>

@@ -1,11 +1,13 @@
 /**
  * What each kind of SILLA staff member may do.
  *
- * ONE table, read by every staff route through requirePermission() and
- * mirrored for display by portal/src/staff/permissions.js (no
- * cross-imports — keep the two in step). A permission is granted here or
- * nowhere; a route that checks `staffRole === "owner"` inline is how a
- * second, unaudited set of rules starts.
+ * ONE table, read by every staff route through requirePermission() (or
+ * can(), for a route both buyers and staff share). The console never
+ * restates it: it asks GET /api/vendor/staff/me for the permissions this
+ * person holds and shows the sections portal/src/staff/sections.js ties
+ * to them. A permission is granted here or nowhere; a route that checks
+ * `staffRole === "owner"` inline is how a second, unaudited set of rules
+ * starts.
  *
  *   owner    runs SILLA: everything, including staff and settings
  *   admin    runs operations: orders, deployments, billing, plans

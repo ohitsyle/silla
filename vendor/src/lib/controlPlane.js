@@ -44,6 +44,18 @@ export const controlPlaneConfigured = () => (process.env.CONTROL_PLANE_SECRET ||
  * with status 503 if this service was never given the secret — a staff
  * action must fail loudly, not appear to work.
  */
+/**
+ * A one-off query parameter on every call. The product accepts each
+ * signature ONCE, and a signature covers the time to the second, the
+ * method, the path and the body — so two identical calls in the same
+ * second (the console checking an address twice, two staff re-issuing the
+ * same owner's access) signed identically and the second was refused as a
+ * replay. The nonce is part of the signed path, so a captured request
+ * still cannot be replayed; it only stops honest twins colliding. The
+ * product's routes ignore it.
+ */
+const withNonce = (path) => `${path}${path.includes("?") ? "&" : "?"}n=${crypto.randomBytes(8).toString("hex")}`;
+
 export async function callDeployment(method, path, body) {
   const secret = process.env.CONTROL_PLANE_SECRET || "";
   if (secret.length < 32) {
@@ -51,13 +63,14 @@ export async function callDeployment(method, path, body) {
   }
   const base = (process.env.SERVER_INTERNAL_URL || "http://127.0.0.1:4000").replace(/\/+$/, "");
   const payload = body === undefined ? "" : JSON.stringify(body);
+  const signedPath = withNonce(path);
 
   let res;
   try {
-    res = await fetch(base + path, {
+    res = await fetch(base + signedPath, {
       method,
       headers: {
-        Authorization: signRequest(secret, { method, path, body: payload }),
+        Authorization: signRequest(secret, { method, path: signedPath, body: payload }),
         ...(payload ? { "Content-Type": "application/json" } : {}),
       },
       body: payload || undefined,

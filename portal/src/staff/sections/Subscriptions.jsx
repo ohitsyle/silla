@@ -94,8 +94,9 @@ const TABS = [
   ["cancelled", "Cancelled"],
 ];
 
-function SubscriptionList({ navigate }) {
-  const [tab, setTab] = useState("all");
+function SubscriptionList({ navigate, query: address = {} }) {
+  // Arriving from the overview's breakdown opens on that status.
+  const [tab, setTab] = useState(() => (TABS.some(([value]) => value === address.status) ? address.status : "all"));
   const [q, setQ] = useState("");
   const query = useDebounced(q);
   const [data, setData] = useState(null);
@@ -913,6 +914,6 @@ function SubscriptionDetail({ id, navigate, can }) {
   );
 }
 
-export default function Subscriptions({ navigate, id, can }) {
-  return id ? <SubscriptionDetail id={id} navigate={navigate} can={can} /> : <SubscriptionList navigate={navigate} can={can} />;
+export default function Subscriptions({ navigate, id, can, query }) {
+  return id ? <SubscriptionDetail id={id} navigate={navigate} can={can} /> : <SubscriptionList navigate={navigate} can={can} query={query} />;
 }

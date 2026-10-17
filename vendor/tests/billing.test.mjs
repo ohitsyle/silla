@@ -24,6 +24,7 @@ import Account from "../src/models/Account.js";
 import AuditEvent from "../src/models/AuditEvent.js";
 import Invoice from "../src/models/Invoice.js";
 import Order from "../src/models/Order.js";
+import Plan from "../src/models/Plan.js";
 import Subscription from "../src/models/Subscription.js";
 import * as billing from "../src/services/billing.js";
 import { runBillingCycle } from "../src/workers/billing.jobs.js";
@@ -95,7 +96,11 @@ async function submitOrder(H, organizationName, plan, billingPeriod = "yearly") 
   return { id, status: submitted.body?.order?.status };
 }
 
-/** Staff come only from seed:staff — there is deliberately no HTTP route — so the suite plants them. */
+/**
+ * Planted straight into the database. Staff exist through seed:staff (the
+ * first owner) or an owner's invitation, which staff.test.mjs walks; this
+ * suite only needs them to exist.
+ */
 async function staffMember(role, tag) {
   const email = `staff-${role}-${tag}@test.silla`;
   await Account.create({
@@ -142,13 +147,18 @@ export async function run(check) {
     await cleanupBilling();
     return;
   }
-  // Deterministic: the control plane is NOT configured in this process,
-  // whatever the shell exported. The API process never had it either.
+  // Deterministic: the control plane is NOT configured in THIS process —
+  // the one calling billing directly below — whatever the shell exported.
+  // (The API process has one, for the fake product API the staff suite
+  // provisions against.) Put back afterwards: the suites share this
+  // process, and the staff suite signs with the secret this would erase.
+  const secretBefore = process.env.CONTROL_PLANE_SECRET;
   process.env.CONTROL_PLANE_SECRET = "";
 
   const tag = unique();
   const settingsBefore = billing.settingsShape(await billing.getSettings());
   let roomTagline = null;
+  const teamKey = `team-${tag}`.slice(0, 40);
 
   try {
     /* ── who is asking ── */
@@ -418,10 +428,42 @@ export async function run(check) {
     const settingsAudit = await AuditEvent.findOne({ action: "settings.update", actorRole: "owner" }).sort({ at: -1 });
     const planAudit = await AuditEvent.findOne({ action: "plan.update", "target.id": "room" }).sort({ at: -1 });
     check("BIL-23", "Settings and plan changes are on the activity log", Boolean(settingsAudit && planAudit));
+
+    /* ── a plan staff create is on sale at once ── */
+    const teamPlan = await post("/api/vendor/plans", {
+      key: teamKey,
+      name: "Team",
+      tagline: "For a team of twenty.",
+      currency: "PHP",
+      prices: { monthly: 1_500_00, annualMonthly: 1_200_00 },
+      limits: { staff: 5, resources: 40 },
+    }, OWNER);
+    const onSale = ((await get("/api/vendor/plans")).body?.plans || []).find((p) => p.key === teamKey);
+    check("BIL-24", "A plan staff create is on the storefront at once, and orderable",
+      teamPlan.status === 201 && onSale?.orderable === true, teamPlan.body?.error || JSON.stringify(onSale));
+    const teamOrder = await submitOrder(A, `Team Co ${tag}`, teamKey, "monthly");
+    const teamSub = await Subscription.findOne({ order: teamOrder.id });
+    const teamInvoice = teamSub ? await Invoice.findOne({ subscription: teamSub._id, kind: "first" }) : null;
+    check("BIL-24", "…an order for it is accepted and billed at its price",
+      teamOrder.status === "submitted" && teamSub?.plan === teamKey && teamSub?.planName === "Team" && teamInvoice?.subtotal === 1_500_00,
+      `${teamOrder.status} ${teamSub?.plan} ${teamInvoice?.subtotal}`);
+    const teamRow = (await get(`/api/vendor/orders/${teamOrder.id}`, A)).body?.order;
+    check("BIL-24", "…and the order keeps the plan's name and currency", teamRow?.planName === "Team" && teamRow?.currency === "PHP");
+    const snapshot = await billing.snapshotForOrder(await Order.findById(teamOrder.id));
+    check("BIL-24", "…and its deployment would be born with that plan's limits",
+      snapshot.plan === teamKey && snapshot.limits.staff === 5 && snapshot.limits.resources === 40);
+    await patch(`/api/vendor/plans/${teamKey}`, { active: false }, OWNER);
+    const retiredOrder = await post("/api/vendor/orders", { profile: profileFor(`Late Co ${tag}`), plan: teamKey }, A);
+    const unknown = await post("/api/vendor/orders", { profile: profileFor(`Nowhere Co ${tag}`), plan: `nope-${tag}`.slice(0, 40) }, A);
+    check("BIL-24", "A retired plan takes no new orders, and neither does one that doesn't exist",
+      retiredOrder.status === 400 && Boolean(retiredOrder.body?.fields?.plan) && unknown.status === 400 && Boolean(unknown.body?.fields?.plan));
   } finally {
+    if (secretBefore === undefined) delete process.env.CONTROL_PLANE_SECRET;
+    else process.env.CONTROL_PLANE_SECRET = secretBefore;
     // Leave the database as it was found: the settings and the plan this suite touched, and its records.
     await billing.updateSettings({ business: settingsBefore.business, invoice: settingsBefore.invoice, billing: settingsBefore.billing }).catch(() => {});
     if (roomTagline !== null) await billing.updatePlan("room", { tagline: roomTagline, active: true }).catch(() => {});
+    await Plan.deleteOne({ key: teamKey }).catch(() => {});
     await cleanupBilling();
   }
 }

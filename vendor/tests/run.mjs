@@ -3,7 +3,7 @@
  * Mirrors server/tests/run.mjs so both feel the same to use.
  */
 import "dotenv/config";
-import { cleanup } from "./cleanup.mjs";
+import { cleanup, leftovers } from "./cleanup.mjs";
 import * as accounts from "./accounts.test.mjs";
 import * as orders from "./orders.test.mjs";
 import * as billing from "./billing.test.mjs";
@@ -46,6 +46,12 @@ for (const suite of suites) {
 
 console.log(dim("\ncleaning up…"));
 await cleanup();
+// The sweep is checked like everything else: a kind of record it forgets
+// is one that piles up in the shared database run after run.
+const left = await leftovers();
+const kept = Object.entries(left).filter(([, n]) => n > 0);
+check("CLEAN", "Nothing the suites made is left behind — accounts, orders, subscriptions, invoices, threads, messages, activity",
+  kept.length === 0, kept.map(([k, n]) => `${n} ${k}`).join(", "));
 
 const passed = results.filter((r) => r.passed).length;
 const failed = results.length - passed;

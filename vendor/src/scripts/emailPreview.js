@@ -10,6 +10,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import * as t from "../services/email/templates.js";
 import * as b from "../services/email/billingTemplates.js";
+import * as st from "../services/email/staffTemplates.js";
 
 const out = path.resolve(process.argv[2] || "email-preview");
 mkdirSync(out, { recursive: true });
@@ -19,9 +20,10 @@ const order = {
   _id: "66f0c0ffee0000000000abcd",
   organizationName: "Harborview Reading Room",
   plan: "building",
+  planName: "Whole Building",
   billingPeriod: "yearly",
-  quotedAmount: 11900,
-  currency: "USD",
+  quotedAmount: 6_900_00, // per month, in centavos
+  currency: "PHP",
   deploymentUrl: "https://harborview.silla.example",
 };
 
@@ -107,6 +109,38 @@ Object.assign(samples, {
   "24-reactivated": b.subscriptionReactivatedEmail({ subscription, account }),
   "25-plan-changed": b.planChangedEmail({ subscription: { ...subscription, planName: "Campus", price: { amount: null, currency: "PHP" } }, account, fromName: "Whole Building" }),
   "26-cancelled": b.subscriptionCancelledEmail({ subscription: { ...subscription, status: "cancelled" }, account, reason: "Moving to another provider at the end of the school year." }),
+});
+
+/* ── the staff console (services/email/staffTemplates.js) ── */
+
+const staffer = { firstName: "Sam", lastName: "Santos", name: "Sam Santos", email: "sam@silla.example" };
+const owner = { firstName: "Olive", lastName: "Ocampo", name: "Olive Ocampo", email: "olive@silla.example" };
+const conversation = { _id: "66f0c0ffee0000000000c0de", subject: "Can the reading room go live first?" };
+Object.assign(samples, {
+  "27-staff-invitation": st.staffInvitationEmail({
+    account: staffer,
+    code: "583120",
+    invitedBy: owner,
+    roleLabel: "Support",
+    roleSummary: "orders, clients, conversations and owner-access resets",
+    expiryHours: 72,
+  }),
+  "28-conversation-reply": st.conversationReplyEmail({
+    account,
+    conversation,
+    latest: { authorName: "Sam Santos", body: "Yes — we'll bring the reading room up first and the stacks on Friday. You'll get an email the moment it's live." },
+    unread: 2,
+    organizationName: order.organizationName,
+  }),
+  "29-conversation-staff-notice": st.conversationStaffNoticeEmail({
+    to: staffer.email,
+    account: { ...account, organizationName: "Harborview" },
+    conversation,
+    latest: { body: "Thanks! One more thing — can members book the group rooms whole, or only seat by seat?" },
+    unread: 1,
+    organizationName: order.organizationName,
+    assignee: staffer,
+  }),
 });
 
 for (const [name, mail] of Object.entries(samples)) {
