@@ -8,7 +8,7 @@ import { useAccount } from "../lib/AccountContext.jsx";
 import { useToast } from "../lib/toast.jsx";
 import { VerifyEmailModal } from "./modals.jsx";
 import { ROUTES } from "../lib/useHashRoute.js";
-import { AccountLayout, BackLink, StatusBadge, money, planLabel, when } from "./shared.jsx";
+import { AccountLayout, BackLink, StatusBadge, planLabel, quoteOf, when } from "./shared.jsx";
 
 /**
  * A buyer's own orders — the answer to "I configured it, now what?".
@@ -94,7 +94,7 @@ function OrderDetail({ id, navigate }) {
     <AccountLayout
       navigate={navigate}
       title={order.organizationName}
-      subtitle={`${planLabel(order)} · ${order.billingPeriod} · ${money(order.quotedAmount, order.currency)}/month`}
+      subtitle={`${planLabel(order)} · ${order.billingPeriod} · ${quoteOf(order)}`}
       action={<StatusBadge status={order.status} />}
     >
       <BackLink onClick={() => navigate(ROUTES.orders)} children="All orders" />
@@ -260,7 +260,7 @@ export default function Orders({ id, navigate }) {
             </div>
             <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-ink-secondary">
               <span>{planLabel(o)}</span>
-              <span>{money(o.quotedAmount, o.currency)}/month</span>
+              <span>{quoteOf(o)}</span>
               <span className="text-ink-muted">updated {when(o.updatedAt)}</span>
             </div>
           </motion.button>

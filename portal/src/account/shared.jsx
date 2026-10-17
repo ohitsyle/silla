@@ -1,6 +1,7 @@
 import { ArrowLeft } from "lucide-react";
 import { AccountMenu } from "./kit.jsx";
 import { ROUTES } from "../lib/useHashRoute.js";
+import { formatMoney } from "../lib/plans.js";
 
 /**
  * The signed-in chrome for the storefront.
@@ -99,8 +100,13 @@ export const PLAN_LABEL = { room: "One Room", building: "Whole Building", campus
 /** What to call an order's plan: the name it was saved with, which any catalogue plan has. */
 export const planLabel = (order) => order?.planName || PLAN_LABEL[order?.plan] || order?.plan || "";
 
-export const money = (amount, currency = "USD") =>
-  amount == null ? "—" : `${currency === "USD" ? "$" : `${currency} `}${(amount / 100).toFixed(0)}`;
+/**
+ * What an order was quoted, per month — minor units, through the ONE
+ * money formatter (lib/plans.js): "₱6,900/month", or "Priced with you".
+ * This used to be its own formatter that assumed dollars, so every peso
+ * order read "PHP 6900/month".
+ */
+export const quoteOf = (order) => formatMoney(order?.quotedAmount ?? null, { currency: order?.currency, period: "month" });
 
 export const when = (iso) =>
   iso ? new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "";
