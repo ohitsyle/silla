@@ -74,9 +74,40 @@ const orderSchema = new mongoose.Schema(
       },
     ],
 
+    /**
+     * Staff-only notes — what was agreed on a call, why an order is on
+     * hold. Separate from `history[].note` on purpose: a transition's note
+     * is part of the record the BUYER reads on their order page (and a
+     * cancellation reason is emailed to them), while these are never
+     * returned by any buyer-facing route. Two fields, so nobody has to
+     * remember which kind of note is safe to write where.
+     */
+    notes: [
+      {
+        at: { type: Date, default: Date.now },
+        by: { type: mongoose.Schema.Types.ObjectId, ref: "Account" },
+        body: { type: String, required: true, trim: true, maxlength: 4000 },
+      },
+    ],
+
     /** Filled in by SILLA once the deployment exists. */
     deploymentUrl: { type: String, default: "" },
     provisionedOrganizationId: { type: String, default: "" },
+    /** The organization's address segment (`<PRODUCT_URL>/<slug>`), when provisioned through the control plane. */
+    deploymentSlug: { type: String, default: "" },
+    provisionedAt: { type: Date, default: null },
+
+    /**
+     * Held while one staff member's PROVISION call is in flight
+     * (routes/deployments.routes.js). Two people pressing the button at
+     * once would otherwise build two organizations for one order. Taken
+     * with a conditional update, released when the call returns; a claim
+     * older than the call's own timeout is stale and may be taken over.
+     */
+    provisioningClaim: {
+      at: { type: Date, default: null },
+      by: { type: mongoose.Schema.Types.ObjectId, ref: "Account", default: null },
+    },
 
     // ---- Billing seam ----
     // Nullable now, populated when Stripe lands. Kept on the order

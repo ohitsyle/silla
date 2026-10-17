@@ -44,7 +44,10 @@ const verificationSchema = new mongoose.Schema(
     // One live code per account. Issuing a code for a different purpose
     // replaces the last one, so an old sign-up code can never be spent
     // confirming an email change.
-    purpose: { type: String, enum: ["signup", "email-change", "password-reset"], required: true },
+    //
+    // `invite` is a staff invitation: the code an owner's invite emails,
+    // spent once to set the invited person's first password.
+    purpose: { type: String, enum: ["signup", "email-change", "password-reset", "invite"], required: true },
     codeHash: { type: String, required: true },
     expiresAt: { type: Date, required: true },
     attempts: { type: Number, default: 0 },
@@ -85,6 +88,22 @@ const accountSchema = new mongoose.Schema(
      * is what every one of them effectively was.
      */
     staffRole: { type: String, enum: ["owner", "admin", "billing", "support", null], default: null },
+
+    /**
+     * Staff invited from the console (routes/staff.routes.js). An invited
+     * account exists from the moment of the invite — so it can be listed,
+     * re-sent and revoked — but its password is a random value nobody
+     * knows until the invitation code sets a real one. It counts as
+     * pending until the address is proved (`emailVerified`), which is
+     * also what accepting does.
+     *
+     * Seeded owners (npm run seed:staff) have none of these.
+     */
+    invitedAt: { type: Date, default: null },
+    invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: "Account", default: null },
+    inviteAcceptedAt: { type: Date, default: null },
+    /** When `active` last went false — the staff list says since when, not just that. */
+    deactivatedAt: { type: Date, default: null },
 
     /**
      * An unverified account can sign in, explore and configure. It cannot
