@@ -248,7 +248,7 @@ function Routed() {
         // A buyer who guesses the address is sent to their own orders,
         // like #/queue; the API refuses them regardless.
         return isSilla ? (
-          <StaffConsole section={page.section} id={page.id} navigate={navigate} />
+          <StaffConsole section={page.section} id={page.id} query={route.query || {}} navigate={navigate} />
         ) : (
           <Orders id={null} navigate={navigate} />
         );
