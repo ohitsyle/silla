@@ -33,7 +33,7 @@ import { audit } from "../lib/audit.js";
 import * as billing from "../services/billing.js";
 import { sendEmail } from "../services/email/index.js";
 import { orderLiveEmail } from "../services/email/templates.js";
-import { orderSummary } from "./order.routes.js";
+import { orderSummary, planNameOf } from "./order.routes.js";
 
 const router = Router();
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -167,6 +167,7 @@ const deploymentRow = (order, sub) => ({
   slug: order.deploymentSlug || "",
   url: order.deploymentUrl,
   plan: order.plan,
+  planName: planNameOf(order),
   billingPeriod: order.billingPeriod,
   orderStatus: order.status,
   provisionedAt: order.provisionedAt || null,

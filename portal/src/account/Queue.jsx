@@ -4,7 +4,7 @@ import { Copy, Download, RefreshCw } from "lucide-react";
 import { Button, Card, Field, Notice, Segmented, Skeleton } from "../components/ui.jsx";
 import { vendorApi } from "../lib/vendorApi.js";
 import { ROUTES } from "../lib/useHashRoute.js";
-import { AccountLayout, BackLink, PLAN_LABEL, StatusBadge, money, when } from "./shared.jsx";
+import { AccountLayout, BackLink, StatusBadge, money, planLabel, when } from "./shared.jsx";
 
 /**
  * SILLA's order queue — the internal side.
@@ -259,7 +259,7 @@ export default function Queue({ id, navigate }) {
             </div>
             <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-ink-secondary">
               {o.account && <span>{o.account.email}</span>}
-              <span>{PLAN_LABEL[o.plan]}</span>
+              <span>{planLabel(o)}</span>
               <span>{money(o.quotedAmount, o.currency)}/month</span>
               <span className="text-ink-muted">updated {when(o.updatedAt)}</span>
             </div>

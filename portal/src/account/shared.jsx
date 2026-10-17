@@ -93,7 +93,11 @@ export function StatusBadge({ status }) {
   );
 }
 
+/** The names the first three plans had — for orders saved before an order carried its plan's name. */
 export const PLAN_LABEL = { room: "One Room", building: "Whole Building", campus: "Campus" };
+
+/** What to call an order's plan: the name it was saved with, which any catalogue plan has. */
+export const planLabel = (order) => order?.planName || PLAN_LABEL[order?.plan] || order?.plan || "";
 
 export const money = (amount, currency = "USD") =>
   amount == null ? "—" : `${currency === "USD" ? "$" : `${currency} `}${(amount / 100).toFixed(0)}`;

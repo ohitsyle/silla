@@ -631,8 +631,12 @@ export async function run(check) {
   } while (cursor && trail.length < 2000);
   const missing = expected.filter((action) => !trail.some((e) => e.action === action));
   check(S, `Every staff action above left an audit entry (${expected.length} kinds)`, missing.length === 0, missing.join(", "));
-  const pinsInTrail = trail.filter((e) => /\b\d{6}\b/.test(`${e.summary} ${JSON.stringify(e.meta)}`));
-  check(S, "No audit entry carries a temporary PIN", pinsInTrail.length === 0, pinsInTrail.map((e) => e.summary).slice(0, 2).join("; "));
+  // Every PIN the product handed out in this run, looked for by value:
+  // "any six digits" would also match a price in centavos.
+  const issuedPins = FAKE ? (await fake()).issued.map((i) => i.temporaryPin) : [];
+  const pinsInTrail = trail.filter((e) => issuedPins.some((p) => new RegExp(`\\b${p}\\b`).test(`${e.summary} ${JSON.stringify(e.meta)}`)));
+  check(S, `No audit entry carries a temporary PIN (${issuedPins.length} looked for)`, pinsInTrail.length === 0,
+    pinsInTrail.map((e) => e.summary).slice(0, 2).join("; "));
   const invites = await get(`/api/vendor/audit?action=staff&targetId=${supportId}`, ownerToken);
   check(S, "The log filters by action family and target",
     invites.body?.events?.length >= 3 && invites.body.events.every((e) => e.action.startsWith("staff.") && e.target.id === supportId));

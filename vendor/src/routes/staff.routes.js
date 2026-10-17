@@ -40,6 +40,7 @@ import { consumeCode, cooldownRemaining, issueCode, ttlMinutesFor } from "../lib
 import { audit } from "../lib/audit.js";
 import { sendEmail } from "../services/email/index.js";
 import { staffInvitationEmail } from "../services/email/staffTemplates.js";
+import { planNameOf } from "./order.routes.js";
 
 const router = Router();
 
@@ -244,6 +245,7 @@ router.get(
         organizationName: o.organizationName,
         status: o.status,
         plan: o.plan,
+        planName: planNameOf(o),
         updatedAt: o.updatedAt,
         account: o.account ? { name: o.account.name, email: o.account.email } : null,
       })),

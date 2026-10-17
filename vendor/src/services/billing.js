@@ -191,13 +191,16 @@ export async function planByKey(key) {
 }
 
 /**
- * Which plan keys an order can carry today. Read from the Order model's
- * own enum rather than restated, so the day order.routes.js and the
- * model accept a plan staff created in the console, the storefront starts
- * selling it without a change here. Until then the storefront must not
- * offer a plan whose "Save" would answer "Pick a plan."
+ * Whether an order can carry this plan today — what the storefront offers.
+ * Any ACTIVE plan: models/Order.js no longer restricts the key to a fixed
+ * list, and order.routes.js accepts any active plan in the catalogue, so
+ * a plan staff create in the console is on sale the moment it is saved.
+ * Still read from the model rather than assumed, so a restriction ever put
+ * back there is honoured here too: the storefront must never offer a plan
+ * whose "Save" would answer "Pick a plan."
  */
-const orderablePlans = () => new Set(Order.schema.path("plan")?.enumValues || []);
+const orderKeys = () => Order.schema.path("plan")?.enumValues || [];
+const isOrderable = (plan) => plan?.active !== false && (!orderKeys().length || orderKeys().includes(plan.key));
 
 export function planShape(plan) {
   return {
@@ -220,10 +223,9 @@ export function planShape(plan) {
 /** The plans, shaped for the storefront (active only) or for staff (everything). */
 export async function catalogue({ includeRetired = false } = {}) {
   const plans = await ensurePlans();
-  const orderable = orderablePlans();
   return plans
     .filter((p) => includeRetired || p.active !== false)
-    .map((p) => ({ ...planShape(p), orderable: orderable.has(p.key) }));
+    .map((p) => ({ ...planShape(p), orderable: isOrderable(p) }));
 }
 
 const PLAN_KEY = /^[a-z0-9-]{2,40}$/;
@@ -335,7 +337,7 @@ export async function createPlan(input, by) {
 
   const plan = await Plan.create(value);
   await audit(actor(by), "plan.create", planTarget(plan), `Created the ${plan.name} plan`, planShape(plan));
-  return { ...planShape(plan), orderable: orderablePlans().has(plan.key) };
+  return { ...planShape(plan), orderable: isOrderable(plan) };
 }
 
 /**
@@ -358,7 +360,7 @@ export async function updatePlan(key, input, by) {
   await plan.save();
   const after = planShape(plan);
   const changed = Object.keys(value).filter((f) => JSON.stringify(before[f]) !== JSON.stringify(after[f]));
-  if (!changed.length) return { plan: { ...after, orderable: orderablePlans().has(key) }, resyncing: 0 };
+  if (!changed.length) return { plan: { ...after, orderable: isOrderable(after) }, resyncing: 0 };
 
   const pick = (o) => Object.fromEntries(changed.map((f) => [f, o[f]]));
   await audit(actor(by), "plan.update", planTarget(plan), `Updated the ${plan.name} plan (${changed.join(", ")})`, {
@@ -372,7 +374,7 @@ export async function updatePlan(key, input, by) {
   }
   let resyncing = 0;
   if (changed.some((f) => ["name", "features", "limits"].includes(f))) resyncing = await resyncPlan(key);
-  return { plan: { ...after, orderable: orderablePlans().has(key) }, resyncing };
+  return { plan: { ...after, orderable: isOrderable(after) }, resyncing };
 }
 
 /**

@@ -18,11 +18,19 @@ const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, ne
 
 router.use(requireAccount);
 
+/**
+ * Orders from before `planName` was stored carry only a key — one of the
+ * three plans that existed then, under the names they had.
+ */
+const LEGACY_PLAN_NAMES = { room: "One Room", building: "Whole Building", campus: "Campus" };
+export const planNameOf = (order) => order.planName || LEGACY_PLAN_NAMES[order.plan] || order.plan;
+
 /** What the buyer's own list needs — never the whole profile. */
 const summary = (order) => ({
   id: order._id.toString(),
   organizationName: order.organizationName,
   plan: order.plan,
+  planName: planNameOf(order),
   billingPeriod: order.billingPeriod,
   quotedAmount: order.quotedAmount,
   currency: order.currency,
@@ -34,6 +42,25 @@ const summary = (order) => ({
 
 /** The same row for staff surfaces elsewhere (deployments.routes.js), so the two never disagree. */
 export const orderSummary = summary;
+
+/**
+ * The plan an order may be saved with: any ACTIVE plan in the catalogue —
+ * the three SILLA started with, or one staff created in the console.
+ * A retired plan is still in the catalogue (subscriptions on it carry on)
+ * but is no longer sold. Answers the plan, or null with the reason.
+ */
+const PLAN_KEY = /^[a-z0-9-]{2,40}$/;
+async function orderablePlan(key) {
+  const wanted = String(key || "").trim().toLowerCase();
+  if (!PLAN_KEY.test(wanted)) return { plan: null, problem: "Pick a plan." };
+  const plan = await billing.planByKey(wanted);
+  if (!plan) return { plan: null, problem: "Pick a plan — that one isn't in the catalogue." };
+  if (plan.active === false) return { plan: null, problem: "That plan isn't offered any more. Pick another." };
+  return { plan, problem: null };
+}
+
+/** An order's currency: what the buyer was shown, else the plan's. Three letters or nothing. */
+const currencyFor = (sent, plan) => (/^[A-Z]{3}$/.test(String(sent || "")) ? String(sent) : plan?.currency || "PHP");
 
 /* ─────────────────────────── A buyer's own ─────────────────────────── */
 
@@ -70,18 +97,18 @@ router.post(
     if (!profile.organizationName) {
       return res.status(400).json({ error: "The configuration has no organization name." });
     }
-    if (!["room", "building", "campus"].includes(plan)) {
-      return res.status(400).json({ error: "Pick a plan." });
-    }
+    const chosen = await orderablePlan(plan);
+    if (!chosen.plan) return res.status(400).json({ error: chosen.problem, fields: { plan: chosen.problem } });
 
     const order = await Order.create({
       account: req.account._id,
       profile,
       organizationName: String(profile.organizationName),
-      plan,
+      plan: chosen.plan.key,
+      planName: chosen.plan.name,
       billingPeriod: billingPeriod === "monthly" ? "monthly" : "yearly",
       quotedAmount: Number.isFinite(quotedAmount) ? quotedAmount : null,
-      currency: currency || "USD",
+      currency: currencyFor(currency, chosen.plan),
       status: "draft",
       history: [{ status: "draft", by: req.account._id, note: "Created" }],
     });
@@ -109,10 +136,14 @@ router.patch(
       order.profile = profile;
       order.organizationName = String(profile.organizationName);
     }
-    if (plan) {
-      if (!["room", "building", "campus"].includes(plan)) return res.status(400).json({ error: "Unknown plan." });
-      order.plan = plan;
+    if (plan && plan !== order.plan) {
+      const chosen = await orderablePlan(plan);
+      if (!chosen.plan) return res.status(400).json({ error: chosen.problem, fields: { plan: chosen.problem } });
+      order.plan = chosen.plan.key;
+      order.planName = chosen.plan.name;
+      if (!req.body.currency) order.currency = chosen.plan.currency || order.currency;
     }
+    if (req.body.currency !== undefined) order.currency = currencyFor(req.body.currency, { currency: order.currency });
     if (billingPeriod) order.billingPeriod = billingPeriod === "monthly" ? "monthly" : "yearly";
     if (Number.isFinite(quotedAmount)) order.quotedAmount = quotedAmount;
 
@@ -207,7 +238,7 @@ router.get(
     if (status === "open") filter.status = { $in: OPEN };
     else if (status && LISTABLE.includes(status)) filter.status = status;
     else filter.status = { $ne: "draft" };
-    if (plan && ["room", "building", "campus"].includes(plan)) filter.plan = plan;
+    if (plan && PLAN_KEY.test(String(plan))) filter.plan = String(plan);
 
     if (q && String(q).trim()) {
       const rx = { $regex: escapeRegex(String(q).trim().slice(0, 80)), $options: "i" };

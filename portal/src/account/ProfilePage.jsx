@@ -11,7 +11,7 @@ import { ROUTES } from "../lib/useHashRoute.js";
 import { vendorApi } from "../lib/vendorApi.js";
 import { SelectInput, TextInput } from "./kit.jsx";
 import { ChangeEmailModal, ChangePasswordModal, VerifyEmailModal } from "./modals.jsx";
-import { AccountLayout, PLAN_LABEL, StatusBadge, money, when } from "./shared.jsx";
+import { AccountLayout, StatusBadge, money, planLabel, when } from "./shared.jsx";
 
 /**
  * The signed-in person's own page: who they are, how they sign in, and
@@ -324,7 +324,7 @@ function BillingSection({ account, orders }) {
                   <div className="mr-auto min-w-0">
                     <div className="truncate font-semibold">{o.organizationName}</div>
                     <div className="text-xs text-ink-muted">
-                      {PLAN_LABEL[o.plan]} · quoted {money(o.quotedAmount, o.currency)}/mo · {when(o.createdAt)}
+                      {planLabel(o)} · quoted {money(o.quotedAmount, o.currency)}/mo · {when(o.createdAt)}
                     </div>
                   </div>
                   <StatusBadge status={o.status} />

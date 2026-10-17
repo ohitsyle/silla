@@ -22,6 +22,7 @@ import Invoice from "../models/Invoice.js";
 import { requireAccount } from "../middleware/auth.js";
 import { can, requirePermission } from "../middleware/staff.js";
 import { eventShape } from "./audit.routes.js";
+import { planNameOf } from "./order.routes.js";
 
 const router = Router();
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -216,6 +217,7 @@ router.get(
         id: o._id.toString(),
         organizationName: o.organizationName,
         plan: o.plan,
+        planName: planNameOf(o),
         billingPeriod: o.billingPeriod,
         quotedAmount: o.quotedAmount,
         currency: o.currency,

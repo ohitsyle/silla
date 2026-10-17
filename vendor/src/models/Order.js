@@ -47,7 +47,16 @@ const orderSchema = new mongoose.Schema(
     /** Denormalised for the queue, so listing orders needs no profile parsing. */
     organizationName: { type: String, required: true, trim: true },
 
-    plan: { type: String, enum: ["room", "building", "campus"], required: true },
+    /**
+     * A plan key from the catalogue (models/Plan.js). Not an enum: staff
+     * create plans in the console, and an order for one has to be
+     * possible. order.routes.js checks the key against the catalogue
+     * (billing.planByKey) — an ACTIVE plan for anything new — which is the
+     * rule a fixed list here could only ever approximate.
+     */
+    plan: { type: String, required: true, trim: true, lowercase: true, maxlength: 40 },
+    /** The plan's name when the order was saved, so a list or an email needs no lookup — and a renamed plan doesn't rename history. */
+    planName: { type: String, default: "", trim: true },
     billingPeriod: { type: String, enum: ["monthly", "yearly"], default: "yearly" },
 
     /**
@@ -57,7 +66,7 @@ const orderSchema = new mongoose.Schema(
      * say what this customer was actually offered.
      */
     quotedAmount: { type: Number, default: null },
-    currency: { type: String, default: "USD" },
+    currency: { type: String, default: "PHP" },
 
     status: { type: String, enum: ORDER_STATUS, default: "draft", index: true },
 
