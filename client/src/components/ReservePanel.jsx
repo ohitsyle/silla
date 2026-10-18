@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { CalendarCheck, CircleCheck, Clock, LoaderCircle } from "lucide-react";
 import { api } from "../lib/api.js";
 import { formatSpan } from "../lib/bookingWindow.js";
+import { entryFor } from "../lib/dayView.js";
 import { memberReason } from "../lib/rooms.js";
 import { Badge, Button, Notice, PinField } from "./ui/index.jsx";
+import DayTimeline from "./DayTimeline.jsx";
 import WhenFields from "./WhenFields.jsx";
 
 /**
@@ -17,7 +19,9 @@ import WhenFields from "./WhenFields.jsx";
  * `target` is what is being booked — one unit, or a room as a whole:
  *   { kind: "unit"|"room", resourceId, unitLabel, title, status }
  * `booking` is the page's shared window (lib/bookingWindow), so the time
- * chosen while browsing a room is the time confirmed here.
+ * chosen while browsing a room is the time confirmed here. `day` is the
+ * floor's day for that window's date: the timeline at the top draws this
+ * unit's bookings and writes a tapped or dragged time into the window.
  *
  * The availability line is the same check the claim makes, run as the
  * time changes — including what the member already holds (one booking for
@@ -26,7 +30,7 @@ import WhenFields from "./WhenFields.jsx";
  * what the MEMBER typed (the PIN) are only shown once they press the
  * button; nothing is red before they have had a chance to do it.
  */
-export default function ReservePanel({ target, booking, resourceNoun = "resource", policy, onReserved }) {
+export default function ReservePanel({ target, booking, resourceNoun = "resource", policy, day = null, roomName = null, onReserved }) {
   const [pin, setPin] = useState("");
   const [pinError, setPinError] = useState(null);
   const [error, setError] = useState(null);
@@ -109,8 +113,21 @@ export default function ReservePanel({ target, booking, resourceNoun = "resource
     }
   };
 
+  const entry = entryFor(day, target.resourceId, target.unitLabel);
+
   return (
     <form onSubmit={submit} className="space-y-4" noValidate>
+      {entry && (
+        <DayTimeline
+          day={day}
+          entry={entry}
+          window={booking.iso ? { start: booking.startTime, end: booking.endTime } : null}
+          maxStayHours={booking.maxStayHours}
+          noun={resourceNoun}
+          roomName={isRoom ? target.typeLabel : roomName}
+          onChoose={booking.choose}
+        />
+      )}
       <WhenFields booking={booking} />
 
       {!booking.problem && <AvailabilityLine checking={checking} availability={availability} />}

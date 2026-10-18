@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, Check, DoorOpen, Grid2x2, Layers, X } from "lucide-react";
 import { api } from "../lib/api.js";
 import { levelName, listNames, memberReason, plural, withArticle } from "../lib/rooms.js";
+import { entryFor } from "../lib/dayView.js";
 import { Notice, Segmented, Skeleton } from "./ui/index.jsx";
+import DayTimeline from "./DayTimeline.jsx";
 import WhenFields from "./WhenFields.jsx";
 
 /**
@@ -20,12 +22,18 @@ import WhenFields from "./WhenFields.jsx";
  * asked for the CHOSEN window rather than for right now: someone planning
  * Thursday afternoon needs Thursday's answer, which the live colours on
  * the map cannot give them. The claim still decides; this is guidance.
+ *
+ * A room that can be booked whole also shows the whole room's day (`day`,
+ * the floor's day for the window's date): when the room itself is booked,
+ * and when something inside it is — either way it cannot be taken whole
+ * then. Tapping its free time sets the window for everything below.
  */
 export default function RoomPanel({
   room,
   floors = [],
   floorId,
   booking,
+  day = null,
   resourceNoun = "resource",
   refreshKey = 0,
   onBookRoom,
@@ -67,6 +75,7 @@ export default function RoomPanel({
   const allowsWhole = room.bookingMode !== "individual";
   const allowsUnits = room.bookingMode !== "whole";
   const levelNames = room.levels.map((level) => levelName(level, floors));
+  const wholeDay = allowsWhole ? entryFor(day, room.resourceId, "room") : null;
 
   return (
     <div className="space-y-6">
@@ -74,6 +83,20 @@ export default function RoomPanel({
         <h3 id="room-when" className="mb-2 text-sm font-semibold">
           When?
         </h3>
+        {wholeDay && (
+          <div className="mb-4">
+            <DayTimeline
+              day={day}
+              entry={wholeDay}
+              window={booking.iso ? { start: booking.startTime, end: booking.endTime } : null}
+              maxStayHours={booking.maxStayHours}
+              noun={resourceNoun}
+              roomName={room.name}
+              caption={`The whole room, ${day.isToday ? "today" : new Date(day.opensAt).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}`}
+              onChoose={booking.choose}
+            />
+          </div>
+        )}
         <WhenFields booking={booking} />
       </section>
 

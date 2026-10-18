@@ -4,8 +4,9 @@
  * someone who taps in with no booking or with one later today (OCC-1,
  * OCC-2).
  *
- *   npm run test:spaces     runs it after the geometry and spatial suites
- *   node tests/day.test.mjs this suite alone
+ *   npm run test:spaces     runs it between the geometry and spatial suites
+ *                           (the spatial suite last, so `-- --serve` reaches it)
+ *   npm run test:day        this suite alone
  *
  * Like the spatial suite it runs on a DISPOSABLE replica set — never .env,
  * never Atlas — because the rule it tests most is a transaction guarantee:

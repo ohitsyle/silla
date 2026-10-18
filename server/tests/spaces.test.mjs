@@ -1027,6 +1027,23 @@ try {
     await refreshDueHolds({ io });
     await call(`/api/admin/resources/${openPlan[2].id}/units/1`, "PATCH", { status: "unavailable" }, 200, staff);
 
+    // Later today, for the rings, the timelines and the kiosk's paths: a
+    // booking in three hours (member4 taps in early and is asked what to do
+    // with it), one in ninety minutes (a walk-in at that desk is "free
+    // until"), and the Commons booked whole this evening (its desks on both
+    // levels are blocked then). Skipped when the day has too little left.
+    const laterToday = async (member, resourceId, unitLabel, fromMinutes, minutes) => {
+      const start = new Date(+previewNow + fromMinutes * MINUTE);
+      const end = new Date(+start + minutes * MINUTE);
+      if (end > endOfDay(previewNow)) return;
+      await claim(member, resourceId, unitLabel, { startTime: start, endTime: end });
+    };
+    await laterToday(members[4], openPlan[3].id, "1", 180, 60);
+    await laterToday(members[6], openPlan[4].id, "1", 90, 60);
+    const commons = (await call("/api/spaces?organizationId=" + org._id)).buildings
+      .flatMap((b) => b.floors).flatMap((f) => f.rooms).find((r) => r.name === "Commons");
+    if (commons) await laterToday(members[7], commons.resourceId, "room", 300, 60);
+
     // A plan to look at: whole-room booking withheld, and the building
     // and room limits already reached, so the editor shows its reasons.
     if (process.argv.includes("--managed")) {

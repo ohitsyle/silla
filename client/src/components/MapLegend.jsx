@@ -11,8 +11,12 @@ import { Skeleton, StatusDot } from "./ui/index.jsx";
  * a table inside a room booked only whole is part of that room, not a
  * row of "unavailable" seats, and counting it as one made a free meeting
  * room look like a broken one.
+ *
+ * `ringed` counts the units whose day ring is showing. The ring is the
+ * map's one mark about LATER — the colours are all about now — so its line
+ * appears whenever one is drawn, and only then.
  */
-export default function MapLegend({ summary, resourceNoun = "resource", showOverstay = false, loading = false }) {
+export default function MapLegend({ summary, resourceNoun = "resource", showOverstay = false, loading = false, ringed = 0 }) {
   if (loading || !summary) {
     return (
       <div className="flex shrink-0 gap-4 border-t border-line/10 px-4 py-3">
@@ -49,6 +53,13 @@ export default function MapLegend({ summary, resourceNoun = "resource", showOver
           Room
         </span>
       )}
+      {ringed > 0 && (
+        <span className="inline-flex items-center gap-1.5 text-sm text-ink-secondary">
+          <RingSample />
+          Booked later today
+          <span className="font-semibold text-ink-primary">{ringed}</span>
+        </span>
+      )}
       {included > 0 && (
         <span className="inline-flex items-center gap-1.5 text-sm text-ink-secondary">
           <span
@@ -60,5 +71,20 @@ export default function MapLegend({ summary, resourceNoun = "resource", showOver
         </span>
       )}
     </div>
+  );
+}
+
+/** The day ring as the map draws it: a chip, and an arc of it already booked. */
+function RingSample() {
+  return (
+    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" className="shrink-0">
+      <rect x="3.5" y="3.5" width="9" height="9" rx="2" style={{ fill: "rgb(var(--c-line) / 0.16)" }} />
+      <rect x="1.25" y="1.25" width="13.5" height="13.5" rx="3.5" pathLength="1"
+        style={{ fill: "none", stroke: "rgb(var(--c-line) / 0.42)", strokeWidth: 1.5 }} />
+      <path
+        d="M 8 1.25 H 11.25 A 3.5 3.5 0 0 1 14.75 4.75 V 11.25 A 3.5 3.5 0 0 1 11.25 14.75 H 8"
+        style={{ fill: "none", stroke: "var(--color-state-reserved)", strokeWidth: 1.5, strokeLinecap: "round" }}
+      />
+    </svg>
   );
 }

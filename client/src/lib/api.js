@@ -92,6 +92,9 @@ export const api = {
   // is the slow-changing half, status the half Socket.io will stream (MAP-2).
   getFloors: (organizationId) => request(`/api/floors?organizationId=${encodeURIComponent(organizationId)}`),
   getFloorLayout: (floorId) => request(`/api/floors/${floorId}/layout`),
+  // Every unit's bookings for one date (YYYY-MM-DD), its day state and
+  // "free until" — the map's rings and timelines, and the kiosk's choices.
+  getFloorDay: (floorId, date) => request(`/api/floors/${floorId}/day?date=${encodeURIComponent(date)}`),
 
   // AUTH-3 — first-login terms gate.
   getMe: () => request(`/api/auth/me`),

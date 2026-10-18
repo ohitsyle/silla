@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Ban, Check, Clock, DoorOpen, Maximize, TriangleAlert, User, Wrench, ZoomIn, ZoomOut } from "lucide-react";
 import { effectiveStatus, roomMode, roomUnit } from "../lib/rooms.js";
+import { describeDay, entryFor } from "../lib/dayView.js";
 import {
   boundingBox, cellKey, cellsOf, difference, floorAreas, isRectangle, largestRect, regionAreas, union,
 } from "../lib/cells.js";
@@ -37,12 +38,30 @@ import { outlinePath } from "../lib/shapePath.js";
  *
  * Nothing here hardcodes "seat": the unit noun comes from the org's
  * configured terminology (spec §16).
+ *
+ * Time, on top of the live status (lib/dayView.js):
+ *
+ *   day         a floor's day for TODAY (GET /api/floors/:id/day). Each
+ *               unit's fill keeps meaning "right now"; a thin ring around it
+ *               adds the rest of today — none while it is free for the rest
+ *               of the day, an arc as long as the share already booked, a
+ *               full ring when nothing bookable is left (DayRing)
+ *   windowView  { isFree(resourceId, unitLabel) } for a chosen window: the
+ *               units free for it stay bright and the rest fade, fills
+ *               unchanged — "where can I sit at 3?" in one look
+ *   selectableOnly   with windowView: the faded units cannot be chosen (the
+ *               kiosk, where only what is free now can be taken)
+ *   touchTargets     each unit answers taps across its whole share of its
+ *               piece, not only its chip — for a wall screen
  */
 
 const CELL = 40; // SVG user units per grid cell — integer cells only (spec §12)
 const PAD = 1; // one cell of breathing room around the grid
 const PIECE_INSET = 5; // gap between a piece's footprint and its body
-const UNIT_GAP = 3; // gap between unit chips inside a piece
+const UNIT_GAP = 6; // gap between unit chips inside a piece — room for each one's day ring
+const RING_GAP = 1.5; // how far a day ring sits outside its chip
+const RING_WIDTH = 1.6; // its thickness, in map units: a hairline that scales with the map
+const FADED = 0.24; // opacity of a unit that is not free for the chosen window
 
 /**
  * Status presentation — labels and icons only. The COLOURS come from the
@@ -250,6 +269,11 @@ export default function SpaceMap({
   editing = false,
   fill = false,
   className = "",
+  day = null,
+  rings = true,
+  windowView = null,
+  selectableOnly = false,
+  touchTargets = false,
 }) {
   const svgRef = useRef(null);
   const pointers = useRef(new Map());
@@ -768,6 +792,7 @@ export default function SpaceMap({
                 resourceNoun={resourceNoun}
                 interactive={roomIsInteractive(room)}
                 onSelect={() => chooseRoom(room)}
+                faded={Boolean(windowView && room.bookingMode === "whole" && windowView.isFree(room.resourceId, "room") === false)}
               />
             )
           )}
@@ -813,6 +838,21 @@ export default function SpaceMap({
                     : effectiveStatus(resource, unitStatuses[unitIndex], rooms, status);
                   const r = rects[unitIndex];
                   const room = unitStatus?.roomBlocked ? rooms.find((candidate) => candidate.id === resource.roomId) : null;
+                  const ownRoom = resource.roomId ? rooms.find((candidate) => candidate.id === resource.roomId) : null;
+
+                  // Time: today's ring, and whether it is free for the chosen
+                  // window. A unit that only comes with its room answers as the room.
+                  const entry = management ? null : entryFor(day, resource.id, unit.label);
+                  const asRoom = unitStatus?.includedInRoom && ownRoom;
+                  const freeForWindow = management || !windowView
+                    ? null
+                    : asRoom
+                      ? windowView.isFree(ownRoom.resourceId, "room")
+                      : windowView.isFree(resource.id, unit.label);
+                  const faded = freeForWindow === false;
+                  const locked = faded && selectableOnly;
+                  const daySentence = entry && day ? describeDay(entry, day, { noun: resourceNoun, roomName: ownRoom?.name }).headline : null;
+                  const hit = touchTargets ? hitArea(r, type.footprint) : null;
                   // A unit blocked by its room opens the room: that is where
                   // the booking that matters is made (or why it can't be).
                   const choose = () => {
@@ -830,6 +870,7 @@ export default function SpaceMap({
                       status: unitStatus,
                       statusLabel: resolveUnitAppearance(unitStatus, palette).statusLabel,
                       overstay: Boolean(showOverstay && unitStatus?.overstay),
+                      selectable: !locked,
                     });
                   };
                   const handlers = {
@@ -855,11 +896,14 @@ export default function SpaceMap({
                         key={`${resource.id}-${unitIndex}`}
                         className="silla-unit"
                         role="button"
-                        tabIndex={0}
+                        tabIndex={locked ? -1 : 0}
+                        aria-disabled={locked || undefined}
                         aria-label={description}
+                        style={{ opacity: faded ? FADED : 1, transition: "opacity var(--dur-base) var(--ease-out)" }}
                         {...handlers}
                       >
                         <title>{description}</title>
+                        {hit && <rect x={x + hit.x} y={y + hit.y} width={hit.w} height={hit.h} fill="transparent" />}
                         <rect
                           className="silla-unit-body"
                           x={x + r.x}
@@ -899,21 +943,31 @@ export default function SpaceMap({
                   const isHighlighted = highlighted.has(`${resource.id}:${unit.label}`);
 
                   const description =
-                    `${type.label} · ${resourceNoun} ${unit.label} — ${appearance.statusLabel}` +
+                    `${type.label} · ${resourceNoun} ${unit.label} — ${appearance.statusLabel} now` +
                     (overstayed ? ` · ${OVERSTAY_META.label}` : "") +
-                    (room ? ` (${room.name})` : "");
+                    (room ? ` (${room.name})` : "") +
+                    (daySentence && rings ? `. ${daySentence}` : "") +
+                    (windowView ? (faded ? `. ${windowView.takenWords || "Not free then"}` : `. ${windowView.freeWords || "Free then"}`) : "");
 
                   return (
                     <g
                       key={`${resource.id}-${unitIndex}`}
                       className="silla-unit"
                       role="button"
-                      tabIndex={0}
+                      tabIndex={locked ? -1 : 0}
+                      aria-disabled={locked || undefined}
                       aria-label={description}
                       aria-pressed={selected || undefined}
+                      style={{
+                        opacity: faded ? FADED : 1,
+                        transition: "opacity var(--dur-base) var(--ease-out)",
+                        cursor: locked ? "default" : undefined,
+                      }}
                       {...handlers}
                     >
                       <title>{description}</title>
+                      {hit && <rect x={x + hit.x} y={y + hit.y} width={hit.w} height={hit.h} fill="transparent" />}
+                      {rings && <DayRing x={x + r.x} y={y + r.y} w={r.w} h={r.h} entry={entry} />}
                       {/* Motion animates the fill, so a status change
                           arriving over Socket.io (MAP-2) cross-fades
                           instead of snapping. */}
@@ -927,22 +981,32 @@ export default function SpaceMap({
                         initial={false}
                         animate={{ fill }}
                         transition={{ duration: 0.35 }}
-                        // Selection outlines are measured in screen pixels
-                        // (non-scaling), not map units: a whole floor on a
-                        // phone shrank a 3-unit outline to one faint pixel.
-                        style={
-                          selected
-                            ? { stroke: "var(--color-accent)", strokeWidth: 3, vectorEffect: "non-scaling-stroke" }
-                            : isHighlighted
-                              ? {
-                                  stroke: "var(--color-accent)",
-                                  strokeWidth: 2.5,
-                                  strokeDasharray: "5 3",
-                                  vectorEffect: "non-scaling-stroke",
-                                }
-                              : { stroke: "rgb(var(--c-bg-page) / 0.45)", strokeWidth: 1 }
-                        }
+                        style={{ stroke: "rgb(var(--c-bg-page) / 0.45)", strokeWidth: 1 }}
                       />
+                      {/* The selection outline, drawn over the chip rather than
+                          as the chip's own stroke: Motion owns that element's
+                          style, and a changed stroke there never reached the
+                          screen — the chosen unit looked like every other.
+                          Measured in screen pixels (non-scaling), not map
+                          units: a whole floor on a phone shrank a 3-unit
+                          outline to one faint pixel. */}
+                      {(selected || isHighlighted) && (
+                        <rect
+                          x={x + r.x}
+                          y={y + r.y}
+                          width={r.w}
+                          height={r.h}
+                          rx="5"
+                          pointerEvents="none"
+                          style={{
+                            fill: "none",
+                            stroke: "var(--color-accent)",
+                            strokeWidth: selected ? 3 : 2.5,
+                            strokeDasharray: selected ? undefined : "5 3",
+                            vectorEffect: "non-scaling-stroke",
+                          }}
+                        />
+                      )}
                       {showIcon && (
                         <Icon
                           x={cx - iconSize / 2}
@@ -1097,7 +1161,7 @@ export default function SpaceMap({
  * Clicks are not handled here: the map resolves them by cell, so a click
  * anywhere in the room's cells chooses it. The keyboard is.
  */
-function RoomShape({ room, cells, state, palette, focused, flagged, pxPerUnit, resourceNoun, interactive, onSelect }) {
+function RoomShape({ room, cells, state, palette, focused, flagged, pxPerUnit, resourceNoun, interactive, onSelect, faded = false }) {
   const outline = useMemo(() => outlinePath(cells, { cell: CELL, inset: 1, radius: ROOM_RADIUS }), [cells]);
   const spot = useMemo(() => labelSpot(cells), [cells]);
   const x = spot.col * CELL;
@@ -1129,6 +1193,7 @@ function RoomShape({ room, cells, state, palette, focused, flagged, pxPerUnit, r
   return (
     <g
       className={interactive ? "silla-room" : undefined}
+      style={{ opacity: faded ? 0.45 : 1, transition: "opacity var(--dur-base) var(--ease-out)" }}
       role={interactive ? "button" : undefined}
       tabIndex={interactive ? 0 : -1}
       aria-label={interactive ? description : undefined}
@@ -1232,6 +1297,75 @@ function ZoneShape({ zone, cells, flagged }) {
       </text>
     </g>
   );
+}
+
+/**
+ * The rest of today, as a thin ring around a unit — the one mark that adds
+ * time to a map whose colours mean "right now":
+ *
+ *   free the rest of the day     no ring at all, so a quiet day stays quiet
+ *   partly booked                a neutral hairline ring, with an arc from
+ *                                twelve o'clock as long as the share of the
+ *                                time left that is booked — the track is what
+ *                                makes a short arc read as a share of a day
+ *                                rather than as a notch
+ *   booked for the rest of day   the whole ring
+ *
+ * In the reserved state's colour — booked is booked, whatever the brand —
+ * and never the only signal: the unit's label and the panel say it in words.
+ * Units that cannot be booked at all (out of service, closed, part of a
+ * room booked only whole) have no day, and so no ring.
+ */
+function DayRing({ x, y, w, h, entry }) {
+  if (!entry?.bookable || (entry.day !== "partial" && entry.day !== "full")) return null;
+  const path = ringPath(x - RING_GAP, y - RING_GAP, w + RING_GAP * 2, h + RING_GAP * 2, 5 + RING_GAP);
+  const full = entry.day === "full";
+  // However little is booked, the arc stays long enough to see; however
+  // much, a partial day never closes the ring.
+  const share = full ? 1 : clamp(entry.fraction || 0, 0.15, 0.9);
+  const line = { fill: "none", strokeWidth: RING_WIDTH, strokeLinecap: "round" };
+  return (
+    <g pointerEvents="none" aria-hidden="true">
+      {!full && <path d={path} pathLength={1} style={{ ...line, stroke: "rgb(var(--c-line) / 0.42)" }} />}
+      <path
+        d={path}
+        pathLength={1}
+        style={{ ...line, stroke: "var(--color-state-reserved)", strokeDasharray: full ? undefined : `${share} 1` }}
+      />
+    </g>
+  );
+}
+
+/**
+ * A rounded rectangle traced from the middle of its top edge, clockwise, so
+ * a dashed stroke starts at twelve o'clock and grows the way a clock does.
+ */
+function ringPath(x, y, w, h, r) {
+  const radius = Math.min(r, w / 2, h / 2);
+  const right = x + w;
+  const bottom = y + h;
+  return (
+    `M ${x + w / 2} ${y} H ${right - radius} A ${radius} ${radius} 0 0 1 ${right} ${y + radius} ` +
+    `V ${bottom - radius} A ${radius} ${radius} 0 0 1 ${right - radius} ${bottom} ` +
+    `H ${x + radius} A ${radius} ${radius} 0 0 1 ${x} ${bottom - radius} ` +
+    `V ${y + radius} A ${radius} ${radius} 0 0 1 ${x + radius} ${y} Z`
+  );
+}
+
+/**
+ * A unit's share of its piece, for taps: its chip grown halfway across
+ * every gap to its neighbours and out to the footprint's edge, so the
+ * targets tile the piece with no dead space between them.
+ */
+function hitArea(chip, footprint) {
+  const w = footprint.w * CELL;
+  const h = footprint.h * CELL;
+  const edge = 0.5;
+  const left = chip.x <= PIECE_INSET + edge ? 0 : chip.x - UNIT_GAP / 2;
+  const top = chip.y <= PIECE_INSET + edge ? 0 : chip.y - UNIT_GAP / 2;
+  const right = chip.x + chip.w >= w - PIECE_INSET - edge ? w : chip.x + chip.w + UNIT_GAP / 2;
+  const bottom = chip.y + chip.h >= h - PIECE_INSET - edge ? h : chip.y + chip.h + UNIT_GAP / 2;
+  return { x: left, y: top, w: right - left, h: bottom - top };
 }
 
 /**
