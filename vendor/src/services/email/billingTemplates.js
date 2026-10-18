@@ -20,7 +20,7 @@
  * Every function returns { to, subject, html, text } for sendEmail(), and
  * takes plain objects, so emailPreview.js can render them with sample data.
  */
-import { button, details, note, p, renderEmail } from "./layout.js";
+import { button, details, lines, note, p, renderEmail } from "./layout.js";
 
 const PORTAL = () => (process.env.PORTAL_URL || "http://localhost:5174").replace(/\/+$/, "");
 
@@ -89,13 +89,43 @@ function howToPay(settings, invoice) {
 
 const trialDays = (settings) => Number(settings?.billing?.trialDays ?? 0);
 
+/** What an invoice is for, in one phrase: its first line, and how many more there are. */
+const summaryOf = (invoice) => {
+  const all = invoice.lines || [];
+  if (all.length <= 1) return all[0]?.description;
+  return `${all[0].description}, and ${all.length - 1} more line${all.length === 2 ? "" : "s"}`;
+};
+
 const invoiceRows = (invoice) => [
   ["Invoice", invoice.number],
   ["For", invoice.organizationName],
-  ["Description", invoice.lines?.[0]?.description],
+  ["Description", summaryOf(invoice)],
   ["Amount due", formatMoney(invoice.total, invoice.currency)],
   ["Due", formatDate(invoice.dueAt)],
 ];
+
+/**
+ * Every line of an invoice, as it is printed: what it is, how many at
+ * what price, the note a customer should keep (a warranty), and the
+ * totals with VAT when it was charged.
+ */
+export function invoiceLineItems(invoice) {
+  const cur = invoice.currency;
+  return lines(
+    (invoice.lines || []).map((l) => ({
+      description: l.description,
+      detail: [l.quantity > 1 ? `${l.quantity.toLocaleString("en-PH")} × ${formatMoney(l.unitAmount, cur)}` : null, l.note || null]
+        .filter(Boolean)
+        .join(" · "),
+      amount: formatMoney(l.amount, cur),
+    })),
+    [
+      invoice.tax?.amount ? ["Subtotal", formatMoney(invoice.subtotal, cur)] : null,
+      invoice.tax?.amount ? [invoice.tax.label || "VAT", formatMoney(invoice.tax.amount, cur)] : null,
+      ["Total", formatMoney(invoice.total, cur)],
+    ].filter(Boolean)
+  );
+}
 
 /* ─────────────────────────────── invoices ─────────────────────────────── */
 
@@ -122,6 +152,7 @@ export const invoiceIssuedEmail = ({ invoice, account, settings }) =>
             : `Here is your invoice for ${invoice.organizationName}.`
         ),
         details(invoiceRows(invoice)),
+        invoiceLineItems(invoice),
         // The first invoice arrives before the system is even live. Say
         // what paying it does, so paying early doesn't look like losing
         // the trial.
@@ -382,6 +413,39 @@ export const planChangedEmail = ({ subscription, account, fromName }) => {
       button("See your billing", billingLink()),
     ],
     reason: "because your SILLA plan changed",
+  });
+};
+
+/**
+ * When staff change what a customer pays for besides the plan — extra
+ * buildings, rentals, support. The same two moments as a plan change, kept
+ * apart: what they ALLOW (one more building) changes now; what they COST
+ * changes from the next invoice.
+ */
+export const addOnsChangedEmail = ({ subscription, account, before = [], after = [] }) => {
+  const per = PERIOD_WORD[subscription.billingPeriod] || "period";
+  const months = subscription.billingPeriod === "monthly" ? 1 : 12;
+  const cur = subscription.price?.currency || "PHP";
+  const named = (a) => `${a.name}${a.kind === "rental" ? " rental" : ""}`;
+  const row = (a) => ({
+    description: named(a),
+    detail: a.quantity > 1 ? `${a.quantity} × ${formatMoney(a.unitAmount * months, cur)} a ${per}` : null,
+    amount: a.unitAmount === 0 ? "Included" : `${formatMoney(a.unitAmount * months * a.quantity, cur)} a ${per}`,
+  });
+  const gone = before.filter((b) => !after.some((a) => a.key === b.key && a.kind === b.kind));
+  return build(billingAddress(account), `Your SILLA add-ons for ${subscription.organizationName} changed`, {
+    preheader: `What ${subscription.organizationName} pays for besides its plan has changed.`,
+    eyebrow: "Add-ons changed",
+    title: "Your add-ons changed",
+    greeting: `Hi ${first(account)},`,
+    blocks: [
+      p(`We've updated what ${subscription.organizationName} pays for besides its ${subscription.planName} plan. It now has:`),
+      after.length ? lines(after.map(row)) : p("No add-ons."),
+      gone.length ? p(`No longer included: ${gone.map(named).join(", ")}.`) : null,
+      p("What they allow — another building, say — changes now. What they cost applies from your next invoice; invoices already sent keep their amounts."),
+      button("See your billing", billingLink()),
+    ].filter(Boolean),
+    reason: "because what your SILLA subscription includes changed",
   });
 };
 

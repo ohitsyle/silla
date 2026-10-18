@@ -247,6 +247,7 @@ export function buildQuote({ plan, plans = [], billingPeriod, selections = [], c
     yearlyRate: planMonthly(plan, "yearly"),
     minimumMonths: 0,
     adds: {},
+    unitAdds: {},
     included: false,
     waived: false,
     note: "",
@@ -276,7 +277,10 @@ export function buildQuote({ plan, plans = [], billingPeriod, selections = [], c
       monthlyRate: itemMonthly(item, "monthly"),
       yearlyRate: itemMonthly(item, "yearly"),
       minimumMonths,
+      // What this line raises in all, and what each one does — kept apart
+      // so a subscription can change the quantity without the catalogue.
       adds: kind === "recurring" ? scaledAdds(item.adds, quantity) : {},
+      unitAdds: kind === "recurring" ? scaledAdds(item.adds, 1) : {},
       included,
       waived: false,
       note: item.note || "",
@@ -305,6 +309,7 @@ export function buildQuote({ plan, plans = [], billingPeriod, selections = [], c
       waived,
       minimumMonths: 0,
       adds: {},
+      unitAdds: {},
       included: false,
       note: item.note || "",
       description: describeLine({ kind: "one_time", name: item.name, mode, waived }, { billingPeriod: period }),

@@ -453,9 +453,12 @@ export async function run(check) {
     const teamOrder = await submitOrder(A, `Team Co ${tag}`, teamKey, "monthly");
     const teamSub = await Subscription.findOne({ order: teamOrder.id });
     const teamInvoice = teamSub ? await Invoice.findOne({ subscription: teamSub._id, kind: "first" }) : null;
+    // On monthly billing the first invoice carries onboarding too — it is
+    // waived only on yearly (lib/defaultCatalog.js).
+    const teamPlanLine = teamInvoice?.lines?.find((l) => l.kind === "plan");
     check("BIL-24", "…an order for it is accepted and billed at its price",
-      teamOrder.status === "submitted" && teamSub?.plan === teamKey && teamSub?.planName === "Team" && teamInvoice?.subtotal === 1_500_00,
-      `${teamOrder.status} ${teamSub?.plan} ${teamInvoice?.subtotal}`);
+      teamOrder.status === "submitted" && teamSub?.plan === teamKey && teamSub?.planName === "Team" && teamPlanLine?.amount === 1_500_00,
+      `${teamOrder.status} ${teamSub?.plan} ${teamPlanLine?.amount}`);
     const teamRow = (await get(`/api/vendor/orders/${teamOrder.id}`, A)).body?.order;
     check("BIL-24", "…and the order keeps the plan's name and currency", teamRow?.planName === "Team" && teamRow?.currency === "PHP");
     const snapshot = await billing.snapshotForOrder(await Order.findById(teamOrder.id));

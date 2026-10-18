@@ -48,6 +48,36 @@ const subscriptionSchema = new mongoose.Schema(
      */
     needsPricing: { type: Boolean, default: false, index: true },
 
+    /**
+     * What this customer pays for every period besides the plan — extra
+     * buildings, rentals, a support tier — each with its quantity, the
+     * price AGREED for it (`unitAmount`, per unit per month on this
+     * subscription's billing period) and what one adds to the deployment's
+     * limits (`adds`, { buildings: 1 }). Copied from the order's frozen
+     * quote on submission; staff change them in the console
+     * (billing.updateSubscription), and the next invoice and the
+     * entitlements follow. A catalogue change never rewrites them: what a
+     * customer agreed for an add-on stays theirs, like the plan's price.
+     *
+     * Billed on every period's invoice, the first and each renewal.
+     * One-time items are NOT here: they are billed once, on the first
+     * invoice, from the order's quote.
+     */
+    addOns: [
+      {
+        _id: false,
+        key: { type: String, required: true }, // CatalogItem.key
+        name: { type: String, required: true }, // as an invoice line says it
+        category: { type: String, default: "" },
+        kind: { type: String, enum: ["recurring", "rental"], required: true },
+        quantity: { type: Number, required: true, min: 1 },
+        unitAmount: { type: Number, required: true, min: 0 },
+        adds: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
+        minimumMonths: { type: Number, default: 0 },
+        since: { type: Date, default: Date.now },
+      },
+    ],
+
     status: { type: String, enum: SUBSCRIPTION_STATUS, default: "pending", index: true },
     trialEndsAt: { type: Date, default: null },
     currentPeriodStart: { type: Date, default: null },

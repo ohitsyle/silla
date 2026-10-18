@@ -51,12 +51,24 @@ const invoiceSchema = new mongoose.Schema(
       taxId: { type: String, default: "" },
     },
 
+    /**
+     * What was billed, in the customer's words (lib/quote.js describeLine).
+     * `kind` and `key` say what each line is for whoever reads the record
+     * later — "plan", "recurring" (extra buildings, support), "rental",
+     * "one_time" (hardware bought, services), or "" for a line staff
+     * typed — and are how billing knows the one-time items of an order
+     * were billed once already. `note` is printed under the line: a
+     * warranty, "travel is billed at cost".
+     */
     lines: [
       {
         description: { type: String, required: true },
         quantity: { type: Number, default: 1 },
         unitAmount: { type: Number, required: true },
         amount: { type: Number, required: true },
+        kind: { type: String, default: "" },
+        key: { type: String, default: "" },
+        note: { type: String, default: "" },
       },
     ],
     subtotal: { type: Number, required: true },
