@@ -7,6 +7,7 @@ import { cleanup, leftovers } from "./cleanup.mjs";
 import * as accounts from "./accounts.test.mjs";
 import * as orders from "./orders.test.mjs";
 import * as billing from "./billing.test.mjs";
+import * as pricing from "./pricing.test.mjs";
 import * as staff from "./staff.test.mjs";
 import * as conversations from "./conversations.test.mjs";
 
@@ -31,7 +32,7 @@ try {
 
 // Run one suite by name: npm run test:isolated -- billing
 const only = process.argv.slice(2).filter((arg) => !arg.startsWith("-"));
-const suites = [accounts, orders, billing, staff, conversations].filter(
+const suites = [accounts, orders, billing, pricing, staff, conversations].filter(
   (suite) => !only.length || only.some((name) => suite.name.toLowerCase().includes(name.toLowerCase()))
 );
 

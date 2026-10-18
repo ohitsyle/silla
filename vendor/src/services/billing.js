@@ -2019,7 +2019,9 @@ function readAddOns(raw, sub, { plan, planChanged, periodChanged, period, items,
       fields[field] =
         item.charge === "recurring"
           ? `${item.name} can't be rented.`
-          : `${item.name}${item.charge === "buy_or_rent" ? ", bought," : ""} is paid once — put it on a manual invoice instead.`;
+          : item.charge === "buy_or_rent"
+            ? `${item.name} is an add-on only when rented — a bought one goes on a manual invoice.`
+            : `${item.name} — paid once, so it goes on a manual invoice instead.`;
       continue;
     }
     const existing = current.find((a) => a.key === item.key && a.kind === kind);
