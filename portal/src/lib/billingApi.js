@@ -20,7 +20,7 @@ const query = (params = {}) => {
 
 export const billingApi = {
   /* ── the storefront ── */
-  /** { plans[], pricesExcludeVat } — public, active plans only. */
+  /** { plans[], catalogue[], vat, trialDays } — public: active plans, and everything else SILLA sells. */
   plans: () => request("/api/vendor/plans"),
 
   /* ── a buyer's own ── */
