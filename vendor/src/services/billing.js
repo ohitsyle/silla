@@ -34,6 +34,7 @@
  */
 import mongoose from "mongoose";
 import Plan from "../models/Plan.js";
+import CatalogItem, { CATALOG_CATEGORIES, CATALOG_CHARGES } from "../models/CatalogItem.js";
 import Subscription from "../models/Subscription.js";
 import Invoice, { PAYMENT_METHODS } from "../models/Invoice.js";
 import Settings from "../models/Settings.js";
@@ -42,7 +43,9 @@ import Order from "../models/Order.js";
 import { nextSequence } from "../models/Counter.js";
 import { callDeployment } from "../lib/controlPlane.js";
 import { DEFAULT_PLANS } from "../lib/defaultPlans.js";
+import { DEFAULT_CATALOG } from "../lib/defaultCatalog.js";
 import { FEATURES, LIMITS } from "../lib/planKeys.js";
+import { MAX_QUANTITY } from "../lib/quote.js";
 import { audit } from "../lib/audit.js";
 import { isUndeliverable, sendEmail } from "./email/index.js";
 import * as mail from "./email/billingTemplates.js";
