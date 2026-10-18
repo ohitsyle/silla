@@ -11,7 +11,7 @@ import mongoose from "mongoose";
  * by staff in the console after that (Plans → Catalogue, plans.manage,
  * every change audited). A change reaches NEW quotes only: an order
  * freezes its quote when it is submitted, and a subscription keeps the
- * price agreed for each add-on it carries.
+ * price — and the limit raise — agreed for each add-on it carries.
  *
  * Money is in MINOR units (centavos) and excludes VAT, like a plan's.
  *
@@ -38,6 +38,9 @@ import mongoose from "mongoose";
  *                               limits — { buildings: 1 } for an extra
  *                               building. Recurring items only: a limit
  *                               lasts as long as it is paid for.
+ *   note                        the one thing to know before buying it —
+ *                               the warranty, "travel is billed at cost" —
+ *                               said wherever it is sold and on the invoice
  */
 export const CATALOG_CATEGORIES = ["building", "hardware", "service", "support"];
 export const CATALOG_CHARGES = ["one_time", "recurring", "buy_or_rent"];
@@ -66,7 +69,6 @@ const catalogItemSchema = new mongoose.Schema(
     group: { type: String, default: "", trim: true },
     groupDefault: { type: Boolean, default: false },
     adds: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
-    /** The warranty, or "travel is billed at cost" — said wherever it is sold. */
     note: { type: String, default: "", maxlength: 200 },
     waivedOnYearly: { type: Boolean, default: false },
     alwaysIncluded: { type: Boolean, default: false },

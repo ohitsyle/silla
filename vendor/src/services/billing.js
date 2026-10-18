@@ -399,6 +399,261 @@ async function resyncPlan(key) {
   return ids.length;
 }
 
+/* ───────────────────────────── the catalogue: everything besides a plan ───────────────────────────── */
+
+/**
+ * Extra buildings, hardware, services and support — seeded with
+ * DEFAULT_CATALOG the first time it is empty, exactly as the plans are,
+ * then owned by staff (models/CatalogItem.js says what each field means).
+ */
+export async function ensureCatalog() {
+  if ((await CatalogItem.estimatedDocumentCount()) === 0) {
+    await CatalogItem.insertMany(DEFAULT_CATALOG).catch((err) => {
+      if (err?.code !== 11000) throw err; // a concurrent first read already seeded it
+    });
+  }
+  return CatalogItem.find({}).sort({ sort: 1, createdAt: 1 }).lean();
+}
+
+const amountOrNull = (v) => (isAmount(v) ? v : null);
+
+/** Per-unit limit raises, keyed by lib/planKeys.js — anything else is dropped. */
+function cleanAdds(adds) {
+  const out = {};
+  for (const [key, n] of Object.entries(adds || {})) {
+    if (key in LIMITS && Number.isInteger(n) && n > 0) out[key] = n;
+  }
+  return out;
+}
+
+/** One catalogue item as the storefront, the configurator and lib/quote.js read it. */
+export function catalogItemShape(item) {
+  const prices = item.prices || {};
+  return {
+    key: item.key,
+    name: item.name,
+    description: item.description || "",
+    highlights: item.highlights || [],
+    category: item.category,
+    charge: item.charge,
+    unit: { one: item.unit?.one || "unit", many: item.unit?.many || "units" },
+    currency: item.currency || "PHP",
+    prices: {
+      oneTime: amountOrNull(prices.oneTime),
+      monthly: amountOrNull(prices.monthly),
+      annualMonthly: amountOrNull(prices.annualMonthly),
+    },
+    minQuantity: Number.isInteger(item.minQuantity) && item.minQuantity >= 1 ? item.minQuantity : 1,
+    maxQuantity: Number.isInteger(item.maxQuantity) && item.maxQuantity >= 1 ? item.maxQuantity : null,
+    plans: [...(item.plans || [])],
+    group: item.group || "",
+    groupDefault: Boolean(item.groupDefault),
+    adds: cleanAdds(item.adds),
+    note: item.note || "",
+    waivedOnYearly: Boolean(item.waivedOnYearly),
+    alwaysIncluded: Boolean(item.alwaysIncluded),
+    rentalMinimumMonths: Number.isInteger(item.rentalMinimumMonths) && item.rentalMinimumMonths > 0 ? item.rentalMinimumMonths : 0,
+    active: item.active !== false,
+    sort: item.sort || 0,
+  };
+}
+
+/** The catalogue, shaped: active items for the storefront, everything for staff. */
+export async function catalogItems({ includeRetired = false } = {}) {
+  const items = await ensureCatalog();
+  return items.filter((i) => includeRetired || i.active !== false).map(catalogItemShape);
+}
+
+const catalogTarget = (item) => ({ type: "catalog", id: item.key, label: item.name });
+const GROUP_KEY = /^[a-z0-9-]{2,40}$/;
+/** The fields a new item starts from, so a create is validated as the whole item it will be. */
+const BLANK_ITEM = catalogItemShape({ key: "", name: "", category: "hardware", charge: "one_time", unit: {}, prices: {} });
+
+/**
+ * Validates a create or an edit. Each field is checked on its own, then
+ * the item AS IT WOULD BE SAVED is checked as a whole: a charge that
+ * needs a price it doesn't have, a limit raise on something paid once, a
+ * waiver on something that isn't one-time. An edit sends only what
+ * changed, so the whole is the stored item with the edit laid over it.
+ */
+function readCatalogItem(input = {}, { creating, current = null, planKeys = [] }) {
+  const fields = {};
+  const value = {};
+
+  if (creating) {
+    value.key = String(input.key || "").trim().toLowerCase();
+    if (!PLAN_KEY.test(value.key)) fields.key = "Use 2–40 lowercase letters, digits or hyphens.";
+  }
+  if (creating || input.name !== undefined) {
+    value.name = clean(input.name, 200);
+    if (!value.name) fields.name = "Name it — this is what an invoice line says.";
+    else if (value.name.length > 60) fields.name = "Keep the name under 60 characters.";
+  }
+  if (input.description !== undefined) {
+    value.description = clean(input.description, 600);
+    if (value.description.length > 300) fields.description = "Keep it under 300 characters.";
+  }
+  if (input.highlights !== undefined) {
+    const list = lines(input.highlights);
+    if (list.length > 8) fields.highlights = "Up to 8 points.";
+    else if (list.some((s) => s.length > 120)) fields.highlights = "Keep each point under 120 characters.";
+    value.highlights = list;
+  }
+  if (creating || input.category !== undefined) {
+    value.category = String(input.category || "");
+    if (!CATALOG_CATEGORIES.includes(value.category)) fields.category = "Choose what kind of thing it is.";
+  }
+  if (creating || input.charge !== undefined) {
+    value.charge = String(input.charge || "");
+    if (!CATALOG_CHARGES.includes(value.charge)) fields.charge = "Choose how it is charged.";
+  }
+  if (input.unit !== undefined) {
+    value.unit = { one: clean(input.unit?.one, 60), many: clean(input.unit?.many, 60) };
+    for (const n of ["one", "many"]) {
+      if (!value.unit[n]) fields[`unit.${n}`] = n === "one" ? "What is one called — “card”?" : "And more than one — “cards”?";
+      else if (value.unit[n].length > 30) fields[`unit.${n}`] = "Keep it under 30 characters.";
+    }
+  }
+  if (input.currency !== undefined) {
+    value.currency = String(input.currency || "").trim().toUpperCase();
+    if (!/^[A-Z]{3}$/.test(value.currency)) fields.currency = "A three-letter currency code, like PHP.";
+  }
+  if (input.prices !== undefined) {
+    const raw = input.prices && typeof input.prices === "object" ? input.prices : {};
+    // Only the prices sent change; null clears one.
+    value.prices = { ...(current ? catalogItemShape(current).prices : BLANK_ITEM.prices) };
+    for (const p of ["oneTime", "monthly", "annualMonthly"]) {
+      if (p in raw) value.prices[p] = readAmount(raw[p], fields, `prices.${p}`, "Enter a price in pesos, or leave it empty.");
+    }
+  }
+  const readCount = (key, { nullable = false } = {}) => {
+    if (input[key] === undefined) return;
+    if (nullable && (input[key] === null || input[key] === "")) {
+      value[key] = null;
+      return;
+    }
+    const n = Number(input[key]);
+    if (!Number.isInteger(n) || n < 1 || n > MAX_QUANTITY) fields[key] = `A whole number from 1 to ${MAX_QUANTITY.toLocaleString("en-PH")}.`;
+    value[key] = n;
+  };
+  readCount("minQuantity");
+  readCount("maxQuantity", { nullable: true });
+  if (input.plans !== undefined) {
+    const list = (Array.isArray(input.plans) ? input.plans : []).map((k) => String(k).trim().toLowerCase()).filter(Boolean);
+    const unknown = list.find((k) => !planKeys.includes(k));
+    if (!Array.isArray(input.plans)) fields.plans = "List the plans it is offered on, or none for every plan.";
+    else if (unknown) fields.plans = `There is no plan called “${unknown}”.`;
+    value.plans = [...new Set(list)];
+  }
+  if (input.group !== undefined) {
+    value.group = String(input.group || "").trim().toLowerCase();
+    if (value.group && !GROUP_KEY.test(value.group)) fields.group = "2–40 lowercase letters, digits or hyphens — “support”.";
+  }
+  for (const flag of ["groupDefault", "waivedOnYearly", "alwaysIncluded", "active"]) {
+    if (input[flag] !== undefined) value[flag] = Boolean(input[flag]);
+  }
+  if (input.adds !== undefined) {
+    const raw = input.adds;
+    value.adds = {};
+    if (raw !== null && (typeof raw !== "object" || Array.isArray(raw))) fields.adds = "Limit raises are a set of numbers, like { buildings: 1 }.";
+    else {
+      for (const [k, n] of Object.entries(raw || {})) {
+        if (!(k in LIMITS)) fields[`adds.${k}`] = `There is no limit called "${k}".`;
+        else if (n === null || n === 0 || n === "") continue;
+        else if (!Number.isInteger(n) || n < 1 || n > 1000) fields[`adds.${k}`] = "A whole number per unit, from 1.";
+        else value.adds[k] = n;
+      }
+    }
+  }
+  if (input.note !== undefined) {
+    value.note = clean(input.note, 400);
+    if (value.note.length > 200) fields.note = "Keep the note under 200 characters — it is printed beside the price.";
+  }
+  if (input.rentalMinimumMonths !== undefined) {
+    const n = Number(input.rentalMinimumMonths || 0);
+    if (!Number.isInteger(n) || n < 0 || n > 60) fields.rentalMinimumMonths = "A whole number of months, 0–60.";
+    value.rentalMinimumMonths = n;
+  }
+  if (input.sort !== undefined) {
+    value.sort = Number(input.sort);
+    if (!Number.isInteger(value.sort)) fields.sort = "A whole number — lower comes first.";
+  }
+
+  const next = { ...(current ? catalogItemShape(current) : BLANK_ITEM), ...value };
+  if (!Object.keys(fields).length) {
+    const p = next.prices;
+    if (next.charge === "one_time" && p.oneTime == null) fields["prices.oneTime"] = "Enter the price of one.";
+    if (next.charge === "recurring" && p.monthly == null) fields["prices.monthly"] = "Enter the price per month.";
+    if (next.charge === "buy_or_rent") {
+      if (p.oneTime == null) fields["prices.oneTime"] = "Enter the price to buy one.";
+      if (p.monthly == null) fields["prices.monthly"] = "Enter the rent per month.";
+    }
+    if (next.maxQuantity != null && next.maxQuantity < next.minQuantity) fields.maxQuantity = "It can't be less than the minimum.";
+    if (Object.keys(next.adds || {}).length && next.charge !== "recurring") {
+      fields.adds = "Only something paid monthly can raise a limit — the limit lasts as long as it is paid for.";
+    }
+    if (next.waivedOnYearly && next.charge !== "one_time") fields.waivedOnYearly = "Only a one-time charge can be waived on yearly billing.";
+    if (next.rentalMinimumMonths > 0 && next.charge !== "buy_or_rent") fields.rentalMinimumMonths = "Only something that can be rented has a minimum rental.";
+    if (next.groupDefault && !next.group) fields.groupDefault = "Only an item in a group can be that group's default.";
+    else if (next.groupDefault && next.charge !== "recurring") fields.groupDefault = "A group's default must be something paid monthly.";
+    if (next.alwaysIncluded && next.group) fields.alwaysIncluded = "Something on every order can't also be one choice of a group.";
+  }
+  return { value, fields, next };
+}
+
+/** One default per group: a second would leave the quote to pick between them. */
+async function checkGroupDefault(next, fields) {
+  if (fields.groupDefault || !next.groupDefault || !next.active) return;
+  const other = await CatalogItem.findOne({ key: { $ne: next.key }, group: next.group, groupDefault: true, active: { $ne: false } }).lean();
+  if (other) fields.groupDefault = `${other.name} is already the default “${next.group}” choice. Turn that off first.`;
+}
+
+export async function createCatalogItem(input, by) {
+  await ensureCatalog();
+  const planKeys = (await ensurePlans()).map((p) => p.key);
+  const { value, fields, next } = readCatalogItem(input, { creating: true, planKeys });
+  if (!fields.key && (await CatalogItem.exists({ key: value.key }))) fields.key = "Something with that key already exists.";
+  await checkGroupDefault(next, fields);
+  if (Object.keys(fields).length) refuse(fields);
+
+  const item = await CatalogItem.create(next);
+  const shaped = catalogItemShape(item);
+  await audit(actor(by), "catalog.create", catalogTarget(item), `Added ${item.name} to the catalogue`, shaped);
+  return shaped;
+}
+
+/**
+ * Edit an item. Its price, minimums and rules reach NEW quotes only: an
+ * order froze its quote when it was submitted, and a subscription keeps
+ * the price — and the limit raise — agreed for each add-on it carries.
+ */
+export async function updateCatalogItem(key, input, by) {
+  const item = await CatalogItem.findOne({ key });
+  if (!item) throw new BillingError("There is nothing in the catalogue with that key.", { status: 404 });
+  const planKeys = (await ensurePlans()).map((p) => p.key);
+  const { value, fields, next } = readCatalogItem(input, { creating: false, current: item, planKeys });
+  await checkGroupDefault(next, fields);
+  if (Object.keys(fields).length) refuse(fields);
+
+  const before = catalogItemShape(item);
+  for (const [field, v] of Object.entries(value)) {
+    item.set(field, v);
+    if (field === "adds") item.markModified("adds");
+  }
+  await item.save();
+  const after = catalogItemShape(item);
+  const changed = Object.keys(value).filter((f) => JSON.stringify(before[f]) !== JSON.stringify(after[f]));
+  if (changed.length) {
+    const pick = (o) => Object.fromEntries(changed.map((f) => [f, o[f]]));
+    await audit(actor(by), "catalog.update", catalogTarget(item), `Updated ${item.name} in the catalogue (${changed.join(", ")})`, {
+      changed,
+      before: pick(before),
+      after: pick(after),
+    });
+  }
+  return after;
+}
+
 /* ───────────────────────────── settings ───────────────────────────── */
 
 /** SILLA's business settings — one document, created with its defaults on first read. */
