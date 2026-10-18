@@ -7,7 +7,7 @@ import { billingApi } from "../../lib/billingApi.js";
 import { formatMoney } from "../../lib/plans.js";
 import { useToast } from "../../lib/toast.jsx";
 import { ROUTES } from "../../lib/useHashRoute.js";
-import { METHOD_LABEL, claimWaiting, dateTime, longDate, shortDate } from "../../billing/format.js";
+import { METHOD_LABEL, claimWaiting, dateTime, invoiceSummary, longDate, shortDate } from "../../billing/format.js";
 import { InvoiceBadge } from "../../billing/ui.jsx";
 import {
   BackTo, FilterTabs, ManualInvoiceDialog, ReasonDialog, RecordPaymentDialog, Row, SearchBox, useDebounced,
@@ -131,7 +131,7 @@ function InvoiceList({ navigate, can, query: address = {} }) {
                       <span className="text-sm font-bold tabular-nums lg:hidden">{money(inv)}</span>
                     </span>
                     <span className="block truncate text-xs text-ink-muted">
-                      {KIND[inv.kind]} · {inv.lines[0]?.description}
+                      {KIND[inv.kind]} · {invoiceSummary(inv)}
                     </span>
                   </span>
                   <span className="min-w-0 text-sm">

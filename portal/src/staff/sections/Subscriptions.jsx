@@ -11,7 +11,7 @@ import { billingApi } from "../../lib/billingApi.js";
 import { formatMoney } from "../../lib/plans.js";
 import { useToast } from "../../lib/toast.jsx";
 import { ROUTES } from "../../lib/useHashRoute.js";
-import { dateTime, fromDateInput, limitPhrase, longDate, shortDate, toDateInput, toMinor } from "../../billing/format.js";
+import { dateTime, fromDateInput, invoiceSummary, limitPhrase, longDate, shortDate, toDateInput, toMinor } from "../../billing/format.js";
 import { InvoiceBadge, MoneyInput, ToneBadge } from "../../billing/ui.jsx";
 import { iconFor } from "../../lib/catalogue.js";
 import {
@@ -444,12 +444,13 @@ function AddOnsPanel({ sub, manage, onSaved }) {
             const error = fields[`addOns.${a.key}`];
             const n = Number(a.quantity) || 0;
             return (
-              <li key={addOnId(a)} className="px-5 py-3">
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                  <span className="grid h-8 w-8 shrink-0 place-items-center rounded-[10px] bg-line/[0.05] text-ink-secondary">
-                    <Icon size={15} />
-                  </span>
-                  <span className="min-w-0 flex-1">
+              <li key={addOnId(a)} className="flex items-start gap-3 px-5 py-3">
+                <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-[10px] bg-line/[0.05] text-ink-secondary">
+                  <Icon size={15} />
+                </span>
+                <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+                  <span className="min-w-[11rem] flex-1">
                     <span className="block font-semibold">{addOnLabel(a)}</span>
                     <span className="block text-xs text-ink-muted">
                       {a.unitAmount === 0 ? "Included" : `${money(a.unitAmount * months, cur)} each a ${per}`}
@@ -457,6 +458,7 @@ function AddOnsPanel({ sub, manage, onSaved }) {
                       {optionFor(a)?.adds?.buildings ? ` · +${optionFor(a).adds.buildings} building each` : ""}
                     </span>
                   </span>
+                  <span className="flex items-center gap-3">
                   {manage && optionFor(a)?.maxQuantity !== 1 ? (
                     <QuantityStepper
                       value={a.quantity}
@@ -468,7 +470,7 @@ function AddOnsPanel({ sub, manage, onSaved }) {
                   ) : (
                     <span className="text-sm tabular-nums text-ink-secondary">× {a.quantity}</span>
                   )}
-                  <span className="w-28 text-right text-sm font-bold tabular-nums">{a.unitAmount === 0 ? "—" : money(a.unitAmount * months * n, cur)}</span>
+                  <span className="w-24 text-right text-sm font-bold tabular-nums">{a.unitAmount === 0 ? "—" : money(a.unitAmount * months * n, cur)}</span>
                   {manage && (
                     <button
                       type="button"
@@ -479,8 +481,10 @@ function AddOnsPanel({ sub, manage, onSaved }) {
                       <X size={15} />
                     </button>
                   )}
+                  </span>
                 </div>
-                {error && <p className="mt-1.5 pl-11 text-xs font-medium text-state-unavailable">{error}</p>}
+                {error && <p className="mt-1.5 text-xs font-medium text-state-unavailable">{error}</p>}
+                </div>
               </li>
             );
           })}
@@ -863,7 +867,7 @@ function InvoicesPanel({ sub, manage, navigate, onIssued }) {
               >
                 <span className="font-mono text-sm font-semibold">{inv.number}</span>
                 <InvoiceBadge invoice={inv} size="sm" />
-                <span className="mr-auto min-w-0 truncate text-sm text-ink-muted">{inv.lines[0]?.description}</span>
+                <span className="mr-auto min-w-0 truncate text-sm text-ink-muted">{invoiceSummary(inv)}</span>
                 <span className="text-sm font-bold tabular-nums">{formatMoney(inv.total, { currency: inv.currency, exact: true })}</span>
               </button>
             </li>

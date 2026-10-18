@@ -8,7 +8,7 @@ import { billingApi } from "../lib/billingApi.js";
 import { formatMoney } from "../lib/plans.js";
 import { useToast } from "../lib/toast.jsx";
 import { ROUTES } from "../lib/useHashRoute.js";
-import { claimWaiting, longDate, shortDate, limitPhrase } from "../billing/format.js";
+import { claimWaiting, invoiceSummary, longDate, shortDate, limitPhrase } from "../billing/format.js";
 import { ClaimDialog, Fact, HowToPay, InvoiceBadge, ToneBadge } from "../billing/ui.jsx";
 import { AccountLayout } from "./shared.jsx";
 
@@ -131,13 +131,16 @@ function SubscriptionCard({ sub, vat, onClaim, navigate, delay }) {
           </p>
         )}
 
-        <div className="mt-5 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+        {/* One column on a phone: a period's price in all ("₱186,000 a year")
+            no longer fits half a 400px card, and a cut-off price is worse
+            than a taller card. */}
+        <div className="mt-5 grid gap-2.5 sm:grid-cols-3">
           <Fact label="Price">
             {price}
             {vatNote && <span className="ml-1.5 text-xs font-semibold text-ink-muted">{vatNote}</span>}
           </Fact>
           <Fact label={dateLabel}>{dateValue}</Fact>
-          <Fact label="Your system" className="col-span-2 sm:col-span-1">
+          <Fact label="Your system">
             {sub.deploymentUrl ? (
               <a
                 href={sub.deploymentUrl}
@@ -251,7 +254,7 @@ function InvoiceList({ invoices, onClaim, navigate }) {
                   <span className="font-mono text-sm font-semibold">{inv.number}</span>
                   <InvoiceBadge invoice={inv} size="sm" />
                 </div>
-                <div className="mt-0.5 truncate text-sm text-ink-secondary">{inv.lines[0]?.description || inv.organizationName}</div>
+                <div className="mt-0.5 truncate text-sm text-ink-secondary">{invoiceSummary(inv)}</div>
                 <div className="mt-0.5 text-xs text-ink-muted">
                   Issued {shortDate(inv.issuedAt)}
                   {inv.status === "paid" && inv.paidAt ? ` · paid ${shortDate(inv.paidAt)}` : ""}

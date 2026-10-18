@@ -91,6 +91,13 @@ export function invoiceState(invoice) {
   return { label: invoice.dueAt ? `Due ${shortDate(invoice.dueAt)}` : "Open", tone: "info" };
 }
 
+/** What an invoice is for, in one phrase: its first line, and how many more there are. */
+export function invoiceSummary(invoice) {
+  const lines = invoice?.lines || [];
+  if (lines.length <= 1) return lines[0]?.description || invoice?.organizationName || "";
+  return `${lines[0].description}, and ${lines.length - 1} more`;
+}
+
 /** Plan limits said as a count of things: 1 building, 600 bookable units, unlimited members. */
 const NOUNS = {
   buildings: ["building", "buildings"],

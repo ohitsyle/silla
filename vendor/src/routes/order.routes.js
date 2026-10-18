@@ -101,21 +101,25 @@ function selectionsOrRefused(res, raw) {
   return selections;
 }
 
+/** An order's choices as plain { key, quantity, mode } — what lib/quote.js reads. */
+const selectionsOf = (order) => (order.selections || []).map((s) => ({ key: s.key, quantity: s.quantity, mode: s.mode ?? null }));
+
 /**
  * The quote to SHOW for an order: the frozen one once it was submitted;
  * for a draft, priced live — with any problems the catalogue has grown
  * since it was saved, so the buyer finds out before pressing Submit.
  */
 async function quoteToShow(order) {
-  if (order.quote) return { quote: order.quote, problems: {}, live: false };
+  // Submitted: what was frozen — and an order submitted before quotes
+  // existed has none to show, rather than today's prices passed off as its own.
+  if (order.status !== "draft") return { quote: order.quote || null, problems: {}, live: false };
   const plan = await billing.planByKey(order.plan);
   if (!plan) return { quote: null, problems: { plan: "That plan isn't in the catalogue any more. Pick another." }, live: true };
-  const { quote, problems } = await billing.quoteOrder({ plan, billingPeriod: order.billingPeriod, selections: order.selections || [] });
+  const { quote, problems } = await billing.quoteOrder({ plan, billingPeriod: order.billingPeriod, selections: selectionsOf(order) });
   if (plan.active === false) problems.plan = "That plan isn't offered any more. Pick another.";
   return { quote, problems, live: true };
 }
 
-const selectionsOf = (order) => (order.selections || []).map((s) => ({ key: s.key, quantity: s.quantity, mode: s.mode ?? null }));
 
 /* ─────────────────────────── A buyer's own ─────────────────────────── */
 

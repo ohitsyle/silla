@@ -47,6 +47,16 @@ const LIMITS = {
   members: "Members",
   staff: "Staff accounts",
 };
+/** "+1 building each", "+50 bookable units each". */
+const NOUNS = {
+  buildings: ["building", "buildings"],
+  floors: ["floor", "floors"],
+  rooms: ["room", "rooms"],
+  resources: ["bookable unit", "bookable units"],
+  members: ["member", "members"],
+  staff: ["staff account", "staff accounts"],
+};
+const raiseWord = (key, n) => `+${n} ${(NOUNS[key] || [key, key])[n === 1 ? 0 : 1]} each`;
 
 /** Centavos to what a person types: 300000 → "3,000". */
 const pesos = (minor) => (minor == null ? "" : (minor / 100).toLocaleString("en-PH", { maximumFractionDigits: 2 }));
@@ -73,7 +83,7 @@ function rulesOf(item, plans) {
     item.alwaysIncluded ? "On every order" : null,
     item.waivedOnYearly ? "Waived on yearly" : null,
     item.rentalMinimumMonths ? `${item.rentalMinimumMonths}-month rental minimum` : null,
-    ...Object.entries(item.adds || {}).map(([k, n]) => `+${n} ${LIMITS[k]?.toLowerCase() || k} each`),
+    ...Object.entries(item.adds || {}).map(([k, n]) => raiseWord(k, n)),
   ].filter(Boolean);
 }
 
@@ -337,7 +347,7 @@ export function CatalogueEditor({ itemKey, navigate }) {
         <h2 className="display mr-auto text-[clamp(1.6rem,3.4vw,2.3rem)]">{creating ? "A new item" : item.name}</h2>
         {!creating && (
           <span className="inline-flex items-center gap-1.5 text-sm text-ink-secondary">
-            <Users size={15} /> {item.subscriptions} live subscription{item.subscriptions === 1 ? "" : "s"} carry it
+            <Users size={15} /> {item.subscriptions} live subscription{item.subscriptions === 1 ? " carries" : "s carry"} it
           </span>
         )}
       </div>
@@ -518,7 +528,7 @@ export function CatalogueEditor({ itemKey, navigate }) {
             {charge === "recurring" && (
               <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
                 <h3 className="mb-2 mt-6 text-xs font-bold uppercase tracking-[0.1em] text-ink-muted">Raises the deployment's limits, per unit</h3>
-                <div className="grid gap-x-4 gap-y-3 sm:grid-cols-3">
+                <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
                   {Object.entries(LIMITS).map(([k, label]) => (
                     <TextInput
                       key={k}
