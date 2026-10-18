@@ -8,6 +8,8 @@ import { can, requirePermission } from "../middleware/staff.js";
 import { audit } from "../lib/audit.js";
 import { sendEmail, isUndeliverable } from "../services/email/index.js";
 import * as billing from "../services/billing.js";
+import { readSelections } from "../lib/quote.js";
+import { formatMoney } from "../services/email/billingTemplates.js";
 import {
   orderCancelledEmail, orderLiveEmail, orderProvisioningEmail,
   orderSubmittedEmail, orderSubmittedInternalEmail,
@@ -25,6 +27,17 @@ router.use(requireAccount);
 const LEGACY_PLAN_NAMES = { room: "One Room", building: "Whole Building", campus: "Campus" };
 export const planNameOf = (order) => order.planName || LEGACY_PLAN_NAMES[order.plan] || order.plan;
 
+/** A frozen quote's headline figures, for a list row — the whole quote is on the detail. */
+const totalsOf = (quote) =>
+  quote?.totals
+    ? {
+        oneTime: quote.totals.oneTime,
+        perMonth: quote.totals.perMonth,
+        perPeriod: quote.totals.perPeriod,
+        firstInvoice: quote.totals.firstInvoice?.total ?? null,
+      }
+    : null;
+
 /** What the buyer's own list needs — never the whole profile. */
 const summary = (order) => ({
   id: order._id.toString(),
@@ -34,6 +47,7 @@ const summary = (order) => ({
   billingPeriod: order.billingPeriod,
   quotedAmount: order.quotedAmount,
   currency: order.currency,
+  totals: totalsOf(order.quote),
   status: order.status,
   deploymentUrl: order.deploymentUrl,
   createdAt: order.createdAt,
@@ -59,8 +73,49 @@ async function orderablePlan(key) {
   return { plan, problem: null };
 }
 
-/** An order's currency: what the buyer was shown, else the plan's. Three letters or nothing. */
-const currencyFor = (sent, plan) => (/^[A-Z]{3}$/.test(String(sent || "")) ? String(sent) : plan?.currency || "PHP");
+/** The first of a set of field problems, as the sentence a refusal leads with. */
+const firstProblem = (fields) => Object.values(fields)[0];
+
+/**
+ * Prices an order's choices on the server (billing.quoteOrder) and
+ * answers the problems, by field, if it can't be ordered as it stands —
+ * a minimum not met, an extra building on a plan that has none, two
+ * support tiers. Responds itself and returns null on a refusal.
+ */
+async function pricedOrRefused(res, { plan, billingPeriod, selections }) {
+  const { quote, problems } = await billing.quoteOrder({ plan, billingPeriod, selections });
+  if (Object.keys(problems).length) {
+    res.status(400).json({ error: firstProblem(problems), code: "QUOTE_INVALID", fields: problems });
+    return null;
+  }
+  return quote;
+}
+
+/** The buyer's choices from a request body — keys, quantities and buy/rent, nothing else. */
+function selectionsOrRefused(res, raw) {
+  const { selections, problems } = readSelections(raw);
+  if (Object.keys(problems).length) {
+    res.status(400).json({ error: firstProblem(problems), code: "QUOTE_INVALID", fields: problems });
+    return null;
+  }
+  return selections;
+}
+
+/**
+ * The quote to SHOW for an order: the frozen one once it was submitted;
+ * for a draft, priced live — with any problems the catalogue has grown
+ * since it was saved, so the buyer finds out before pressing Submit.
+ */
+async function quoteToShow(order) {
+  if (order.quote) return { quote: order.quote, problems: {}, live: false };
+  const plan = await billing.planByKey(order.plan);
+  if (!plan) return { quote: null, problems: { plan: "That plan isn't in the catalogue any more. Pick another." }, live: true };
+  const { quote, problems } = await billing.quoteOrder({ plan, billingPeriod: order.billingPeriod, selections: order.selections || [] });
+  if (plan.active === false) problems.plan = "That plan isn't offered any more. Pick another.";
+  return { quote, problems, live: true };
+}
+
+const selectionsOf = (order) => (order.selections || []).map((s) => ({ key: s.key, quantity: s.quantity, mode: s.mode ?? null }));
 
 /* ─────────────────────────── A buyer's own ─────────────────────────── */
 
@@ -81,7 +136,19 @@ router.get(
     // IDOR, and this way the wrong id simply does not match.
     const order = await Order.findOne({ _id: req.params.id, account: req.account._id });
     if (!order) return res.status(404).json({ error: "Order not found" });
-    res.json({ order: { ...summary(order), profile: order.profile, history: order.history } });
+    const { quote, problems, live } = await quoteToShow(order);
+    res.json({
+      order: {
+        ...summary(order),
+        profile: order.profile,
+        history: order.history,
+        selections: selectionsOf(order),
+        quote,
+        quoteLive: live,
+        quoteProblems: problems,
+        quotedAt: order.quotedAt || null,
+      },
+    });
   })
 );
 
@@ -89,7 +156,9 @@ router.get(
 router.post(
   "/",
   asyncHandler(async (req, res) => {
-    const { profile, plan, billingPeriod, quotedAmount, currency } = req.body || {};
+    // quotedAmount, currency and any price are NOT read: the order is
+    // priced here, from the catalogue (billing.quoteOrder).
+    const { profile, plan, billingPeriod } = req.body || {};
 
     if (!profile || typeof profile !== "object" || Array.isArray(profile)) {
       return res.status(400).json({ error: "A configuration is required." });
@@ -100,15 +169,22 @@ router.post(
     const chosen = await orderablePlan(plan);
     if (!chosen.plan) return res.status(400).json({ error: chosen.problem, fields: { plan: chosen.problem } });
 
+    const period = billingPeriod === "monthly" ? "monthly" : "yearly";
+    const selections = selectionsOrRefused(res, req.body?.selections);
+    if (!selections) return;
+    const quote = await pricedOrRefused(res, { plan: chosen.plan, billingPeriod: period, selections });
+    if (!quote) return;
+
     const order = await Order.create({
       account: req.account._id,
       profile,
       organizationName: String(profile.organizationName),
       plan: chosen.plan.key,
       planName: chosen.plan.name,
-      billingPeriod: billingPeriod === "monthly" ? "monthly" : "yearly",
-      quotedAmount: Number.isFinite(quotedAmount) ? quotedAmount : null,
-      currency: currencyFor(currency, chosen.plan),
+      billingPeriod: period,
+      selections,
+      quotedAmount: quote.plan.perMonth,
+      currency: quote.currency,
       status: "draft",
       history: [{ status: "draft", by: req.account._id, note: "Created" }],
     });
@@ -128,7 +204,7 @@ router.patch(
       return res.status(409).json({ error: "Only a draft can be edited. Contact SILLA to change a submitted order." });
     }
 
-    const { profile, plan, billingPeriod, quotedAmount } = req.body || {};
+    const { profile, plan, billingPeriod } = req.body || {};
     if (profile) {
       if (typeof profile !== "object" || Array.isArray(profile) || !profile.organizationName) {
         return res.status(400).json({ error: "That configuration is not valid." });
@@ -136,16 +212,30 @@ router.patch(
       order.profile = profile;
       order.organizationName = String(profile.organizationName);
     }
+    let chosenPlan = null;
     if (plan && plan !== order.plan) {
       const chosen = await orderablePlan(plan);
       if (!chosen.plan) return res.status(400).json({ error: chosen.problem, fields: { plan: chosen.problem } });
+      chosenPlan = chosen.plan;
       order.plan = chosen.plan.key;
       order.planName = chosen.plan.name;
-      if (!req.body.currency) order.currency = chosen.plan.currency || order.currency;
     }
-    if (req.body.currency !== undefined) order.currency = currencyFor(req.body.currency, { currency: order.currency });
     if (billingPeriod) order.billingPeriod = billingPeriod === "monthly" ? "monthly" : "yearly";
-    if (Number.isFinite(quotedAmount)) order.quotedAmount = quotedAmount;
+    if (req.body?.selections !== undefined) {
+      const selections = selectionsOrRefused(res, req.body.selections);
+      if (!selections) return;
+      order.selections = selections;
+    }
+
+    // Re-priced on every save: a new plan, period or set of choices must
+    // still be orderable — an extra building stops being one on Starter.
+    const pricedPlan = chosenPlan || (await billing.planByKey(order.plan));
+    if (pricedPlan) {
+      const quote = await pricedOrRefused(res, { plan: pricedPlan, billingPeriod: order.billingPeriod, selections: selectionsOf(order) });
+      if (!quote) return;
+      order.quotedAmount = quote.plan.perMonth;
+      order.currency = quote.currency;
+    }
 
     await order.save();
     res.json({ order: summary(order) });
@@ -157,10 +247,10 @@ router.post(
   "/:id/submit",
   asyncHandler(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid order id" });
-    const order = await Order.findOne({ _id: req.params.id, account: req.account._id });
-    if (!order) return res.status(404).json({ error: "Order not found" });
-    if (!ALLOWED_TRANSITIONS[order.status].includes("submitted")) {
-      return res.status(409).json({ error: `An order that is ${order.status} cannot be submitted.` });
+    const draft = await Order.findOne({ _id: req.params.id, account: req.account._id });
+    if (!draft) return res.status(404).json({ error: "Order not found" });
+    if (!ALLOWED_TRANSITIONS[draft.status].includes("submitted")) {
+      return res.status(409).json({ error: `An order that is ${draft.status} cannot be submitted.` });
     }
 
     // Submitting is the commercial commitment, and the email on the
@@ -174,9 +264,41 @@ router.post(
       });
     }
 
-    order.status = "submitted";
-    order.history.push({ status: "submitted", by: req.account._id, note: "Submitted by the buyer" });
-    await order.save();
+    // Priced again, here and now, and frozen: what the order costs is the
+    // catalogue's at the moment of commitment, whatever the draft was
+    // saved at and whatever the browser shows. A plan retired since the
+    // draft, or a choice the catalogue no longer allows, is refused by
+    // field rather than submitted at a price nobody agreed.
+    const chosen = await orderablePlan(draft.plan);
+    if (!chosen.plan) return res.status(400).json({ error: chosen.problem, code: "QUOTE_INVALID", fields: { plan: chosen.problem } });
+    const quote = await pricedOrRefused(res, { plan: chosen.plan, billingPeriod: draft.billingPeriod, selections: selectionsOf(draft) });
+    if (!quote) return;
+
+    const now = new Date();
+    const was = draft.quotedAmount;
+    const notes = ["Submitted by the buyer"];
+    if (Number.isFinite(was) && quote.plan.perMonth != null && was !== quote.plan.perMonth) {
+      notes.push(
+        `the plan was ${formatMoney(was, quote.currency)}/month when saved and ${formatMoney(quote.plan.perMonth, quote.currency)}/month at submission`
+      );
+    }
+    // Conditional on still being a draft, so two submits at once cannot both land.
+    const order = await Order.findOneAndUpdate(
+      { _id: draft._id, status: "draft" },
+      {
+        $set: {
+          status: "submitted",
+          planName: chosen.plan.name,
+          quote: { ...quote, frozenAt: now },
+          quotedAt: now,
+          quotedAmount: quote.plan.perMonth,
+          currency: quote.currency,
+        },
+        $push: { history: { status: "submitted", at: now, by: req.account._id, note: notes.join("; ") } },
+      },
+      { new: true }
+    );
+    if (!order) return res.status(409).json({ error: "This order was submitted a moment ago." });
 
     // The subscription (and its first invoice) exists from the moment of
     // commitment. A billing failure must not un-submit the order — staff
@@ -296,6 +418,9 @@ async function queueDetail(id) {
   return {
     ...summary(order),
     profile: order.profile,
+    selections: selectionsOf(order),
+    quote: order.quote || null,
+    quotedAt: order.quotedAt || null,
     history: (order.history || []).map((h) => ({ status: h.status, at: h.at, note: h.note, by: who(h.by) })),
     notes: (order.notes || [])
       .map((n) => ({ id: n._id.toString(), at: n.at, body: n.body, by: who(n.by) }))

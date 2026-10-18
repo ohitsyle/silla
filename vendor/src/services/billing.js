@@ -45,7 +45,7 @@ import { callDeployment } from "../lib/controlPlane.js";
 import { DEFAULT_PLANS } from "../lib/defaultPlans.js";
 import { DEFAULT_CATALOG } from "../lib/defaultCatalog.js";
 import { FEATURES, LIMITS } from "../lib/planKeys.js";
-import { MAX_QUANTITY } from "../lib/quote.js";
+import { MAX_QUANTITY, buildQuote, describeLine, monthsIn, scaledAdds, vatLabel, vatOn } from "../lib/quote.js";
 import { audit } from "../lib/audit.js";
 import { isUndeliverable, sendEmail } from "./email/index.js";
 import * as mail from "./email/billingTemplates.js";
@@ -652,6 +652,31 @@ export async function updateCatalogItem(key, input, by) {
     });
   }
   return after;
+}
+
+/**
+ * The quote for an order's choices, priced HERE from the plans, the
+ * catalogue and the VAT settings as they stand — the only way an order is
+ * priced. lib/quote.js does the maths, and the configurator runs the same
+ * module to show its live quote, but nothing a browser computes or sends
+ * is trusted: the order route passes only keys, quantities and buy/rent.
+ * Retired items are passed in so that choosing one says it is no longer
+ * offered rather than that it never existed.
+ */
+export async function quoteOrder({ plan, billingPeriod, selections = [] }) {
+  const [plans, items, settings] = await Promise.all([
+    catalogue({ includeRetired: true }),
+    catalogItems({ includeRetired: true }),
+    getSettings(),
+  ]);
+  return buildQuote({
+    plan: planShape(plan),
+    plans,
+    billingPeriod,
+    selections,
+    catalogue: items,
+    vat: { registered: Boolean(settings.business?.vatRegistered), rate: settings.business?.vatRate ?? 0.12 },
+  });
 }
 
 /* ───────────────────────────── settings ───────────────────────────── */

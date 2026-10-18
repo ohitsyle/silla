@@ -4,11 +4,12 @@
  * THIS FILE EXISTS TWICE, byte for byte: vendor/src/lib/quote.js and
  * portal/src/lib/quote.js. The configurator prices a buyer's choices with
  * it as they make them, and the vendor prices them again with it on the
- * server — for a draft when it is saved, and for the frozen quote when an
- * order is submitted, from the catalogue as it stands, never from a price
- * the browser sent. One function, so what the buyer watched add up is
- * what the order records. The vendor's pricing suite fails when the two
- * copies differ: change both or neither. (lib/cells.js is the precedent.)
+ * server — to check a draft when it is saved, and for the frozen quote
+ * when an order is submitted — from the catalogue as it stands, never
+ * from a price the browser sent. One function, so what the buyer watched
+ * add up is what the order records. The vendor's pricing suite fails when
+ * the two copies differ: change both or neither (the precedent is
+ * server/src/lib/cells.js and its client copy).
  *
  * Pure: no database, no clock, no money formatting — callers format with
  * their own one formatter. Every amount is an integer number of MINOR
@@ -17,10 +18,10 @@
  *
  * The shapes in are what the vendor's catalogue serves:
  *   plan  { key, name, currency, prices: { monthly, annualMonthly }, limits }
- *   item  { key, name, category, charge, unit, prices: { oneTime, monthly,
- *           annualMonthly }, minQuantity, maxQuantity, plans, group,
- *           groupDefault, adds, note, waivedOnYearly, alwaysIncluded,
- *           rentalMinimumMonths, active, sort }
+ *   item  { key, name, category, charge, unit, currency, prices: { oneTime,
+ *           monthly, annualMonthly }, minQuantity, maxQuantity, plans,
+ *           group, groupDefault, adds, note, waivedOnYearly,
+ *           alwaysIncluded, rentalMinimumMonths, active, sort }
  *   selection  { key, quantity, mode }   mode is "buy" | "rent" for an item
  *                                        charged buy_or_rent, else null
  */
@@ -43,14 +44,14 @@ export const periodWord = (billingPeriod) => (billingPeriod === "monthly" ? "mon
 /** 0.12 → 1200. A rate is carried as basis points so VAT is an integer sum, rounded once. */
 export const basisPoints = (rate) => Math.round(Number(rate || 0) * 10_000);
 
-/** VAT on an amount in minor units, rounded to the centavo. Shared with the invoices, so a quote and its invoice agree. */
+/** VAT on an amount in minor units, rounded to the centavo. The invoices use it too, so a quote and its invoice agree. */
 export function vatOn(amount, rate) {
   const bp = basisPoints(rate);
   return bp > 0 && Number.isInteger(amount) ? Math.round((amount * bp) / 10_000) : 0;
 }
 
 /** "VAT 12%" */
-export const vatLabel = (rate) => `VAT ${Math.round(basisPoints(rate)) / 100}%`;
+export const vatLabel = (rate) => `VAT ${basisPoints(rate) / 100}%`;
 
 /**
  * A plan's price per month on a billing period — null when it is priced
@@ -86,6 +87,7 @@ function toCount(value) {
 }
 
 const count = (n) => Number(n).toLocaleString("en-PH");
+const unitWord = (item, n) => (n === 1 ? item.unit?.one || "unit" : item.unit?.many || "units");
 
 /**
  * A buyer's choices as the vendor stores them: [{ key, quantity, mode }].
@@ -143,24 +145,28 @@ export function readSelections(raw) {
  *   Campus plan — first year
  *   Extra building — renewal, 1 year
  *   SILLA Kiosk rental — first year (12-month minimum)
+ *   Standard support — included
  *   SILLA Kiosk (purchase)
  *   Onboarding — waived on yearly billing
  */
-export function describeLine({ kind, name, mode = null, minimumMonths = 0, waived = false }, { billingPeriod, occasion = "first" } = {}) {
+export function describeLine(
+  { kind, name, mode = null, minimumMonths = 0, waived = false, included = false },
+  { billingPeriod, occasion = "first" } = {}
+) {
   const per = periodWord(billingPeriod);
   const when = occasion === "renewal" ? `renewal, 1 ${per}` : `first ${per}`;
   if (kind === "plan") return `${name} plan — ${when}`;
   if (kind === "rental") {
     return `${name} rental — ${when}${minimumMonths > 0 && occasion !== "renewal" ? ` (${minimumMonths}-month minimum)` : ""}`;
   }
-  if (kind === "recurring") return `${name} — ${when}`;
+  if (kind === "recurring") return included ? `${name} — included` : `${name} — ${when}`;
   if (waived) return `${name} — waived on yearly billing`;
   if (mode === "buy") return `${name} (purchase)`;
   return name;
 }
 
 /** Per-unit limit raises times a quantity: { buildings: 1 } × 2 → { buildings: 2 }. */
-function scaledAdds(adds, quantity) {
+export function scaledAdds(adds, quantity) {
   const out = {};
   for (const [limit, per] of Object.entries(adds || {})) {
     if (Number.isInteger(per) && per > 0) out[limit] = per * quantity;
@@ -168,10 +174,21 @@ function scaledAdds(adds, quantity) {
   return out;
 }
 
-const order = (line) => [CATEGORY_ORDER[line.category] ?? 9, line.sort ?? 0, line.key, line.mode === "rent" ? 1 : 0];
+/**
+ * Where a line sits: the plan, then everything billed every period
+ * (buildings, rentals, support), then what is paid once (hardware bought,
+ * services) — the order an invoice reads best in.
+ */
+const placeOf = (line) => [
+  line.kind === "plan" ? 0 : line.kind === "one_time" ? 2 : 1,
+  CATEGORY_ORDER[line.category] ?? 9,
+  line.sort ?? 0,
+  line.key,
+  line.mode === "rent" ? 1 : 0,
+];
 function byPlace(a, b) {
-  const x = order(a);
-  const y = order(b);
+  const x = placeOf(a);
+  const y = placeOf(b);
   for (let i = 0; i < x.length; i += 1) {
     if (x[i] < y[i]) return -1;
     if (x[i] > y[i]) return 1;
@@ -189,7 +206,7 @@ const nameList = (names) =>
  * the quote can be ordered; the quote is still returned with problems, so
  * a screen can show what adds up while it says what is wrong.
  *
- * Lines:
+ * Lines, each with `kind`:
  *   plan       the plan, per month and per billed period
  *   recurring  monthly add-ons (extra buildings, support), per unit per month
  *   rental     buy_or_rent items rented, per unit per month, with their minimum term
@@ -203,6 +220,7 @@ const nameList = (names) =>
 export function buildQuote({ plan, plans = [], billingPeriod, selections = [], catalogue = [], vat = null } = {}) {
   const period = billingPeriod === "monthly" ? "monthly" : "yearly";
   const months = monthsIn(period);
+  const currency = plan?.currency || "PHP";
   const problems = {};
   const items = new Map((catalogue || []).map((item) => [item.key, item]));
   const planName = (key) => plans.find((p) => p.key === key)?.name || key;
@@ -211,11 +229,12 @@ export function buildQuote({ plan, plans = [], billingPeriod, selections = [], c
 
   /* ── the plan ── */
   const planRate = planMonthly(plan, period);
+  const shownPlanName = plan?.name || plan?.key || "Plan";
   lines.push({
     key: "plan",
     kind: "plan",
     category: "plan",
-    name: plan?.name || plan?.key || "Plan",
+    name: shownPlanName,
     mode: null,
     quantity: 1,
     unit: { one: "plan", many: "plans" },
@@ -231,7 +250,7 @@ export function buildQuote({ plan, plans = [], billingPeriod, selections = [], c
     included: false,
     waived: false,
     note: "",
-    description: describeLine({ kind: "plan", name: plan?.name || plan?.key || "Plan" }, { billingPeriod: period }),
+    description: describeLine({ kind: "plan", name: shownPlanName }, { billingPeriod: period }),
   });
 
   /* ── what was chosen ── */
@@ -239,6 +258,7 @@ export function buildQuote({ plan, plans = [], billingPeriod, selections = [], c
     const kind = mode === "rent" ? "rental" : "recurring";
     const unitAmount = itemMonthly(item, period);
     const minimumMonths = kind === "rental" ? Number(item.rentalMinimumMonths) || 0 : 0;
+    const included = unitAmount === 0;
     return {
       key: item.key,
       kind,
@@ -257,10 +277,10 @@ export function buildQuote({ plan, plans = [], billingPeriod, selections = [], c
       yearlyRate: itemMonthly(item, "yearly"),
       minimumMonths,
       adds: kind === "recurring" ? scaledAdds(item.adds, quantity) : {},
-      included: unitAmount === 0,
+      included,
       waived: false,
       note: item.note || "",
-      description: describeLine({ kind, name: item.name, minimumMonths }, { billingPeriod: period }),
+      description: describeLine({ kind, name: item.name, minimumMonths, included }, { billingPeriod: period }),
     };
   };
   const oneTimeLine = (item, quantity, mode) => {
@@ -310,6 +330,10 @@ export function buildQuote({ plan, plans = [], billingPeriod, selections = [], c
       problems[field] = `${item.name} isn't available on the ${plan?.name || "chosen"} plan — choose ${nameList(item.plans.map(planName))}.`;
       continue;
     }
+    if ((item.currency || "PHP") !== currency) {
+      problems[field] = `${item.name} is priced in ${item.currency}, and this order is in ${currency}. Ask us to quote it.`;
+      continue;
+    }
 
     let mode = null;
     if (item.charge === "buy_or_rent") {
@@ -319,7 +343,7 @@ export function buildQuote({ plan, plans = [], billingPeriod, selections = [], c
       }
       mode = choice.mode;
     } else if (choice.mode === "rent") {
-      problems[field] = `${item.name} isn't rented — leave out “rent”.`;
+      problems[field] = `${item.name} can't be rented — leave out “rent”.`;
       continue;
     }
     const id = `${item.key}:${mode || ""}`;
@@ -331,14 +355,14 @@ export function buildQuote({ plan, plans = [], billingPeriod, selections = [], c
     const quantity = choice.quantity;
     const min = Number(item.minQuantity) || 1;
     if (quantity < min) {
-      problems[field] = `${item.name}: the minimum is ${count(min)} ${min === 1 ? item.unit?.one || "unit" : item.unit?.many || "units"}.`;
+      problems[field] = `${item.name}: the minimum is ${count(min)} ${unitWord(item, min)}.`;
       continue;
     }
     if (Number.isInteger(item.maxQuantity) && quantity > item.maxQuantity) {
       problems[field] =
         item.maxQuantity === 1
           ? `${item.name}: one per order.`
-          : `${item.name}: up to ${count(item.maxQuantity)} ${item.unit?.many || "units"} on one order.`;
+          : `${item.name}: up to ${count(item.maxQuantity)} ${unitWord(item, item.maxQuantity)} on one order.`;
       continue;
     }
     if (item.group) {
@@ -347,31 +371,29 @@ export function buildQuote({ plan, plans = [], billingPeriod, selections = [], c
         problems[field] = `Choose one ${item.group} option — ${already.name} or ${item.name}, not both.`;
         continue;
       }
-      groups.set(item.group, item);
     }
 
-    const rented = mode === "rent";
-    const monthly = item.charge === "recurring" || rented;
+    const monthly = item.charge === "recurring" || mode === "rent";
     if (monthly ? itemMonthly(item, period) === null : !isAmount(item.prices?.oneTime)) {
       problems[field] = `${item.name} has no price yet — leave it out, or ask us.`;
       continue;
     }
+    if (item.group) groups.set(item.group, item);
     placed.add(id);
     lines.push(monthly ? recurringLine(item, quantity, mode) : oneTimeLine(item, quantity, mode));
   }
 
   /* ── what every order carries ── */
+  const sellable = (item) => item.active !== false && offered(item) && (item.currency || "PHP") === currency;
   for (const item of items.values()) {
-    if (item.active === false || !offered(item)) continue;
-    if (item.alwaysIncluded && !placed.has(`${item.key}:`)) {
-      const priced = item.charge === "recurring" ? itemMonthly(item, period) !== null : isAmount(item.prices?.oneTime);
-      if (!priced) continue;
-      placed.add(`${item.key}:`);
-      lines.push(item.charge === "recurring" ? recurringLine(item, 1, null) : oneTimeLine(item, 1, null));
-    }
+    if (!sellable(item) || !item.alwaysIncluded || placed.has(`${item.key}:`)) continue;
+    const priced = item.charge === "recurring" ? itemMonthly(item, period) !== null : isAmount(item.prices?.oneTime);
+    if (!priced) continue;
+    placed.add(`${item.key}:`);
+    lines.push(item.charge === "recurring" ? recurringLine(item, 1, null) : oneTimeLine(item, 1, null));
   }
   for (const item of items.values()) {
-    if (item.active === false || !offered(item) || !item.group || !item.groupDefault || groups.has(item.group)) continue;
+    if (!sellable(item) || !item.group || !item.groupDefault || groups.has(item.group)) continue;
     if (item.charge !== "recurring" || itemMonthly(item, period) === null) continue;
     groups.set(item.group, item);
     lines.push(recurringLine(item, 1, null));
@@ -395,9 +417,9 @@ export function buildQuote({ plan, plans = [], billingPeriod, selections = [], c
   };
 
   // What billing yearly saves over the same choices billed monthly, across
-  // a first year: twelve months at the monthly rates, against the year at
-  // the yearly ones — plus what is waived on yearly billing. The same
-  // figure whichever period is chosen, so a monthly quote can offer it.
+  // a first year: twelve months at the monthly rates against the year at
+  // the yearly ones, plus what is waived on yearly billing. The same figure
+  // whichever period is chosen, so a monthly quote can offer it.
   const savingRecurring = recurring.reduce(
     (total, l) =>
       Number.isInteger(l.monthlyRate) && Number.isInteger(l.yearlyRate) ? total + l.quantity * (l.monthlyRate - l.yearlyRate) * 12 : total,
@@ -433,12 +455,12 @@ export function buildQuote({ plan, plans = [], billingPeriod, selections = [], c
   return {
     quote: {
       version: QUOTE_VERSION,
-      currency: plan?.currency || "PHP",
+      currency,
       billingPeriod: period,
       months,
       plan: {
         key: plan?.key || "",
-        name: plan?.name || plan?.key || "",
+        name: shownPlanName,
         priced: planPriced,
         perMonth: planRate,
         perPeriod: planPriced ? planRate * months : null,
