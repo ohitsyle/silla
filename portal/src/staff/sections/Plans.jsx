@@ -10,7 +10,8 @@ import { useToast } from "../../lib/toast.jsx";
 import { ROUTES } from "../../lib/useHashRoute.js";
 import { limitPhrase, toMinor } from "../../billing/format.js";
 import { MoneyInput, ToneBadge } from "../../billing/ui.jsx";
-import { BackTo } from "../../billing/console.jsx";
+import { BackTo, FilterTabs } from "../../billing/console.jsx";
+import { CatalogueEditor, CatalogueList } from "./Catalogue.jsx";
 
 /**
  * Staff console — Plans: the catalogue the storefront sells from.
@@ -25,6 +26,10 @@ import { BackTo } from "../../billing/console.jsx";
  * Prices are typed in pesos and stored in centavos. Both empty means
  * "priced with each customer" (Campus): orders on it wait for staff to
  * agree a price before any invoice goes out.
+ *
+ * Beside the plans, the CATALOGUE (Catalogue.jsx): extra buildings,
+ * hardware, services and support — a sibling area of the same section,
+ * `#/staff/plans?view=catalogue`, its items at `#/staff/plans/catalogue:<key>`.
  *
  * plans.manage only; the console hides this section from anyone without it.
  */
@@ -417,6 +422,26 @@ function PlanEditor({ planKey, navigate }) {
   );
 }
 
-export default function Plans({ navigate, id }) {
-  return id ? <PlanEditor planKey={id} navigate={navigate} /> : <PlanList navigate={navigate} />;
+/** The two areas of the section, as tabs whose choice lives in the address. */
+function PlansHome({ navigate, view }) {
+  return (
+    <div className="space-y-5">
+      <FilterTabs
+        label="Plans or catalogue"
+        value={view}
+        onChange={(v) => navigate(v === "catalogue" ? `${ROUTES.staff}/plans?view=catalogue` : `${ROUTES.staff}/plans`, { replace: true })}
+        tabs={[
+          { value: "plans", label: "Plans" },
+          { value: "catalogue", label: "Catalogue" },
+        ]}
+      />
+      {view === "catalogue" ? <CatalogueList navigate={navigate} /> : <PlanList navigate={navigate} />}
+    </div>
+  );
+}
+
+export default function Plans({ navigate, id, query = {} }) {
+  if (id?.startsWith("catalogue:")) return <CatalogueEditor itemKey={id.slice("catalogue:".length)} navigate={navigate} />;
+  if (id) return <PlanEditor planKey={id} navigate={navigate} />;
+  return <PlansHome navigate={navigate} view={query.view === "catalogue" ? "catalogue" : "plans"} />;
 }

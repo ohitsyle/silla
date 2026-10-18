@@ -50,10 +50,14 @@ export const billingApi = {
   voidInvoice: (id, reason) => post(`/api/vendor/billing/invoices/${id}/void`, { reason }),
   dismissClaim: (id, reason) => post(`/api/vendor/billing/invoices/${id}/claim/dismiss`, { reason }),
 
-  /* ── staff: plans and settings ── */
+  /* ── staff: plans, the catalogue and settings ── */
   allPlans: () => request("/api/vendor/plans/all"),
   createPlan: (body) => post("/api/vendor/plans", body),
   updatePlan: (key, body) => patch(`/api/vendor/plans/${key}`, body),
+  /** { catalogue[] } — every item, retired too, with how many live subscriptions carry it. */
+  allCatalogue: () => request("/api/vendor/catalogue/all"),
+  createCatalogItem: (body) => post("/api/vendor/catalogue", body),
+  updateCatalogItem: (key, body) => patch(`/api/vendor/catalogue/${key}`, body),
   settings: () => request("/api/vendor/settings"),
   saveSettings: (body) => put("/api/vendor/settings", body),
 };

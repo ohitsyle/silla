@@ -299,6 +299,7 @@ function InvoiceDetail({ id, navigate, can }) {
                   <tr key={i} className="border-b border-line/[0.07] align-top">
                     <td className="py-2.5 pr-3">
                       <div className="font-semibold">{l.description}</div>
+                      {l.note && <div className="text-xs text-ink-muted">{l.note}</div>}
                       {l.quantity > 1 && (
                         <div className="text-xs text-ink-muted">
                           {l.quantity} × {money(inv, l.unitAmount)}

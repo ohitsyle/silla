@@ -53,11 +53,45 @@ function prettyUrl(url) {
   }
 }
 
+/**
+ * What a period is billed with, line by line: the plan, then each add-on
+ * — extra buildings, rentals, support — at the price agreed for it. The
+ * renewal invoice will say the same.
+ */
+function PeriodLines({ sub }) {
+  const per = PERIOD[sub.billingPeriod] || "period";
+  const money = (n) => formatMoney(n, { currency: sub.price.currency });
+  return (
+    <div className="mt-5 rounded-lg border border-line/[0.08] px-4 py-3">
+      <div className="text-xs font-semibold uppercase tracking-[0.08em] text-ink-muted">What you pay for, each {per}</div>
+      <ul className="mt-2 divide-y divide-line/[0.06] text-sm">
+        <li className="flex items-baseline justify-between gap-3 py-1.5">
+          <span className="font-semibold">{sub.plan.name} plan</span>
+          <span className="tabular-nums">{money(sub.price.amount)}</span>
+        </li>
+        {sub.addOns.map((a) => (
+          <li key={`${a.key}:${a.kind}`} className="flex items-baseline justify-between gap-3 py-1.5">
+            <span>
+              <span className="font-semibold">
+                {a.name}
+                {a.kind === "rental" ? " rental" : ""}
+              </span>
+              {a.quantity > 1 && <span className="ml-1.5 tabular-nums text-ink-muted">× {a.quantity}</span>}
+            </span>
+            <span className="tabular-nums">{a.periodAmount ? money(a.periodAmount) : <span className="text-ink-secondary">Included</span>}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function SubscriptionCard({ sub, vat, onClaim, navigate, delay }) {
   const [dateLabel, dateValue] = keyDate(sub);
+  // The whole period — the plan and every add-on — is what the next invoice asks for.
   const price = sub.priceToBeAgreed || sub.price.amount == null
     ? "To be agreed with you"
-    : `${formatMoney(sub.price.amount, { currency: sub.price.currency })} a ${PERIOD[sub.billingPeriod] || "period"}`;
+    : `${formatMoney(sub.perPeriod ?? sub.price.amount, { currency: sub.price.currency })} a ${PERIOD[sub.billingPeriod] || "period"}`;
   const vatNote = vat?.registered && sub.price.amount != null ? `+ ${Math.round((vat.rate || 0) * 100)}% VAT` : null;
   const accent = sub.tone === "bad" || sub.tone === "warning";
 
@@ -122,6 +156,8 @@ function SubscriptionCard({ sub, vat, onClaim, navigate, delay }) {
           </Fact>
         </div>
 
+        {sub.addOns?.length > 0 && sub.price.amount != null && <PeriodLines sub={sub} />}
+
         <details className="group mt-5">
           <summary className="flex cursor-pointer list-none items-center gap-1.5 text-sm font-semibold text-ink-secondary hover:text-ink-primary">
             <ChevronRight size={15} className="transition-transform group-open:rotate-90" />
@@ -132,6 +168,7 @@ function SubscriptionCard({ sub, vat, onClaim, navigate, delay }) {
               <div key={l.key} className="flex items-center gap-2 text-sm">
                 <Check size={15} strokeWidth={2.6} style={{ color: "rgb(var(--c-state-available))" }} />
                 {limitPhrase(l.key, l.value)}
+                {l.raisedBy > 0 && <span className="text-ink-muted">— {l.raisedBy} added</span>}
               </div>
             ))}
             {sub.includes.features.map((f) => (
