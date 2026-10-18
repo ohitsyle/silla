@@ -12,7 +12,7 @@ import WhenFields from "./WhenFields.jsx";
  * "Select available resource + time; card + PIN confirm; Resource held on
  * confirm." The PIN is asked for again here rather than trusting the
  * session, because spec §5 requires card plus PIN to reserve: a phone
- * left signed in must not be able to spend someone's one reservation.
+ * left signed in must not be able to book on someone's behalf.
  *
  * `target` is what is being booked — one unit, or a room as a whole:
  *   { kind: "unit"|"room", resourceId, unitLabel, title, status }
@@ -20,11 +20,13 @@ import WhenFields from "./WhenFields.jsx";
  * chosen while browsing a room is the time confirmed here.
  *
  * The availability line is the same check the claim makes, run as the
- * time changes. Problems with what the MEMBER typed (the PIN) are only
- * shown once they press the button; nothing is red before they have had
- * a chance to do it.
+ * time changes — including what the member already holds (one booking for
+ * now and one for later, never overlapping), so "you already have one
+ * coming up" arrives before the PIN rather than after it. Problems with
+ * what the MEMBER typed (the PIN) are only shown once they press the
+ * button; nothing is red before they have had a chance to do it.
  */
-export default function ReservePanel({ target, booking, resourceNoun = "resource", policy, holding = false, onReserved }) {
+export default function ReservePanel({ target, booking, resourceNoun = "resource", policy, onReserved }) {
   const [pin, setPin] = useState("");
   const [pinError, setPinError] = useState(null);
   const [error, setError] = useState(null);
@@ -45,7 +47,7 @@ export default function ReservePanel({ target, booking, resourceNoun = "resource
   // "Is it free then?" — debounced, and ignored if the question changed
   // before the answer arrived.
   useEffect(() => {
-    if (holding || !booking.iso) {
+    if (!booking.iso) {
       setAvailability(null);
       return undefined;
     }
@@ -62,7 +64,7 @@ export default function ReservePanel({ target, booking, resourceNoun = "resource
       current = false;
       clearTimeout(timer);
     };
-  }, [target.resourceId, target.unitLabel, booking.iso, holding]);
+  }, [target.resourceId, target.unitLabel, booking.iso]);
 
   // Unavailable or out of service RIGHT NOW is not a matter of timing: the
   // server refuses every window until staff change it, so say so plainly
@@ -113,32 +115,24 @@ export default function ReservePanel({ target, booking, resourceNoun = "resource
 
       {!booking.problem && <AvailabilityLine checking={checking} availability={availability} />}
 
-      {holding ? (
-        <Notice>
-          You already hold a reservation — one at a time. Cancel it above to book this {what} instead.
-        </Notice>
-      ) : (
-        <>
-          <PinField
-            label="Confirm with your 6-digit PIN"
-            name="reserve-pin"
-            value={pin}
-            onChange={(value) => {
-              setPin(value);
-              if (pinError) setPinError(null);
-            }}
-            error={pinError}
-          />
-          {error && <Notice tone="error">{error}</Notice>}
-          <Button type="submit" variant="primary" size="lg" icon={CircleCheck} loading={busy} className="w-full">
-            {isRoom ? "Reserve the whole room" : `Reserve this ${resourceNoun}`}
-          </Button>
-          <p className="text-xs leading-relaxed text-ink-muted">
-            Tap your card within {policy?.gracePeriodMinutes ?? 10} minutes of the start, or the{" "}
-            {what} is released for someone else.
-          </p>
-        </>
-      )}
+      <PinField
+        label="Confirm with your 6-digit PIN"
+        name="reserve-pin"
+        value={pin}
+        onChange={(value) => {
+          setPin(value);
+          if (pinError) setPinError(null);
+        }}
+        error={pinError}
+      />
+      {error && <Notice tone="error">{error}</Notice>}
+      <Button type="submit" variant="primary" size="lg" icon={CircleCheck} loading={busy} className="w-full">
+        {isRoom ? "Reserve the whole room" : `Reserve this ${resourceNoun}`}
+      </Button>
+      <p className="text-xs leading-relaxed text-ink-muted">
+        Tap your card within {policy?.gracePeriodMinutes ?? 10} minutes of the start, or the{" "}
+        {what} is released for someone else.
+      </p>
     </form>
   );
 }
@@ -165,11 +159,15 @@ function AvailabilityLine({ checking, availability }) {
 }
 
 /**
- * The member's one live reservation (RES-3 allows one at a time), with
- * the way out of it. Shown at the top of the panel whatever else is
- * selected, because it is the reason nothing else can be booked —
- * `compact` while a room or unit is the subject, so it stays a reminder
- * rather than pushing what they came for below the fold.
+ * One of the member's reservations, with the way out of it. A member holds
+ * at most one for now and one for later (RES-3), so the panel shows up to
+ * two of these, the current one first — at the top whatever else is
+ * selected, because they are what limits what can be booked next.
+ * `compact` while a room or unit is the subject, so they stay a reminder
+ * rather than pushing what the member came for below the fold.
+ *
+ * `reservation.phase` is "current" (checked in, or its check-in window is
+ * open) or "upcoming" (later today, or another day).
  */
 export function MyReservation({ reservation, resourceNoun = "resource", policy, compact = false, readOnly = false, onCancelled }) {
   const [busy, setBusy] = useState(false);
@@ -177,6 +175,9 @@ export function MyReservation({ reservation, resourceNoun = "resource", policy, 
   const [confirming, setConfirming] = useState(false);
 
   const held = reservation.status === "held";
+  const upcoming = reservation.phase === "upcoming";
+  const heading = !held ? "You're checked in" : upcoming ? "Coming up" : "Your reservation now";
+  const badge = !held ? "Checked in" : upcoming ? "Booked" : "Now";
   const title = reservation.roomId
     ? reservation.resourceLabel
     : `${reservation.resourceLabel || resourceNoun} · ${reservation.unitLabel}`;
@@ -222,7 +223,7 @@ export function MyReservation({ reservation, resourceNoun = "resource", policy, 
         <div className="flex items-center gap-2.5">
           <CalendarCheck size={16} className="shrink-0" style={{ color: "var(--color-accent)" }} />
           <p className="min-w-0 flex-1 truncate text-sm">
-            <span className="text-ink-muted">You hold </span>
+            <span className="text-ink-muted">{!held ? "Checked in at " : upcoming ? "Coming up: " : "Now: "}</span>
             <span className="font-medium">{title}</span>
             <span className="text-ink-muted"> · {formatSpan(reservation.startTime, reservation.endTime)}</span>
           </p>
@@ -251,14 +252,14 @@ export function MyReservation({ reservation, resourceNoun = "resource", policy, 
           <CalendarCheck size={18} />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="text-xs font-medium uppercase tracking-wide text-ink-muted">Your reservation</p>
+          <p className="text-xs font-medium uppercase tracking-wide text-ink-muted">{heading}</p>
           <p className="mt-0.5 truncate font-semibold">{title}</p>
           <p className="mt-1 flex items-center gap-1.5 text-sm text-ink-secondary">
             <Clock size={13} className="shrink-0" />
             {formatSpan(reservation.startTime, reservation.endTime)}
           </p>
         </div>
-        <Badge tone={held ? "reserved" : "occupied"}>{held ? "Booked" : "Checked in"}</Badge>
+        <Badge tone={held ? "reserved" : "occupied"}>{badge}</Badge>
       </div>
 
       {held && !readOnly && (

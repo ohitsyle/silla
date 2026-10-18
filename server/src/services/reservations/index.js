@@ -4,9 +4,14 @@
  * One function decides whether a unit can be held for a window,
  * `checkTarget`, and every caller goes through it:
  *
- *   claimReservation           commits a booking (walk-ins too, via occupancy.js)
+ *   claimReservation           commits a booking (walk-ins share claimInSession,
+ *                              via occupancy.js, so they can cancel in the same step)
  *   reservationAvailability    answers "could I?" for the booking form; writes nothing
  *   assertActivationAvailable  re-checks at check-in, for someone arriving early
+ *
+ * What the MEMBER may hold — one current session, one upcoming booking,
+ * never overlapping — is standing.js, checked in the same transaction as
+ * the unit's own rules.
  *
  * RES-2: a claim commits inside withSpaceTransaction (services/spaces.js),
  * after a real write to the organization's spaceRevision. Read that comment
@@ -37,17 +42,11 @@ import {
   assertWithinMaxStay,
   assertWithinOperatingHours,
   findClosureConflict,
-  findMemberLiveReservation,
 } from "./availability.js";
+import { ReservationError } from "./errors.js";
+import { assertMayHold, graceOf, memberStanding } from "./standing.js";
 
-export class ReservationError extends Error {
-  constructor(message, status = 400, code = null) {
-    super(message);
-    this.name = "ReservationError";
-    this.status = status;
-    this.code = code;
-  }
-}
+export { ReservationError };
 
 /** The organization's own word for a bookable unit — never a hardcoded "seat". */
 const nounOf = (org) => org?.terminology?.resourceNoun || "resource";
@@ -336,7 +335,7 @@ export async function assertActivationAvailable(reservation, org, now, session) 
  * a transaction and without revealing who holds what. Guidance only: the
  * claim checks everything again when it commits.
  */
-export async function reservationAvailability({ organizationId, resourceId, unitLabel, startTime, endTime }) {
+export async function reservationAvailability({ organizationId, resourceId, unitLabel, startTime, endTime, memberId = null }) {
   let window;
   try {
     window = parseWindow(startTime, endTime);
@@ -347,6 +346,14 @@ export async function reservationAvailability({ organizationId, resourceId, unit
   if (!org) throw new ReservationError("Organization not found", 404);
   try {
     await checkTarget({ organizationId, resourceId, unitLabel, ...window, org, newBooking: true });
+    // Asked by a signed-in member, the answer includes what THEY may hold:
+    // "free, but you already have a booking coming up" is the truth, and
+    // finding it out only after typing the PIN is not.
+    if (memberId) {
+      const now = new Date();
+      const standing = await memberStanding(memberId, { organizationId, now, graceMinutes: graceOf(org) });
+      assertMayHold(standing, { ...window, now, graceMinutes: graceOf(org), noun: nounOf(org) });
+    }
     return { bookable: true };
   } catch (err) {
     if (err instanceof ReservationError || err instanceof EntitlementError) {
@@ -470,47 +477,64 @@ function describe({ piece, unit, type }) {
   };
 }
 
+/**
+ * The claim itself, inside a space transaction the CALLER holds: the unit's
+ * rules (checkTarget), then the member's (standing.js), then the insert.
+ *
+ * Split out of claimReservation so a kiosk walk-in can cancel a member's
+ * later booking and seat them in ONE transaction (occupancy.js): if this
+ * throws, the cancellation rolls back with it and nothing is lost.
+ *
+ *   ignoreId  a reservation of the member's being cancelled in the same
+ *             transaction, so the rule does not count it
+ */
+export async function claimInSession({
+  session, org, organizationId, memberId, resourceId, unitLabel, start, end,
+  activate = false, ignoreId = null,
+}) {
+  const member = await User.findOne({ _id: memberId, organization: organizationId, active: true })
+    .session(session);
+  if (!member) throw new ReservationError("Account not found", 404);
+
+  const targetLabel = await checkTarget({
+    organizationId, resourceId, unitLabel, start, end, org, session, newBooking: true,
+  });
+
+  // RES-3: one current session, one upcoming booking, never overlapping.
+  // Read with the transaction's session, after its spaceRevision write, so
+  // a member racing themselves is serialised like any other conflict.
+  const now = new Date();
+  const standing = await memberStanding(memberId, { organizationId, now, graceMinutes: graceOf(org), session });
+  assertMayHold(standing, { start, end, activate, now, graceMinutes: graceOf(org), noun: nounOf(org), ignoreId });
+
+  const [created] = await Reservation.create(
+    [{
+      organization: organizationId,
+      member: memberId,
+      resource: resourceId,
+      targetLabel,
+      unitLabel: String(unitLabel),
+      startTime: start,
+      endTime: end,
+      status: activate ? "active" : "held",
+      checkedInAt: activate ? start : null,
+      checkInMethod: org.identity?.checkInMethod === "qr" ? "qr" : "rfid",
+    }],
+    { session }
+  );
+  return { reservation: created, targetLabel };
+}
+
 /** RES-1 / RES-2 / RES-3 — claim a unit for a window, atomically. */
 export async function claimReservation({
   organizationId, memberId, resourceId, unitLabel, startTime, endTime,
   io = null, activate = false, notify = true,
 }) {
   const { start, end } = parseWindow(startTime, endTime);
-  let targetLabel;
 
-  const reservation = await transact(organizationId, async (session, org) => {
-    const member = await User.findOne({ _id: memberId, organization: organizationId, active: true })
-      .session(session);
-    if (!member) throw new ReservationError("Account not found", 404);
-
-    targetLabel = await checkTarget({
-      organizationId, resourceId, unitLabel, start, end, org, session, newBooking: true,
-    });
-    if (await findMemberLiveReservation(memberId, session)) {
-      throw new ReservationError(
-        "You already have an active reservation. Check out or cancel it first.",
-        409,
-        "ALREADY_HOLDING"
-      );
-    }
-
-    const [created] = await Reservation.create(
-      [{
-        organization: organizationId,
-        member: memberId,
-        resource: resourceId,
-        targetLabel,
-        unitLabel: String(unitLabel),
-        startTime: start,
-        endTime: end,
-        status: activate ? "active" : "held",
-        checkedInAt: activate ? start : null,
-        checkInMethod: org.identity?.checkInMethod === "qr" ? "qr" : "rfid",
-      }],
-      { session }
-    );
-    return created;
-  });
+  const { reservation, targetLabel } = await transact(organizationId, (session, org) =>
+    claimInSession({ session, org, organizationId, memberId, resourceId, unitLabel, start, end, activate })
+  );
 
   // Committed — now, and only now, tell the map and the member. Neither
   // may turn a booking that exists into an error response.

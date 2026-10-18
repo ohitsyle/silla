@@ -32,14 +32,8 @@ export function findConflicts({ resource, unitLabel, startTime, endTime, exclude
   return Reservation.find(query).session(session);
 }
 
-/**
- * RES-3 — self-only, one active reservation at a time. "Active" here
- * means any live reservation, held or checked in: a member holding a
- * seat for later has used up their one slot.
- */
-export function findMemberLiveReservation(memberId, session = null) {
-  return Reservation.findOne({ member: memberId, status: { $in: LIVE_STATUSES } }).session(session);
-}
+// RES-3 — what a member may hold at once (one current session, one
+// upcoming booking, never overlapping) is standing.js.
 
 /**
  * RES-7 — the organization's status gate. "limited" still permits

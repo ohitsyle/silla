@@ -22,7 +22,9 @@
  * fine: nothing asks it the time — every timestamp is written by the API.
  *
  * Test-only. Nothing under src/ imports it, and without SILLA_TEST_CLOCK it
- * does nothing at all.
+ * does nothing at all — unless a suite calls keepClear() below, which moves
+ * that suite's own clock away from midnight when its scenarios need hours
+ * of today that the real hour does not have.
  */
 const OFFSET_KEY = "SILLA_TEST_CLOCK_OFFSET_MS";
 
@@ -37,8 +39,12 @@ if (wanted && process.env[OFFSET_KEY] === undefined) {
 
 const offset = Number(process.env[OFFSET_KEY] || 0);
 
-if (offset) {
-  const RealDate = Date;
+/**
+ * Moves this process's Date and Date.now by `by` milliseconds, on top of
+ * whatever clock is already in place.
+ */
+function shiftClock(by) {
+  const RealDate = globalThis.Date;
 
   // A function rather than a subclass, so that:
   //   - `Date()` called without `new` still returns a string, as it must;
@@ -48,15 +54,48 @@ if (offset) {
   // Only the zero-argument form is moved: `new Date(ms)` and
   // `new Date("2026-…")` describe a specific moment and must stay exact.
   function MovedDate(...args) {
-    if (!new.target) return new RealDate(RealDate.now() + offset).toString();
-    return args.length ? new RealDate(...args) : new RealDate(RealDate.now() + offset);
+    if (!new.target) return new RealDate(RealDate.now() + by).toString();
+    return args.length ? new RealDate(...args) : new RealDate(RealDate.now() + by);
   }
   MovedDate.prototype = RealDate.prototype;
   // Mongoose maps `{ type: Date }` to its date type BY NAME, so a schema
   // compiled after this loads must still see a function called "Date".
   Object.defineProperty(MovedDate, "name", { value: "Date" });
-  MovedDate.now = () => RealDate.now() + offset;
+  MovedDate.now = () => RealDate.now() + by;
   MovedDate.parse = RealDate.parse;
   MovedDate.UTC = RealDate.UTC;
   globalThis.Date = MovedDate;
+}
+
+if (offset) shiftClock(offset);
+
+/**
+ * For a suite whose scenarios need a stretch of TODAY around "now" — a
+ * walk-in needs half an hour before closing, a booking "later today" needs
+ * a later today — and that therefore cannot run as itself at 23:50, however
+ * its windows are written.
+ *
+ * When less than `ahead` hours remain before midnight, or less than
+ * `behind` have passed since it, the clock of THIS process is moved to
+ * `hhmm` and the suite says so. At any other time it runs on the clock it
+ * was given — the real one, or SILLA_TEST_CLOCK's — so a run at 03:00 is
+ * a run at 03:00. Call it before connecting to the database or starting
+ * the API, so everything in the process shares one clock from the start.
+ *
+ * @returns null, or the time the clock was moved to
+ */
+export function keepClear({ ahead = 6, behind = 2, hhmm = "12:00" } = {}) {
+  const now = new Date();
+  const midnight = new Date(now);
+  midnight.setHours(0, 0, 0, 0);
+  const next = new Date(midnight);
+  next.setDate(next.getDate() + 1);
+  const hour = 3_600_000;
+  if (next - now >= ahead * hour && now - midnight >= behind * hour) return null;
+
+  const [hours, minutes] = hhmm.split(":").map(Number);
+  const target = new Date(now);
+  target.setHours(hours, minutes, 0, 0);
+  shiftClock(target.getTime() - now.getTime());
+  return hhmm;
 }

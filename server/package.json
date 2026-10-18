@@ -21,7 +21,8 @@
     "test:clean": "node tests/cleanup.mjs",
     "email:test": "node src/scripts/emailTest.js",
     "email:preview": "node src/scripts/emailPreview.js",
-    "test:spaces": "node tests/cells.test.mjs && node tests/spaces.test.mjs",
+    "test:spaces": "node tests/cells.test.mjs && node tests/spaces.test.mjs && node tests/day.test.mjs",
+    "test:day": "node tests/day.test.mjs",
     "test:isolated": "node tests/isolated.mjs",
     "test:cells": "node tests/cells.test.mjs"
   },

@@ -51,7 +51,8 @@ export default function MapPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
   const [live, setLive] = useState(false);
-  const [myReservation, setMyReservation] = useState(null);
+  /** What the member holds: their current session and their next booking, at most one of each (RES-3). */
+  const [holding, setHolding] = useState([]);
   /** What the member has picked to book: one unit, or a room as a whole. */
   const [selection, setSelection] = useState(null);
   const [hovered, setHovered] = useState(null);
@@ -147,9 +148,12 @@ export default function MapPage() {
   }, []);
   useFloorSocket(floorId, applyStatus);
 
-  // RES-3: the member's one live reservation.
+  // RES-3: one current session and one upcoming booking at most.
   const loadMine = useCallback(() => {
-    api.myReservations().then((data) => setMyReservation(data.live)).catch(() => setMyReservation(null));
+    api
+      .myReservations()
+      .then((data) => setHolding(data.holding || (data.live ? [data.live] : [])))
+      .catch(() => setHolding([]));
   }, []);
   useEffect(loadMine, [loadMine]);
 
@@ -232,9 +236,9 @@ export default function MapPage() {
     status: selection.kind === "unit" ? liveUnitStatus(current, status, selection) : status[selection.resourceId]?.[0],
   };
   const selectionRoom = selection?.roomId ? rooms.find((room) => room.id === selection.roomId) : null;
-  const panelOpen = !dismissed && Boolean(selection || focusedRoom || myReservation);
+  const panelOpen = !dismissed && Boolean(selection || focusedRoom || holding.length);
 
-  let title = "Your reservation";
+  let title = holding.length > 1 ? "Your reservations" : "Your reservation";
   let subtitle;
   if (selection?.kind === "room") {
     title = "Book the whole room";
@@ -285,9 +289,9 @@ export default function MapPage() {
                   Live
                 </span>
               )}
-              {dismissed && (focusedRoom || myReservation) && (
+              {dismissed && (focusedRoom || holding.length > 0) && (
                 <Button size="sm" onClick={() => setDismissed(false)}>
-                  {focusedRoom ? "What can I book?" : "My reservation"}
+                  {focusedRoom ? "What can I book?" : holding.length > 1 ? "My reservations" : "My reservation"}
                 </Button>
               )}
               <Button
@@ -358,9 +362,10 @@ export default function MapPage() {
         defaultFolded={!selection && !focusedRoom}
       >
         <div className="space-y-5">
-          {myReservation && (
+          {holding.map((reservation) => (
             <MyReservation
-              reservation={myReservation}
+              key={reservation.id}
+              reservation={reservation}
               resourceNoun={resourceNoun}
               policy={org?.policy}
               compact={Boolean(selection || focusedRoom)}
@@ -370,7 +375,7 @@ export default function MapPage() {
                 loadLayout(floorId, { silent: true });
               }}
             />
-          )}
+          ))}
 
           {paused && (target || focusedRoom) ? (
             <BookingPaused orgName={org?.name} resourceNoun={resourceNoun} ended={entitlements.status === "cancelled"} />
@@ -381,7 +386,6 @@ export default function MapPage() {
               booking={booking}
               resourceNoun={resourceNoun}
               policy={org?.policy}
-              holding={Boolean(myReservation)}
               onReserved={() => {
                 setSelection(null);
                 loadMine();

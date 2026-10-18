@@ -20,11 +20,9 @@ import Reservation from "../../models/Reservation.js";
 import Resource from "../../models/Resource.js";
 import { ReservationError, announceUnitStatus, assertActivationAvailable, claimReservation, transact } from "./index.js";
 import { assertWithinOperatingHours } from "./availability.js";
+import { EARLIEST_CHECK_IN_MINUTES, graceOf, memberStanding } from "./standing.js";
 
 const MINUTE = 60_000;
-
-/** How early a member may tap in for a booking (OCC-1). */
-const EARLIEST_CHECK_IN_MINUTES = 15;
 
 /**
  * OCC-6 — duplicate taps within 5 seconds are ignored, so an accidental
@@ -89,7 +87,7 @@ export async function checkIn({ organizationId, memberId, io = null }) {
     if (!held) throw new ReservationError("No reservation to check in to.", 404, "NO_RESERVATION");
 
     const now = new Date();
-    const graceMinutes = org.policy?.gracePeriodMinutes ?? 10;
+    const graceMinutes = graceOf(org);
     if (held.startTime - now > EARLIEST_CHECK_IN_MINUTES * MINUTE) {
       throw new ReservationError(
         `You can check in from ${EARLIEST_CHECK_IN_MINUTES} minutes before the reservation starts.`,
@@ -103,6 +101,17 @@ export async function checkIn({ organizationId, memberId, io = null }) {
       held.status = "expired";
       await held.save({ session });
       return { reservation: held, expired: true, graceMinutes };
+    }
+
+    // One current session (RES-3): nobody is checked in two places at
+    // once. The tap checks a member out before it checks them in, so this
+    // only ever refuses a race — two taps, or a walk-in landing at the
+    // same moment — and the transaction makes sure one of them sees the other.
+    const elsewhere = await Reservation.exists({
+      organization: organizationId, member: memberId, status: "active", _id: { $ne: held._id },
+    }).session(session);
+    if (elsewhere) {
+      throw new ReservationError("You're already checked in somewhere else. Check out there first.", 409, "ALREADY_HOLDING");
     }
 
     await assertActivationAvailable(held, org, now, session);
@@ -168,12 +177,16 @@ export async function assignWalkIn({ organizationId, memberId, resourceId, unitL
   const outsideHours = assertWithinOperatingHours(org, now, now);
   if (outsideHours) throw new ReservationError(outsideHours, 409, "OPERATING_HOURS");
 
-  const standing = await getMemberSession(memberId);
-  if (standing.kind !== "none") {
+  // One current session (RES-3). A booking for LATER does not stop a
+  // walk-in now — the walk-in simply ends before it starts (below). The
+  // claim enforces the whole rule again inside its transaction.
+  const standing = await memberStanding(memberId, { organizationId, now, graceMinutes: graceOf(org) });
+  const [current] = standing.current;
+  if (current) {
     throw new ReservationError(
-      standing.kind === "active"
+      current.status === "active"
         ? "You're already checked in. Tap out first."
-        : "You already have a reservation. Check into that instead.",
+        : "You already have a reservation for now. Check into that instead.",
       409,
       "ALREADY_HOLDING"
     );
@@ -188,7 +201,10 @@ export async function assignWalkIn({ organizationId, memberId, resourceId, unitL
     throw new ReservationError("That resource isn't available.", 409, "UNAVAILABLE");
   }
 
-  const end = walkInEnd(org, now);
+  // Never into the member's own next booking: one place now, one later.
+  let end = walkInEnd(org, now);
+  const [next] = standing.upcoming;
+  if (next && next.startTime < end) end = new Date(next.startTime);
   // Walk-ins share the same committed room/unit claim path as online bookings.
   return claimReservation({
     organizationId, memberId, resourceId, unitLabel,

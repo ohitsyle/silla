@@ -1,6 +1,7 @@
 import { Router } from "express";
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
+import Organization from "../models/Organization.js";
 import Reservation from "../models/Reservation.js";
 import Resource from "../models/Resource.js";
 import Room from "../models/Room.js";
@@ -15,6 +16,7 @@ import {
   roomBookingOptions,
 } from "../services/reservations/index.js";
 import { LIVE_STATUSES } from "../services/reservations/availability.js";
+import { graceOf, memberStanding } from "../services/reservations/standing.js";
 import { SpaceError } from "../services/spaces.js";
 
 const router = Router();
@@ -29,8 +31,11 @@ const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, ne
  *
  * The PIN re-confirmation is deliberate (spec §5: "Reserving a resource
  * requires card plus PIN"). A live session alone isn't enough to spend
- * someone's one active reservation — an unattended logged-in phone
- * shouldn't be able to book on their behalf.
+ * someone's bookings — an unattended logged-in phone shouldn't be able to
+ * book on their behalf.
+ *
+ * The website books for now AND for later; the kiosk only ever seats
+ * people from now on (checkin.routes.js).
  */
 router.post(
   "/",
@@ -73,8 +78,9 @@ router.post(
  * GET /api/reservations/availability?resourceId&unitLabel&startTime&endTime
  *
  * "Could I book this?" for the booking form — the same rules as the
- * committed claim, answered without revealing who holds what. Guidance
- * only: the claim checks everything again when it commits.
+ * committed claim, including what the caller already holds (RES-3),
+ * answered without revealing who holds what. Guidance only: the claim
+ * checks everything again when it commits.
  */
 router.get("/availability", requireAuth, asyncHandler(async (req, res) => {
   const { resourceId, unitLabel, startTime, endTime } = req.query;
@@ -82,7 +88,7 @@ router.get("/availability", requireAuth, asyncHandler(async (req, res) => {
     return res.status(400).json({ error: "Choose a valid resource and unit." });
   }
   res.json(await reservationAvailability({
-    organizationId: req.user.organizationId, resourceId, unitLabel, startTime, endTime,
+    organizationId: req.user.organizationId, resourceId, unitLabel, startTime, endTime, memberId: req.user.id,
   }));
 }));
 
@@ -106,19 +112,39 @@ router.get("/rooms/:roomId/options", requireAuth, asyncHandler(async (req, res) 
 
 /**
  * GET /api/reservations/mine
- * The caller's live reservation plus recent history (spec §9, RES-3).
+ *
+ * What the caller holds (RES-3) plus recent history (spec §9):
+ *
+ *   holding   their current session and their upcoming booking — at most
+ *             one of each — earliest first, each with its `phase`
+ *   live      the first of those, for clients written when a member could
+ *             hold only one
+ *
+ * A held booking whose grace has run out is left out: it can no longer
+ * be checked into, and the minute worker is about to expire it.
  */
 router.get(
   "/mine",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const live = await Reservation.findOne({ member: req.user.id, status: { $in: LIVE_STATUSES } });
+    const org = await Organization.findById(req.user.organizationId).select("policy");
+    const standing = await memberStanding(req.user.id, {
+      organizationId: req.user.organizationId, graceMinutes: graceOf(org),
+    });
     const history = await Reservation.find({ member: req.user.id, status: { $nin: LIVE_STATUSES } })
       .sort({ startTime: -1 })
       .limit(20);
 
+    const holding = [
+      ...standing.current.map((reservation) => ({ reservation, phase: "current" })),
+      ...standing.upcoming.map((reservation) => ({ reservation, phase: "upcoming" })),
+    ];
+    const shaped = [];
+    for (const { reservation, phase } of holding) shaped.push({ ...(await withResource(reservation)), phase });
+
     res.json({
-      live: live ? await withResource(live) : null,
+      holding: shaped,
+      live: shaped[0] || null,
       history: history.map(shape),
     });
   })
