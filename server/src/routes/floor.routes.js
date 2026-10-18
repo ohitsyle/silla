@@ -17,6 +17,8 @@ import Reservation from "../models/Reservation.js";
 import User from "../models/User.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { LIVE_STATUSES } from "../services/reservations/availability.js";
+import { floorDay } from "../services/reservations/day.js";
+import { ReservationError } from "../services/reservations/errors.js";
 import { EntitlementError, assertWithinLimit } from "../services/entitlements.js";
 
 const router = Router();
@@ -29,12 +31,16 @@ const router = Router();
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 /**
- * Staff-only fields (overstay, spec §10/§14) are included when the
- * caller presents a staff token and omitted otherwise. This is not
- * requireAuth: the map itself is readable for the kiosk and home preview.
- * Staff-only details still require an active account in this organization.
+ * Who is looking, if anyone: { id, role } for an active account in this
+ * organization, else null.
+ *
+ * Staff-only fields (overstay, spec §10/§14; who holds a booking) are
+ * included when the caller presents a staff token and omitted otherwise.
+ * This is not requireAuth: the map itself is readable for the kiosk and
+ * home preview. Staff-only details still require an active account in this
+ * organization, and a member's own bookings are recognised by the id.
  */
-async function readRole(req, organizationId) {
+async function readViewer(req, organizationId) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
   if (!token) return null;
@@ -42,11 +48,13 @@ async function readRole(req, organizationId) {
     const claims = jwt.verify(token, process.env.JWT_SECRET);
     if (String(claims.organizationId) !== String(organizationId)) return null;
     const account = await User.findOne({ _id: claims.id, organization: organizationId, active: true }).select("role");
-    return account?.role || null;
+    return account ? { id: String(account._id), role: account.role } : null;
   } catch {
     return null;
   }
 }
+
+const readRole = async (req, organizationId) => (await readViewer(req, organizationId))?.role || null;
 
 const isStaff = (role) => role === "staff" || role === "superadmin";
 
@@ -191,6 +199,36 @@ router.get("/:id/layout", asyncHandler(async (req, res) => {
     status,
     viewerIsStaff: staff,
   });
+}));
+
+/**
+ * GET /api/floors/:id/day?date=YYYY-MM-DD
+ *
+ * The rest of the picture the layout's `status` cannot give: for one date
+ * (today when none is given), every bookable unit's booked stretches from
+ * opening to closing, whether it is free now and until when, and a day
+ * state — free, partial, full, or closed — for the map's ring. Rooms'
+ * whole-room targets are included, keyed by their resource id like the
+ * layout's `status`. See services/reservations/day.js.
+ *
+ * Readable like the layout: the kiosk has no session. A signed-in member's
+ * own bookings come back marked `mine`; only staff and superadmins of this
+ * organization see who holds the rest.
+ */
+router.get("/:id/day", asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  if (!mongoose.isValidObjectId(id)) return res.status(400).json({ error: "Invalid floor id" });
+  const floor = await Floor.findById(id).select("site");
+  if (!floor) return res.status(404).json({ error: "Floor not found" });
+  const site = await Site.findById(floor.site).select("organization");
+  if (!site) return res.status(404).json({ error: "Floor's site not found" });
+  const viewer = await readViewer(req, site.organization);
+  try {
+    res.json(await floorDay({ floorId: id, date: req.query.date, viewer }));
+  } catch (err) {
+    if (err instanceof ReservationError) return res.status(err.status).json({ error: err.message, code: err.code });
+    throw err;
+  }
 }));
 
 /* ══════════════════════════════════════════════════════════════════

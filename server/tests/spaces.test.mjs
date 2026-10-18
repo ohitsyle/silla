@@ -466,9 +466,10 @@ try {
   );
   const emissions = [];
   await syncUnitStatus(room.resourceId, "room", { io: recordingIo(emissions) });
+  const streamed = emissions.filter((emission) => emission.event === "resource:status");
   check(
     "whole-room occupancy streams to every room level",
-    emissions.length === 2 && emissions.every((emission) => emission.value.units[0].status === "occupied")
+    streamed.length === 2 && streamed.every((emission) => emission.value.units[0].status === "occupied")
   );
   const dashboard = await call("/api/admin/dashboard");
   check("room target never inflates the physical resource count", dashboard.metrics.total === 5 && dashboard.metrics.occupied === 5);
@@ -491,9 +492,10 @@ try {
   const dueEmissions = [];
   await refreshDueHolds({ io: recordingIo(dueEmissions) });
   check("scheduled room holds become reserved when their window starts", (await Resource.findById(room.resourceId)).units[0].status === "reserved");
+  const dueStreamed = dueEmissions.filter((emission) => emission.event === "resource:status");
   check(
     "scheduled room status reaches every level automatically",
-    dueEmissions.length === 2 && dueEmissions.every((emission) => emission.value.units[0].status === "reserved")
+    dueStreamed.length === 2 && dueStreamed.every((emission) => emission.value.units[0].status === "reserved")
   );
   await cancelReservation({ reservationId: due._id });
 

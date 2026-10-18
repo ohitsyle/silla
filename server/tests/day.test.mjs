@@ -38,10 +38,12 @@ const { default: Site } = await import("../src/models/Site.js");
 const { default: User } = await import("../src/models/User.js");
 const { default: ResourceType } = await import("../src/models/ResourceType.js");
 const { default: Reservation } = await import("../src/models/Reservation.js");
+const { default: Resource } = await import("../src/models/Resource.js");
 const {
   cancelReservation, claimReservation, reservationAvailability,
 } = await import("../src/services/reservations/index.js");
 const { assignWalkIn, checkIn, checkOut } = await import("../src/services/reservations/occupancy.js");
+const { floorDay } = await import("../src/services/reservations/day.js");
 const { MINUTE } = await import("./helpers.mjs");
 
 let passed = 0;
@@ -110,7 +112,11 @@ try {
   const token = (user) =>
     jwt.sign({ id: String(user._id), organizationId: String(user.organization), role: user.role }, process.env.JWT_SECRET);
 
+  // Stands in for Socket.io and records what would have been streamed.
+  const emitted = [];
+  const recordingIo = (into = emitted) => ({ to: (channel) => ({ emit: (event, value) => into.push({ channel, event, value }) }) });
   const app = createApp();
+  app.set("io", recordingIo());
   server = await new Promise((resolve) => {
     const listening = app.listen(0, "127.0.0.1", () => resolve(listening));
   });
@@ -294,6 +300,199 @@ try {
     both.filter((r) => r.status === "fulfilled").length === 1 && (await live(fay)).length === 1
   );
   await release(fay);
+
+  /* ─────────────── the day: every unit's bookings, one read per floor ─────────────── */
+
+  const dayOf = (floor, user = null, date = null) =>
+    call(`/api/floors/${floor.id}/day${date ? `?date=${date}` : ""}`, "GET", null, 200, user);
+  const unitIn = (day, piece, unitLabel = "1") => day.units[piece.id].find((unit) => unit.label === unitLabel);
+  const roomIn = (day, room) => day.units[room.resourceId][0];
+  const near = (a, b) => Math.abs(new Date(a) - new Date(b)) < 1000;
+  const hhmm = (date) => `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  const setHours = (open, close) => Organization.updateOne({ _id: org._id }, { "policy.operatingHours": { open, close } });
+
+  settle();
+  const quiet = await dayOf(ground, ben);
+  check(
+    "a unit with nothing booked is free the rest of the day, and free now with no limit before closing",
+    unitIn(quiet, solos[8]).day === "free" && unitIn(quiet, solos[8]).fraction === 0 &&
+      unitIn(quiet, solos[8]).freeNow && unitIn(quiet, solos[8]).freeUntil === null && quiet.isToday
+  );
+
+  const anaDesk = await claim(ana, solos[0], 120, 60);
+  const asOther = await dayOf(ground, ben);
+  const seen = unitIn(asOther, solos[0]);
+  check(
+    "a booking later today makes the unit's day partial, and free until it starts",
+    seen.day === "partial" && seen.freeNow && near(seen.freeUntil, anaDesk.startTime) && seen.freeUntilReason === "booking" &&
+      seen.fraction > 0 && seen.fraction < 1 && seen.blocks.length === 1 && near(seen.blocks[0].start, anaDesk.startTime)
+  );
+  check(
+    "another member sees the time booked, never who booked it",
+    !("holder" in seen.blocks[0]) && !seen.blocks[0].mine && !JSON.stringify(asOther).includes("Holder")
+  );
+  const asAna = await dayOf(ground, ana);
+  const asStaff = await dayOf(ground, staff);
+  const anonymous = await dayOf(ground, null);
+  check("the member who booked it sees it marked as theirs", unitIn(asAna, solos[0]).blocks[0].mine === true && !("holder" in unitIn(asAna, solos[0]).blocks[0]));
+  check("staff see who holds it", unitIn(asStaff, solos[0]).blocks[0].holder === "Member0 Holder");
+  check("the kiosk, signed out, sees neither", !JSON.stringify(anonymous).includes("Holder") && !JSON.stringify(anonymous).includes('"mine"'));
+  await release(ana);
+
+  // Full: closing in 90 minutes, and nothing useful left between bookings.
+  settle();
+  const closing = new Date(Math.ceil(at(90).getTime() / MINUTE) * MINUTE);
+  await setHours("00:00", hhmm(closing));
+  const minutesToClose = (closing - anchor) / MINUTE;
+  await claim(ben, solos[1], 0, minutesToClose);
+  await claim(cai, solos[2], 0, minutesToClose - 20);
+  await claim(dee, solos[3], 0, minutesToClose - 45);
+  const nearClose = await dayOf(ground, eli);
+  check("a unit booked until closing is full", unitIn(nearClose, solos[1]).day === "full" && !unitIn(nearClose, solos[1]).freeNow);
+  check(
+    "a unit with only twenty minutes left free is full too — nothing that short can be booked",
+    unitIn(nearClose, solos[2]).day === "full" && unitIn(nearClose, solos[2]).fraction < 1
+  );
+  check("a unit with forty-five minutes left free is partial", unitIn(nearClose, solos[3]).day === "partial");
+  await release(ben);
+  await release(cai);
+  await release(dee);
+
+  await setHours("00:00", hhmm(new Date(anchor - 2 * MINUTE)));
+  const afterHours = await dayOf(ground, eli);
+  check(
+    "after closing there is nothing left to book, and that is not the same as booked",
+    Object.values(afterHours.units).flat().every((unit) => unit.day === "closed" || unit.day === null) &&
+      Object.values(afterHours.units).flat().every((unit) => !unit.freeNow)
+  );
+  await setHours("00:00", "23:59");
+
+  // Closures: time nobody can book, shown as itself.
+  settle();
+  const lunch = await call("/api/admin/closures", "POST", {
+    startTime: at(60).toISOString(), endTime: at(120).toISOString(), reason: "Fire drill",
+  }, 201);
+  const withClosure = await dayOf(ground, eli);
+  check(
+    "a closure later today is listed with its reason, and a free unit is free until it",
+    withClosure.closures.length === 1 && withClosure.closures[0].reason === "Fire drill" &&
+      unitIn(withClosure, solos[8]).day === "free" && near(unitIn(withClosure, solos[8]).freeUntil, at(60)) &&
+      unitIn(withClosure, solos[8]).freeUntilReason === "closure"
+  );
+  check(
+    "adding a closure tells every floor's map its day changed",
+    ["floor:" + ground.id, "floor:" + upper.id].every((channel) => emitted.some((e) => e.event === "floor:day" && e.channel === channel))
+  );
+  await call(`/api/admin/closures/${lunch.closure.id}`, "DELETE");
+  const restOfDay = await call("/api/admin/closures", "POST", {
+    startTime: at(-10).toISOString(), endTime: new Date(new Date(anchor).setHours(23, 59, 0, 0)).toISOString(), reason: "Power cut",
+  }, 201);
+  const shut = await dayOf(ground, eli);
+  check(
+    "a closure for the rest of today leaves every unit closed, not booked",
+    Object.values(shut.units).flat().every((unit) => unit.day === "closed" || unit.day === null)
+  );
+  await call(`/api/admin/closures/${restOfDay.closure.id}`, "DELETE");
+
+  // Rooms: a whole-room booking blocks everything inside, on every level...
+  settle();
+  emitted.length = 0;
+  const wholeStudio = await claimReservation({
+    organizationId: org._id, memberId: eli._id, resourceId: studio.resourceId, unitLabel: "room",
+    startTime: at(200), endTime: at(260), io: recordingIo(),
+  });
+  const groundDay = await dayOf(ground, fay);
+  const upperDay = await dayOf(upper, fay);
+  const blockedBy = (unit) => unit.blocks.some((b) => b.kind === "room" && near(b.start, wholeStudio.startTime));
+  check(
+    "a whole-room booking blocks every unit inside the room, on all its levels",
+    blockedBy(unitIn(groundDay, studioDesk, "1")) && blockedBy(unitIn(groundDay, studioDesk, "2")) &&
+      blockedBy(unitIn(upperDay, balconyDesk, "1")) && unitIn(upperDay, balconyDesk, "2").day === "partial"
+  );
+  check("and nothing outside it", unitIn(groundDay, solos[0]).blocks.length === 0);
+  check("the room itself reads as booked for that time", roomIn(groundDay, studio).blocks.some((b) => b.kind === "room") && roomIn(groundDay, studio).day === "partial");
+  check(
+    "a room booking tells every level's map its day changed",
+    ["floor:" + ground.id, "floor:" + upper.id].every((channel) => emitted.some((e) => e.event === "floor:day" && e.channel === channel))
+  );
+  await release(eli);
+
+  // ...and a booking of one unit inside blocks booking the room whole.
+  settle();
+  emitted.length = 0;
+  const balconySeat = await claimReservation({
+    organizationId: org._id, memberId: fay._id, resourceId: balconyDesk.id, unitLabel: "1",
+    startTime: at(60), endTime: at(90), io: recordingIo(),
+  });
+  const studioFromGround = roomIn(await dayOf(ground, eli), studio);
+  check(
+    "a desk booked on the balcony blocks the whole room, seen from the floor below",
+    studioFromGround.blocks.some((b) => b.kind === "inside" && near(b.start, balconySeat.startTime)) && studioFromGround.day === "partial"
+  );
+  check(
+    "a booking inside a room tells both of the room's floors",
+    ["floor:" + ground.id, "floor:" + upper.id].every((channel) => emitted.some((e) => e.event === "floor:day" && e.channel === channel))
+  );
+  await release(fay);
+
+  const boardDay = await dayOf(ground, fay);
+  check(
+    "units in a room booked only whole have no day of their own; the room does",
+    unitIn(boardDay, boardDesk, "1").bookable === false && unitIn(boardDay, boardDesk, "1").reason === "with-room" &&
+      unitIn(boardDay, boardDesk, "1").day === null && roomIn(boardDay, boardroom).bookable && roomIn(boardDay, boardroom).day === "free"
+  );
+
+  // An overstay: still checked in after the booking ended.
+  settle();
+  const overstayer = members[20];
+  await Reservation.create({
+    organization: org._id, member: overstayer._id, resource: solos[6].id, unitLabel: "1", targetLabel: "Focus desk · 1",
+    startTime: at(-60), endTime: at(-5), status: "active", checkedInAt: at(-60),
+  });
+  const overstayDay = await dayOf(ground, fay);
+  const overstayStaff = await dayOf(ground, staff);
+  const stayed = unitIn(overstayDay, solos[6]);
+  check(
+    "an overstay keeps blocking the slot it is in until they check out",
+    !stayed.freeNow && stayed.blocks.length === 1 && new Date(stayed.blocks[0].end) > new Date() && stayed.day !== "free"
+  );
+  check(
+    "staff see it flagged as an overstay; members do not",
+    unitIn(overstayStaff, solos[6]).blocks[0].overstay === true && !("overstay" in stayed.blocks[0])
+  );
+  await checkOut({ memberId: overstayer._id });
+  check("checking out frees it at once", unitIn(await dayOf(ground, fay), solos[6]).freeNow);
+
+  await call(`/api/admin/resources/${solos[7].id}/units/1`, "PATCH", { status: "unavailable" }, 200, staff);
+  const closedUnit = unitIn(await dayOf(ground, fay), solos[7]);
+  check("a unit staff have closed has no day to book", !closedUnit.bookable && closedUnit.reason === "unavailable" && closedUnit.day === null);
+  await call(`/api/admin/resources/${solos[7].id}/units/1`, "PATCH", { status: "available" }, 200, staff);
+
+  const tomorrow = new Date(anchor);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowKey = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, "0")}-${String(tomorrow.getDate()).padStart(2, "0")}`;
+  const nextDay = await dayOf(ground, fay, tomorrowKey);
+  check(
+    "another day is read from opening to closing, with nothing free 'now'",
+    !nextDay.isToday && nextDay.date === tomorrowKey && new Date(nextDay.opensAt).getDate() === tomorrow.getDate() &&
+      Object.values(nextDay.units).flat().every((unit) => !unit.freeNow) && unitIn(nextDay, solos[8]).day === "free"
+  );
+  const badDate = await req(`/api/floors/${ground.id}/day?date=2026-02-31`, "GET", null, fay);
+  check("a date that does not exist is refused", badDate.status === 400 && badDate.body.code === "BAD_DATE");
+
+  // One reservation query for the whole floor, however many units it has.
+  const find = Reservation.find;
+  let finds = 0;
+  Reservation.find = function counted(...args) {
+    finds += 1;
+    return find.apply(this, args);
+  };
+  try {
+    await floorDay({ floorId: ground.id, viewer: { id: String(fay._id), role: "member" } });
+  } finally {
+    Reservation.find = find;
+  }
+  check(`a floor's day takes one reservation query, not one per unit (${finds})`, finds === 1);
 
   console.log(`\n${passed} day checks passed; isolated database discarded.`);
 } finally {

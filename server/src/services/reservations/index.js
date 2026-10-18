@@ -31,7 +31,7 @@ import Resource from "../../models/Resource.js";
 import ResourceType from "../../models/ResourceType.js";
 import Room from "../../models/Room.js";
 import User from "../../models/User.js";
-import { emitUnitStatus } from "../realtime.js";
+import { emitDayChanged, emitUnitStatus } from "../realtime.js";
 import { sendEmail } from "../email/index.js";
 import { reservationConfirmedEmail } from "../email/templates.js";
 import { EntitlementError, assertFeature } from "../entitlements.js";
@@ -110,9 +110,13 @@ export async function syncUnitStatus(resourceId, unitLabel, { io } = {}) {
   }
 
   const units = resource.units.map((u) => ({ status: u.status, serviceStatus: u.serviceStatus, overstay: u.overstay }));
-  for (const floorId of await floorsShowing(resource)) {
+  const showing = await floorsShowing(resource);
+  for (const floorId of showing) {
     emitUnitStatus(io, { floorId, resourceId: String(resource._id), units });
   }
+  // Every change that refreshes a unit's status also changes its day —
+  // including the ones that change no colour, like a booking for later.
+  if (io) emitDayChanged(io, await floorsOfDay(resource, showing));
   return resource;
 }
 
@@ -154,6 +158,17 @@ async function deriveUnitStatus(resourceId, unit) {
   else if (live.length) status = "reserved";
   else if (unit.status === "unavailable") status = "unavailable"; // set by staff, kept
   return { status, overstay: Boolean(active?.overstay) };
+}
+
+/**
+ * The floors whose DAY a booking of this resource changes: the floors that
+ * draw it, and — for a piece inside a room — every level of that room,
+ * since the room's whole-room timeline counts what is booked inside it.
+ */
+async function floorsOfDay(resource, showing) {
+  if (resource.kind === "room") return showing;
+  const room = await roomForResource(resource);
+  return [...showing, ...(room?.levels.map((level) => String(level.floor)) || [])];
 }
 
 /** The floors whose map draws this resource: every level of a room, else its own floor. */
