@@ -200,12 +200,22 @@ export function yearlySavingOf(plan) {
   return Number.isInteger(monthly) && Number.isInteger(annual) && annual < monthly ? (monthly - annual) * 12 : null;
 }
 
+/**
+ * What billing yearly saves on one plan, as a whole percentage, worked out
+ * in integers: 1 − 6000/7500 is 0.19999… in floating point, and a floor
+ * of that advertised 19% for a plan that saves exactly 20%.
+ */
+export function yearlyPercent(plan) {
+  const monthly = plan?.prices?.monthly;
+  const annual = plan?.prices?.annualMonthly;
+  if (!Number.isInteger(monthly) || !Number.isInteger(annual) || monthly <= 0) return null;
+  return Math.max(0, Math.floor(((monthly - annual) * 100) / monthly));
+}
+
 /** The yearly saving to advertise, as a whole percentage — the smallest across priced plans, so it is never overstated. */
 export function yearlySaving(plans) {
-  const savings = plans
-    .filter((p) => Number.isInteger(p.prices?.monthly) && Number.isInteger(p.prices?.annualMonthly) && p.prices.monthly > 0)
-    .map((p) => Math.floor((1 - p.prices.annualMonthly / p.prices.monthly) * 100));
-  return savings.length ? Math.max(0, Math.min(...savings)) : 0;
+  const savings = plans.map(yearlyPercent).filter((n) => n != null);
+  return savings.length ? Math.min(...savings) : 0;
 }
 
 /**

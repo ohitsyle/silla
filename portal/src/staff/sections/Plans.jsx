@@ -344,7 +344,7 @@ function PlanEditor({ planKey, navigate }) {
                   </div>
                   {monthlyMinor > 0 && annualMinor != null && annualMinor < monthlyMinor && (
                     <p className="mt-3 text-xs text-ink-muted">
-                      Yearly saves {Math.floor((1 - annualMinor / monthlyMinor) * 100)}% — the storefront shows the smallest saving across
+                      Yearly saves {Math.floor(((monthlyMinor - annualMinor) * 100) / monthlyMinor)}% — the storefront shows the smallest saving across
                       plans.
                     </p>
                   )}
