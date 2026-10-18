@@ -19,16 +19,23 @@
  * map the one before it left behind.
  */
 import assert from "node:assert/strict";
-import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
-import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
-import { MongoMemoryReplSet } from "mongodb-memory-server";
+import { LATE_EVENING, keepClear } from "./clock.mjs";
 
 process.env.JWT_SECRET = "isolated-space-tests-only";
 process.env.NODE_ENV = "test";
 
 const SERVE = process.argv.includes("--serve");
+
+// Its walk-ins need half an hour of the day left (tests/clock.mjs
+// LATE_EVENING). A browser preview keeps the real clock, as its browser
+// does. Before the database driver loads: it keeps the clock it finds.
+const movedClock = SERVE ? null : keepClear(LATE_EVENING);
+if (movedClock) console.log(`(clock moved to ${movedClock}: a walk-in needs half an hour of the day left)`);
+const { default: mongoose } = await import("mongoose");
+const { Server } = await import("socket.io");
+const { MongoMemoryReplSet } = await import("mongodb-memory-server");
 /** The preview API's port: 4010 unless --port=<n> says otherwise. */
 const PREVIEW_PORT = Number(process.argv.find((arg) => arg.startsWith("--port="))?.slice("--port=".length)) || 4010;
 /** The fixed id the browser preview's VITE_DEMO_ORG_ID points at. */

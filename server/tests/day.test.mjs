@@ -21,17 +21,18 @@
  * it runs on the clock it is given, SILLA_TEST_CLOCK's included.
  */
 import assert from "node:assert/strict";
-import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { MongoMemoryReplSet } from "mongodb-memory-server";
 import { keepClear } from "./clock.mjs";
 
 process.env.JWT_SECRET = "isolated-day-tests-only";
 process.env.NODE_ENV = "test";
 
+// Before the database driver loads: it keeps the clock it finds.
 const moved = keepClear({ ahead: 6, behind: 2 });
 if (moved) console.log(`(this suite's clock moved to ${moved}: its scenarios need hours of today on both sides of now)`);
+const { default: mongoose } = await import("mongoose");
+const { MongoMemoryReplSet } = await import("mongodb-memory-server");
 
 const { createApp } = await import("../src/app.js");
 const { default: Organization } = await import("../src/models/Organization.js");
@@ -43,9 +44,11 @@ const { default: Resource } = await import("../src/models/Resource.js");
 const {
   cancelReservation, claimReservation, reservationAvailability,
 } = await import("../src/services/reservations/index.js");
-const { assignWalkIn, checkIn, checkOut } = await import("../src/services/reservations/occupancy.js");
+const {
+  __resetTapHistory, assignWalkIn, checkIn, checkOut, walkInAtKiosk,
+} = await import("../src/services/reservations/occupancy.js");
 const { floorDay } = await import("../src/services/reservations/day.js");
-const { MINUTE } = await import("./helpers.mjs");
+const { MINUTE, HOUR } = await import("./helpers.mjs");
 
 let passed = 0;
 function check(name, value) {
@@ -494,6 +497,204 @@ try {
     Reservation.find = find;
   }
   check(`a floor's day takes one reservation query, not one per unit (${finds})`, finds === 1);
+
+  /* ─────────────── the kiosk: what a tap does, and how long a walk-in lasts ─────────────── */
+
+  // The kiosk has no session: identity comes from the card every time.
+  // Duplicate-tap protection is per card and 5 seconds, so it is reset
+  // before each deliberate tap. Requests stay under the per-address limit
+  // (30 a minute); the individual limits are checked on the service.
+  const kiosk = {
+    tap: (member) => {
+      __resetTapHistory();
+      return req("/api/checkin/tap", "POST", { organizationId: String(org._id), credential: member.cardUid }, null);
+    },
+    walkIn: (member, piece, extra = {}, unitLabel = "1") =>
+      req("/api/checkin/walkin", "POST", {
+        organizationId: String(org._id), credential: member.cardUid, resourceId: piece.id, unitLabel, ...extra,
+      }, null),
+  };
+  const atKiosk = (member, piece, extra = {}, unitLabel = "1") =>
+    walkInAtKiosk({ organizationId: org._id, memberId: member._id, resourceId: piece.id, unitLabel, ...extra });
+  const [k1, k2, k3, k4, k5, k6, k7, k8, k9, k10, k11, k12, k13] = members.slice(21, 34);
+
+  // 1. Checked in already: the tap checks them out.
+  settle();
+  await walkIn(k1, solos[0]);
+  check("a member checked in is checked out by the tap", (await kiosk.tap(k1)).body.next === "checked-out");
+
+  // 2. A booking whose check-in window is open: the tap checks them in.
+  settle();
+  await claim(k2, solos[1], 5, 60);
+  const checkedIn = await kiosk.tap(k2);
+  check("a booking in its check-in window is checked into", checkedIn.body.next === "checked-in" && Boolean(checkedIn.body.reservation.checkedInAt));
+  await release(k2);
+
+  // 3. A booking later today: the kiosk asks rather than acts.
+  settle();
+  const k3Later = await claim(k3, solos[2], 150, 60);
+  const prompt = await kiosk.tap(k3);
+  check(
+    "a booking later today makes the tap ask what to do with it",
+    prompt.body.next === "later-today" && prompt.body.upcoming.id === String(k3Later._id) &&
+      near(prompt.body.upcoming.startTime, k3Later.startTime) && !("reservation" in prompt.body)
+  );
+  check(
+    "keeping it is offered, ending the stay as the booking starts, and saying so",
+    prompt.body.options.keep.available && near(prompt.body.options.keep.latestEnd, k3Later.startTime) &&
+      prompt.body.options.keep.limit === "own" && /leave by/.test(prompt.body.options.keep.sentence)
+  );
+  check("cancelling it is offered without that limit", prompt.body.options.cancel.available && prompt.body.options.cancel.limit !== "own");
+  check("'not now' needs nothing: the tap itself changed nothing", (await Reservation.findById(k3Later._id)).status === "held" && (await live(k3)).length === 1);
+
+  // (a) cancels and seats in ONE transaction: a refused walk-in loses nothing.
+  await walkIn(k4, solos[3]);
+  const intoOccupied = await kiosk.walkIn(k3, solos[3], { cancelReservationId: String(k3Later._id) });
+  check(
+    "option (a) into a unit someone is using is refused, and the later booking survives",
+    intoOccupied.status === 409 && (await Reservation.findById(k3Later._id)).status === "held"
+  );
+  const pastLimit = await kiosk.walkIn(k3, solos[4], { cancelReservationId: String(k3Later._id), minutes: 300 });
+  check(
+    "option (a) refused AFTER its cancellation was written still keeps the booking — it rolls back with the refusal",
+    pastLimit.status === 409 && pastLimit.body.code === "LIMIT" && (await Reservation.findById(k3Later._id)).status === "held"
+  );
+  const swapped = await kiosk.walkIn(k3, solos[4], { cancelReservationId: String(k3Later._id) });
+  check(
+    "option (a) checks them in now and cancels the later booking together",
+    swapped.status === 201 && swapped.body.cancelled?.id === String(k3Later._id) &&
+      (await Reservation.findById(k3Later._id)).status === "cancelled" &&
+      (await Reservation.findById(swapped.body.reservation.id)).status === "active"
+  );
+  check("and the stay is not cut short by the booking it gave up", new Date(swapped.body.reservation.endTime) > k3Later.startTime);
+  await release(k3);
+  await release(k4);
+
+  // (b) keeps it: the stay ends as the booking begins.
+  settle();
+  const k5Later = await claim(k5, solos[5], 120, 60);
+  const kept = await kiosk.walkIn(k5, solos[6]);
+  check(
+    "option (b) checks them in now, keeps the booking, and ends the stay as it starts",
+    kept.status === 201 && near(kept.body.reservation.endTime, k5Later.startTime) && kept.body.limit?.limit === "own" &&
+      /leave by/.test(kept.body.limit.sentence) && (await Reservation.findById(k5Later._id)).status === "held"
+  );
+  await release(k5);
+
+  // (b) needs half an hour before the booking.
+  settle();
+  await claim(k6, solos[7], 20, 60);
+  const tooClose = await kiosk.tap(k6);
+  check(
+    "option (b) is withheld with fewer than 30 minutes before the booking, saying why",
+    tooClose.body.next === "later-today" && !tooClose.body.options.keep.available &&
+      tooClose.body.options.keep.code === "TOO_CLOSE" && /check in to it from/.test(tooClose.body.options.keep.reason)
+  );
+  const keepAnyway = await kiosk.walkIn(k6, solos[8]);
+  check("and refused by the server, whatever the kiosk sends", keepAnyway.status === 409 && keepAnyway.body.code === "TOO_CLOSE");
+  await release(k6);
+
+  // 4. No booking: a walk-in, up to the shortest limit.
+  settle();
+  const fresh = await kiosk.tap(k7);
+  check(
+    "a member with no booking is offered a walk-in, with how long it could last",
+    fresh.body.next === "walk-in" && fresh.body.walkIn.available && fresh.body.walkIn.limit === "max-stay" && !("reservation" in fresh.body)
+  );
+  const overMax = await kiosk.walkIn(k7, solos[9], { minutes: 300 });
+  check("a stay past the maximum is refused, not quietly shortened", overMax.status === 409 && overMax.body.code === "LIMIT" && /up to 4 hours/.test(overMax.body.error));
+  const oddLength = await kiosk.walkIn(k7, solos[9], { minutes: 45 });
+  check("a length that is not in half hours is refused", oddLength.status === 400 && oddLength.body.code === "BAD_LENGTH");
+  const anHour = await kiosk.walkIn(k7, solos[9], { minutes: 60 });
+  check(
+    "an hour from now is an hour from now",
+    anHour.status === 201 && Math.abs(new Date(anHour.body.reservation.endTime) - new Date(anHour.body.reservation.checkedInAt) - HOUR) < 2000
+  );
+  await release(k7);
+  const noLength = await atKiosk(k7, solos[9]);
+  check("without a length, as long as allowed: the maximum stay", noLength.limit === "max-stay" && Math.abs(noLength.reservation.endTime - noLength.reservation.checkedInAt - 4 * HOUR) < 2000);
+  await release(k7);
+
+  // The unit's next booking.
+  settle();
+  await claim(k8, solos[10], 100, 60);
+  const untilBooked = await atKiosk(k9, solos[10]);
+  check("a walk-in ends when the unit's next booking starts, and says so", near(untilBooked.reservation.endTime, at(100)) && untilBooked.limit === "booking");
+  await release(k9);
+  await refused("asking to stay past the unit's next booking is refused", () => atKiosk(k9, solos[10], { minutes: 120 }), "LIMIT");
+  const fitsBefore = await atKiosk(k9, solos[10], { minutes: 90 });
+  check("a stay that fits before it is taken as asked", fitsBefore.limit === null && near(fitsBefore.reservation.endTime, new Date(+fitsBefore.reservation.checkedInAt + 90 * MINUTE)));
+  await release(k9);
+  await release(k8);
+  settle();
+  await claim(k8, solos[11], 20, 30);
+  await refused("a unit booked within half an hour can't be walked into", () => atKiosk(k9, solos[11]), "TOO_SHORT");
+  await release(k8);
+
+  // A whole room ends when anything inside it is booked.
+  settle();
+  await claim(k8, balconyDesk, 90, 60);
+  const wholeWalk = await atKiosk(k9, { id: studio.resourceId }, {}, "room");
+  check("a whole room's walk-in ends when something inside it is booked, on any level", near(wholeWalk.reservation.endTime, at(90)) && wholeWalk.limit === "booking");
+  await release(k9);
+  await release(k8);
+
+  // Closing time.
+  settle();
+  const shutsAt = new Date(Math.ceil(at(75).getTime() / MINUTE) * MINUTE);
+  await setHours("00:00", hhmm(shutsAt));
+  const atClosing = await atKiosk(k10, solos[12]);
+  check("a walk-in ends at closing time, and says so", near(atClosing.reservation.endTime, shutsAt) && atClosing.limit === "closing");
+  await release(k10);
+  await refused("a stay past closing is refused", () => atKiosk(k10, solos[12], { minutes: 120 }), "LIMIT");
+  await setHours("00:00", hhmm(new Date(anchor - 2 * MINUTE)));
+  const afterClose = await kiosk.tap(k10);
+  check(
+    "after closing, the tap says walk-ins have finished",
+    afterClose.body.next === "walk-in" && !afterClose.body.walkIn.available && /finished for today/.test(afterClose.body.walkIn.reason)
+  );
+  check("and a walk-in sent anyway is refused", (await kiosk.walkIn(k10, solos[12])).status === 409);
+  await setHours("00:00", "23:59");
+
+  // A booking on another day does not prompt.
+  settle();
+  const tomorrowAt10 = new Date(anchor);
+  tomorrowAt10.setDate(tomorrowAt10.getDate() + 1);
+  tomorrowAt10.setHours(10, 0, 0, 0);
+  await claimReservation({
+    organizationId: org._id, memberId: k11._id, resourceId: solos[13].id, unitLabel: "1",
+    startTime: tomorrowAt10, endTime: new Date(+tomorrowAt10 + HOUR),
+  });
+  const otherDay = await kiosk.tap(k11);
+  check(
+    "a booking on another day doesn't prompt: they simply walk in",
+    otherDay.body.next === "walk-in" && otherDay.body.walkIn.available && otherDay.body.walkIn.limit !== "own"
+  );
+  await release(k11);
+
+  // Two kiosks giving up the same booking at the same moment.
+  settle();
+  const contested = await claim(k12, solos[14], 150, 60);
+  const racedSwap = await Promise.all([
+    kiosk.walkIn(k12, solos[15], { cancelReservationId: String(contested._id) }),
+    kiosk.walkIn(k12, solos[16], { cancelReservationId: String(contested._id) }),
+  ]);
+  check(
+    "two kiosks racing option (a) seat the member once and cancel the booking once",
+    racedSwap.filter((r) => r.status === 201).length === 1 && (await live(k12)).length === 1 &&
+      (await Reservation.findById(contested._id)).status === "cancelled"
+  );
+  await release(k12);
+
+  // The day view's "free until" and the walk-in agree, unit by unit.
+  settle();
+  await claim(k13, solos[17], 110, 60);
+  const kioskDay = await dayOf(ground, null);
+  const promised = unitIn(kioskDay, solos[17]).freeUntil;
+  const given = await atKiosk(k9, solos[17]);
+  check("the kiosk's map and the walk-in agree on how long a unit is free", near(promised, given.reservation.endTime));
+  await release(k9);
+  await release(k13);
 
   console.log(`\n${passed} day checks passed; isolated database discarded.`);
 } finally {

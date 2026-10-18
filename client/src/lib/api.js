@@ -120,11 +120,19 @@ export const api = {
   resendRegistrationCode: (registrationId) =>
     request(`/api/registration/resend`, { method: "POST", body: JSON.stringify({ registrationId }) }),
 
-  // OCC-2 — kiosk walk-in assignment.
-  assignWalkIn: (organizationId, credential, resourceId, unitLabel) =>
+  // OCC-2 — kiosk walk-in assignment. `stay` is { minutes } in half hours,
+  // or { untilLimit: true } for as long as allowed; `cancelReservationId`
+  // gives up the member's booking later today in the same step. The server
+  // works out every limit itself and refuses a stay that runs past one.
+  assignWalkIn: (organizationId, credential, resourceId, unitLabel, { minutes, untilLimit, cancelReservationId } = {}) =>
     request(`/api/checkin/walkin`, {
       method: "POST",
-      body: JSON.stringify({ organizationId, credential, resourceId, unitLabel }),
+      body: JSON.stringify({
+        organizationId, credential, resourceId, unitLabel,
+        ...(minutes ? { minutes } : {}),
+        ...(untilLimit ? { untilLimit: true } : {}),
+        ...(cancelReservationId ? { cancelReservationId } : {}),
+      }),
     }),
 
   // RES-1..RES-5 — the reservation engine.

@@ -274,6 +274,8 @@ export default function SpaceMap({
   windowView = null,
   selectableOnly = false,
   touchTargets = false,
+  /** The tallest the map may grow when it keeps the floor's shape (not `fill`). */
+  maxHeight = "68vh",
 }) {
   const svgRef = useRef(null);
   const pointers = useRef(new Map());
@@ -682,7 +684,7 @@ export default function SpaceMap({
           ? undefined
           : {
               aspectRatio: `${extent.w + PAD * 2} / ${extent.h + PAD * 2}`,
-              maxHeight: "68vh",
+              maxHeight,
               minHeight: 260,
             }
       }
@@ -855,9 +857,12 @@ export default function SpaceMap({
                   const hit = touchTargets ? hitArea(r, type.footprint) : null;
                   // A unit blocked by its room opens the room: that is where
                   // the booking that matters is made (or why it can't be).
+                  // Without a room handler (the kiosk), it chooses the room
+                  // itself, as tapping the room's floor does.
                   const choose = () => {
                     if (room && !management) {
-                      onSelectRoom?.(room);
+                      if (onSelectRoom) onSelectRoom(room);
+                      else if (room.bookingMode !== "individual") onSelectUnit?.(roomUnit(room, status));
                       return;
                     }
                     onSelectUnit?.({

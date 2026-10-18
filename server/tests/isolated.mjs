@@ -12,15 +12,27 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import http from "node:http";
-import mongoose from "mongoose";
-import { Server } from "socket.io";
-import { MongoMemoryReplSet } from "mongodb-memory-server";
+import { LATE_EVENING, keepClear } from "./clock.mjs";
 const serve = process.argv.includes("--serve");
+// The last half hour of a day takes no walk-ins, so the suites' walk-ins
+// move to 23:20 then — every process alike, the API here and the seeder
+// and the suites it starts (see tests/clock.mjs). A browser preview keeps
+// the real clock: the browser beside it does.
+//
+// Before the database driver is loaded, not after: it keeps the clock it
+// found, and one moved underneath it dropped the connection at its first
+// heartbeat, ten seconds in.
+const moved = serve ? null : keepClear(LATE_EVENING);
+if (moved) console.log(`(clock moved to ${moved} for this run: a walk-in needs half an hour of the day left)`);
+const clockImport = ["--import", new URL("./clock.mjs", import.meta.url).href];
+const { default: mongoose } = await import("mongoose");
+const { Server } = await import("socket.io");
+const { MongoMemoryReplSet } = await import("mongodb-memory-server");
 const suiteArgs = process.argv.slice(2).filter((arg) => arg !== "--serve");
 const replica = await MongoMemoryReplSet.create({ replSet: { count: 1 }, binary: { version: "8.2.6" } });
 let server, io;
 const run = async (args, env, capture = false) => {
-  const child = spawn(process.execPath, args, { cwd: new URL("..", import.meta.url), env, stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit" });
+  const child = spawn(process.execPath, [...(moved ? clockImport : []), ...args], { cwd: new URL("..", import.meta.url), env, stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit" });
   let output = "";
   if (capture) { child.stdout.on("data", (d) => output += d); child.stderr.on("data", (d) => output += d); }
   const [code] = await once(child, "exit");

@@ -82,6 +82,9 @@ if (offset) shiftClock(offset);
  * a run at 03:00. Call it before connecting to the database or starting
  * the API, so everything in the process shares one clock from the start.
  *
+ * The move is written into the environment like SILLA_TEST_CLOCK's, so a
+ * child process that imports this file (`--import`) keeps the same clock.
+ *
  * @returns null, or the time the clock was moved to
  */
 export function keepClear({ ahead = 6, behind = 2, hhmm = "12:00" } = {}) {
@@ -96,6 +99,17 @@ export function keepClear({ ahead = 6, behind = 2, hhmm = "12:00" } = {}) {
   const [hours, minutes] = hhmm.split(":").map(Number);
   const target = new Date(now);
   target.setHours(hours, minutes, 0, 0);
-  shiftClock(target.getTime() - now.getTime());
+  const by = target.getTime() - now.getTime();
+  shiftClock(by);
+  process.env[OFFSET_KEY] = String(Number(process.env[OFFSET_KEY] || 0) + by);
   return hhmm;
 }
+
+/**
+ * The suites' walk-ins need half an hour of the day left: the product takes
+ * no walk-in, and no booking, shorter than that, and none crosses midnight.
+ * In the last 35 minutes of a day the system and spatial suites move to
+ * 23:20 — still late at night, where the midnight bugs these clocks exist
+ * for live, but with a walk-in's half hour to spare.
+ */
+export const LATE_EVENING = { ahead: 35 / 60, behind: 0, hhmm: "23:20" };

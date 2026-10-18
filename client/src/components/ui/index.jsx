@@ -91,7 +91,8 @@ export function Segmented({ options, value, onChange, size = "md", className }) 
             aria-pressed={selected}
             className={cx(
               "relative rounded-md font-medium transition-colors duration-fast ease-out flex items-center gap-2",
-              size === "sm" ? "h-7 px-2.5 text-xs" : "h-8 px-3 text-sm",
+              // lg: a wall screen's tabs, sized for a finger at arm's length.
+              size === "sm" ? "h-7 px-2.5 text-xs" : size === "lg" ? "h-11 px-4 text-base" : "h-8 px-3 text-sm",
               selected ? "" : "text-ink-secondary hover:text-ink-primary"
             )}
             style={selected ? { color: "var(--color-accent-ink)" } : undefined}

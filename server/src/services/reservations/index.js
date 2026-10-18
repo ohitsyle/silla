@@ -207,20 +207,8 @@ async function checkTarget({
 }) {
   assertPolicy(org, { start, end, maxStayStart });
 
-  const resource = await Resource.findOne({ _id: resourceId, organization: organizationId }).session(session);
-  if (!resource) throw new ReservationError("Resource not found", 404);
-  const unit = resource.units.find((candidate) => candidate.label === String(unitLabel));
-  if (!unit) throw new ReservationError("That unit does not exist.", 404);
-  const type = await ResourceType.findById(resource.resourceType).session(session);
-  assertUnitUsable(unit, type, org, { isRoom: resource.kind === "room" });
+  const { room, scope, floor, label } = await resolveTarget({ organizationId, resourceId, unitLabel, org, session, newBooking });
 
-  const room = await roomForResource(resource, session);
-  if (resource.kind === "room" && !room) throw new ReservationError("Room not found", 404);
-  const scope = room
-    ? await roomScope({ resource, unitLabel, room, org, session, newBooking })
-    : { resource: resource._id, unitLabel: String(unitLabel) };
-
-  const floor = await Floor.findById(resource.floor).session(session);
   const closure = await findClosureConflict(
     { organizationId, siteId: floor?.site, startTime: start, endTime: end },
     session
@@ -237,7 +225,51 @@ async function checkTarget({
     );
   }
 
-  return resource.kind === "room" ? room.name : `${type.label} · ${unitLabel}`;
+  return label;
+}
+
+/**
+ * The half of checkTarget that is about WHAT is being booked, not when:
+ * the unit exists and can be booked, its room's rules allow it, and the
+ * `scope` its bookings must not overlap (a seat and its room; a room and
+ * everything inside it). Shared with nextBookingStart, so a walk-in's
+ * "free until" is measured against exactly what the claim will check.
+ */
+async function resolveTarget({ organizationId, resourceId, unitLabel, org, session = null, newBooking = false }) {
+  const resource = await Resource.findOne({ _id: resourceId, organization: organizationId }).session(session);
+  if (!resource) throw new ReservationError("Resource not found", 404);
+  const unit = resource.units.find((candidate) => candidate.label === String(unitLabel));
+  if (!unit) throw new ReservationError("That unit does not exist.", 404);
+  const type = await ResourceType.findById(resource.resourceType).session(session);
+  assertUnitUsable(unit, type, org, { isRoom: resource.kind === "room" });
+
+  const room = await roomForResource(resource, session);
+  if (resource.kind === "room" && !room) throw new ReservationError("Room not found", 404);
+  const scope = room
+    ? await roomScope({ resource, unitLabel, room, org, session, newBooking })
+    : { resource: resource._id, unitLabel: String(unitLabel) };
+
+  const floor = await Floor.findById(resource.floor).session(session);
+  return { resource, room, scope, floor, label: resource.kind === "room" ? room.name : `${type.label} · ${unitLabel}` };
+}
+
+/**
+ * When the next booking that would stop `unitLabel` on `resourceId` being
+ * used starts, after `after` — by the claim's own rules (resolveTarget):
+ * for a seat in a room, the room's own bookings count; for a room, anything
+ * booked inside it. Null when nothing is booked later. Also returns the
+ * floor's site, for the closures that apply.
+ *
+ * A booking already under way is not "next" — the claim refuses a walk-in
+ * into it as a conflict, which is the honest answer.
+ */
+export async function nextBookingStart({ organizationId, resourceId, unitLabel, after, org, session = null }) {
+  const { scope, floor } = await resolveTarget({ organizationId, resourceId, unitLabel, org, session, newBooking: true });
+  const next = await Reservation.findOne({ ...scope, status: { $in: LIVE_STATUSES }, startTime: { $gt: after } })
+    .sort({ startTime: 1 })
+    .select("startTime")
+    .session(session);
+  return { start: next?.startTime || null, siteId: floor?.site || null };
 }
 
 /** RES-5 / RES-7 — the organization's own rules, which apply to every unit alike. */
