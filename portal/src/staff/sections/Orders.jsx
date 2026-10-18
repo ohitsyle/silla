@@ -16,6 +16,8 @@ import { ROUTES, withQuery } from "../../lib/useHashRoute.js";
 import { dateTime, shortDate } from "../../billing/format.js";
 import { BackTo, FilterTabs, ReasonDialog, Row, SearchBox, SubscriptionBadge, useDebounced } from "../../billing/console.jsx";
 import { ToneBadge } from "../../billing/ui.jsx";
+import QuoteSummary from "../../components/QuoteSummary.jsx";
+import { formatMoney } from "../../lib/plans.js";
 import {
   Ago, ControlPlaneProblem, DetailHeader, ListCard, ListRow, OneTimePin, ProblemList, UnreadPill, count, useLoad,
 } from "../kit.jsx";
@@ -150,7 +152,11 @@ function OrderList({ navigate, query }) {
                   <span className="font-semibold">{planLabel(o)}</span>
                   <span className="text-ink-muted">
                     {" · "}
-                    {o.quotedAmount == null ? "priced with them" : quoteOf(o)}
+                    {o.totals?.firstInvoice != null
+                      ? `${formatMoney(o.totals.firstInvoice, { currency: o.currency })} first invoice`
+                      : o.quotedAmount == null
+                        ? "priced with them"
+                        : quoteOf(o)}
                   </span>
                 </span>
                 <span className="hidden lg:block">
@@ -977,7 +983,12 @@ function OrderDetail({ id, navigate, can }) {
             )}
             <span aria-hidden>·</span>
             <span>
-              {planLabel(order)}, billed {order.billingPeriod} · {order.quotedAmount == null ? "priced with them" : `quoted ${quoteOf(order)}`}
+              {planLabel(order)}, billed {order.billingPeriod} ·{" "}
+              {order.quote?.totals?.firstInvoice
+                ? `first invoice ${formatMoney(order.quote.totals.firstInvoice.total, { currency: order.quote.currency })}`
+                : order.quotedAmount == null
+                  ? "priced with them"
+                  : `quoted ${quoteOf(order)}`}
             </span>
             <span aria-hidden>·</span>
             <span>submitted {shortDate((order.history || []).find((h) => h.status === "submitted")?.at || order.createdAt)}</span>
@@ -993,6 +1004,15 @@ function OrderDetail({ id, navigate, can }) {
           )}
           {(order.status === "live" || order.provisionedOrganizationId) && (
             <DeploymentPanel order={order} navigate={navigate} canSeeDeployments={can("deployments.read")} />
+          )}
+          {/* What they ordered and what it costs, as frozen at submission —
+              including the hardware to configure and deliver. */}
+          {order.quote && (
+            <QuoteSummary
+              quote={order.quote}
+              title="What they ordered"
+              footer={`Frozen when they submitted it${order.quotedAt ? `, ${shortDate(order.quotedAt)}` : ""}. Catalogue changes since then don't move it; the first invoice was issued from it.`}
+            />
           )}
           <ProfilePanel order={order} />
           <OrderConversations order={order} navigate={navigate} can={can} onStarted={load} />

@@ -135,7 +135,7 @@ function Business({ settings, onSaved }) {
         <Toggle
           className="mr-auto"
           label="VAT-registered"
-          hint={d.vatRegistered ? "VAT is added on top of every new invoice, and the storefront says “plus VAT”." : "No VAT is charged; invoices say they're not valid for claim of input tax."}
+          hint={d.vatRegistered ? "VAT is added on top of every new invoice, and the storefront and every quote say so." : "No VAT is charged; invoices say they're not valid for claim of input tax."}
           checked={d.vatRegistered}
           onChange={(v) => g.setDraft((x) => ({ ...x, vatRegistered: v }))}
         />

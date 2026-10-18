@@ -3,6 +3,8 @@ import { motion } from "framer-motion";
 import { ArrowRight, ExternalLink, MailWarning, MessagesSquare, PenLine, Plus, Send } from "lucide-react";
 
 import { Button, Card, Notice, Skeleton } from "../components/ui.jsx";
+import QuoteSummary from "../components/QuoteSummary.jsx";
+import { formatMoney } from "../lib/plans.js";
 import { vendorApi } from "../lib/vendorApi.js";
 import { staffApi } from "../lib/staffApi.js";
 import { NewMessageDialog } from "./MessagesPage.jsx";
@@ -34,6 +36,9 @@ function OrderDetail({ id, navigate }) {
   const [order, setOrder] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  // A refused submit is said beside the button — a minimum the catalogue
+  // has raised since, say — not in place of the whole order.
+  const [submitError, setSubmitError] = useState(null);
   const [verifying, setVerifying] = useState(false);
   const { isVerified } = useAccount();
   const toast = useToast();
@@ -62,14 +67,17 @@ function OrderDetail({ id, navigate }) {
       return;
     }
     setBusy(true);
-    setError(null);
+    setSubmitError(null);
     try {
       await vendorApi.submitOrder(id);
       await load();
       toast("Order placed — we've emailed you a receipt");
     } catch (e) {
       if (e.code === "EMAIL_UNVERIFIED") setVerifying(true);
-      else setError(e.message);
+      else {
+        setSubmitError(e.message);
+        load(); // the live quote shows what changed
+      }
     } finally {
       setBusy(false);
     }
@@ -92,12 +100,15 @@ function OrderDetail({ id, navigate }) {
   }
 
   const profile = order.profile || {};
+  const firstInvoice = order.quote?.totals?.firstInvoice?.total;
 
   return (
     <AccountLayout
       navigate={navigate}
       title={order.organizationName}
-      subtitle={`${planLabel(order)} · ${order.billingPeriod} · ${quoteOf(order)}`}
+      subtitle={`${planLabel(order)} · billed ${order.billingPeriod === "monthly" ? "monthly" : "yearly"} · ${
+        firstInvoice != null ? `first invoice ${formatMoney(firstInvoice, { currency: order.quote.currency })}` : quoteOf(order)
+      }`}
       action={<StatusBadge status={order.status} />}
     >
       <BackLink onClick={() => navigate(ROUTES.orders)} children="All orders" />
@@ -136,6 +147,11 @@ function OrderDetail({ id, navigate }) {
               Submit to SILLA
             </Button>
           </div>
+          {submitError && (
+            <Notice tone="error" className="mt-4">
+              {submitError}
+            </Notice>
+          )}
           {!isVerified && (
             <div
               className="mt-4 flex items-center gap-2.5 rounded-lg px-3.5 py-2.5 text-sm"
@@ -159,6 +175,23 @@ function OrderDetail({ id, navigate }) {
           submit({ skipCheck: true });
         }}
       />
+
+      {/* The quote: frozen once submitted — what the first invoice was
+          issued from — or, for a draft, priced live from today's catalogue,
+          with anything it would no longer accept said before Submit. */}
+      {order.quote && (
+        <QuoteSummary
+          className="mt-4"
+          quote={order.quote}
+          problems={order.quoteLive ? order.quoteProblems : {}}
+          title={order.quoteLive ? "Your quote" : "What you ordered"}
+          footer={
+            order.quoteLive
+              ? "Priced from today's catalogue. It's priced again when you submit, and your first invoice is issued from that."
+              : `Fixed when you submitted it${order.quotedAt ? ` on ${when(order.quotedAt)}` : ""}. Later price changes don't touch it.`
+          }
+        />
+      )}
 
       <OrderMessages order={order} navigate={navigate} />
 
@@ -342,7 +375,11 @@ export default function Orders({ id, navigate }) {
             </div>
             <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-ink-secondary">
               <span>{planLabel(o)}</span>
-              <span>{quoteOf(o)}</span>
+              <span>
+                {o.totals?.firstInvoice != null
+                  ? `First invoice ${formatMoney(o.totals.firstInvoice, { currency: o.currency })}`
+                  : quoteOf(o)}
+              </span>
               <span className="text-ink-muted">updated {when(o.updatedAt)}</span>
             </div>
           </motion.button>

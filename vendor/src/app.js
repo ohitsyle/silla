@@ -3,6 +3,7 @@ import cors from "cors";
 import authRoutes from "./routes/auth.routes.js";
 import orderRoutes from "./routes/order.routes.js";
 import planRoutes from "./routes/plans.routes.js";
+import catalogueRoutes from "./routes/catalogue.routes.js";
 import billingRoutes from "./routes/billing.routes.js";
 import settingsRoutes from "./routes/settings.routes.js";
 import staffRoutes from "./routes/staff.routes.js";
@@ -43,6 +44,7 @@ export function createApp() {
 
   // Subscriptions and money.
   app.use("/api/vendor/plans", planRoutes);
+  app.use("/api/vendor/catalogue", catalogueRoutes);
   app.use("/api/vendor/billing", billingRoutes);
   app.use("/api/vendor/settings", settingsRoutes);
 

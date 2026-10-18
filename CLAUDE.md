@@ -296,12 +296,16 @@ Things worth keeping about the storefront:
   argument, so it is demonstrated rather than claimed. It derives its
   article too ("a desk", "an employee") because the vocabulary is
   buyer-supplied.
-- **The prices in `marketing/sections/Pricing.jsx` are PLACEHOLDERS**
-  and the currency is a guess. There is no billing, nothing is charged,
-  nothing is wired to a provider. Replace `PLANS` and `CURRENCY` before
-  anyone can act on them — a wrong price on a live page is a promise.
+- The pricing section sells the plans AND the catalogue (extra
+  buildings, kiosks bought or rented, cards and readers, services,
+  support tiers) from `GET /api/vendor/plans`, and says VAT once — see
+  "Pricing" below for where the numbers live.
 
-Seven steps — Details, Words, Branding, Policy, Catalog, Floors, Review.
+Eight steps — Details, Words, Branding, Policy, Catalog, Floors,
+Hardware, Review. Hardware asks how many buildings (which suggests the
+plan, and any extra buildings), kiosks, cards, readers, services and a
+support tier, with a live quote beside it; the plan is chosen there now,
+and Review shows the same quote.
 Three starting presets (library, office, blank), then everything is
 editable. The Review step emits the profile as JSON and offers it as a
 download.
@@ -410,9 +414,10 @@ Decisions worth keeping:
 - **`profile` is stored as free-form Mixed.** This service must not grow
   a second opinion about the profile's shape — `importProfile.js` is the
   one that matters, and two validators will disagree.
-- **The billing seam exists but is empty**: `quotedAmount` and
-  `currency` are recorded ON the order (a plan's price will change; what
-  this customer was offered must not), `stripeCustomerId` on the Account
+- **What an order costs is recorded ON the order** (a price will change;
+  what this customer was offered must not): `quote`, frozen at
+  submission, and `quotedAmount`, the PLAN's per-month figure — see
+  "Pricing" below. Also `stripeCustomerId` on the Account
   (one customer across many orders), `stripeSubscriptionId` and
   `paidUntil` on the Order. **Stripe is chosen but not wired.**
 
@@ -434,9 +439,10 @@ data loading, swap in a router.
   them to the wizard instead of an empty orders list, and the wizard
   restores it on the last step. Both sides have to agree it exists,
   which is why the key is shared rather than living in the wizard.
-- **`lib/plans.js` is the single source for plans**, shared by the
-  pricing section (which sells them) and the wizard (which records which
-  one an order is for). Same lesson as `adminSections.js`.
+- **`lib/plans.js` is the single source for plans and the catalogue** in
+  the portal (live from the API, its seed files as the fallback), shared
+  by the pricing section (which sells them) and the wizard (which records
+  what an order is for). Same lesson as `adminSections.js`.
 - **The provisioning command lives in the QUEUE**, not the buyer's
   review step. It was being shown to the customer buying the result of
   it; it belongs where the person who runs it will look.
@@ -666,8 +672,42 @@ account menu; `#/queue` redirects to `#/staff/orders`. Provisioning is a
 button (Orders → Provision): address check, then the owner's one-time
 PIN, then `billing.onProvisioned` starts the trial. Deploying needs
 `CONTROL_PLANE_SECRET` on BOTH services and `PRODUCT_URL` on the vendor.
-Vendor suite: 283 checks (`npm run test:isolated`); the billing suite
-runs only there, because it drives the billing job.
+Vendor suite: 330 checks (`npm run test:isolated`); the billing and
+pricing suites run their database-moving parts only there, because they
+drive the billing job and edit prices.
+
+## Pricing — the catalogue, quotes and add-ons
+
+The agreed pricing (pesos, every price EXCLUDING VAT) is seeded, not
+hardcoded: plans from `vendor/src/lib/defaultPlans.js` (keys `room`,
+`building`, `campus` = Starter, Building, Campus) and everything else —
+extra buildings, hardware, services, support tiers — from
+`vendor/src/lib/defaultCatalog.js` into `CatalogItem`, each the first time
+its collection is read empty. After that **staff own every number**
+(console → Plans, and its Catalogue area; `plans.manage`, audited). A
+database seeded before this keeps its old placeholder plans until `npm
+run migrate:pricing -- --apply` (vendor; dry run without `--apply`) — it
+must be run on the live box before these prices are.
+
+- **The quote is computed on the server and frozen.** An order carries
+  only `selections` — catalogue keys, quantities, buy or rent; prices sent
+  by a browser are dropped. Every draft save is priced and refused by
+  field when it can't be ordered (minimums, extra buildings only on
+  Building/Campus, one support tier); submission prices it again and
+  freezes `Order.quote`. A catalogue change reaches NEW quotes only.
+  `quotedAmount` keeps its old meaning: the plan's price per month.
+- **`lib/quote.js` exists twice, byte for byte** (vendor and portal), as do
+  the two default files; the pricing suite fails when they differ. The
+  configurator's live quote is the same function the server runs.
+- **Billing.** The first invoice carries the plan's period, every add-on
+  and rental for that period, and every one-time item; renewals carry the
+  plan and add-ons, never the one-time items again. Add-ons live on the
+  subscription with their agreed prices (staff edit them there; the next
+  invoice and the entitlements follow), and the snapshot's limits are the
+  plan's (or an override) PLUS what add-ons add — two extra buildings on
+  Building is three. VAT only while `Settings.business.vatRegistered`.
+- Onboarding is on every order and waived on yearly billing; Standard
+  support is the default tier at ₱0. docs/control-plane.md §2 and §4.
 
 ### Organization addresses (client)
 

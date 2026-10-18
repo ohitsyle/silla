@@ -15,7 +15,7 @@ import { Router } from "express";
 import Subscription from "../models/Subscription.js";
 import { requireAccount } from "../middleware/auth.js";
 import { requirePermission } from "../middleware/staff.js";
-import { BillingError, catalogue, createPlan, getSettings, updatePlan } from "../services/billing.js";
+import { BillingError, catalogItems, catalogue, createPlan, getSettings, updatePlan } from "../services/billing.js";
 
 const router = Router();
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -24,18 +24,26 @@ const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, ne
  * The storefront's prices. Public: the pricing page is read by people who
  * have not signed up, and nothing in a plan is a secret. `orderable` says
  * whether an order can carry it yet — the storefront offers only those.
- * `pricesExcludeVat` is true when SILLA is VAT-registered and invoices add
- * VAT on top, so the page can say so beside the price; `trialDays` is the
- * free trial a new deployment starts with (0: none).
+ *
+ * `catalogue` is everything else SILLA sells (routes/catalogue.routes.js),
+ * here too so the pricing page and the configurator need one request.
+ * Every price excludes VAT; `vat` says whether invoices add it (only while
+ * SILLA is VAT-registered) and at what rate, so a quote can show the same
+ * total the invoice will. `pricesExcludeVat` is the older name for
+ * `vat.registered`. `trialDays` is the free trial a new deployment starts
+ * with (0: none).
  */
 router.get(
   "/",
   asyncHandler(async (_req, res) => {
-    const [plans, settings] = await Promise.all([catalogue(), getSettings()]);
+    const [plans, items, settings] = await Promise.all([catalogue(), catalogItems(), getSettings()]);
+    const registered = Boolean(settings.business?.vatRegistered);
     res.set("Cache-Control", "public, max-age=60");
     res.json({
       plans,
-      pricesExcludeVat: Boolean(settings.business?.vatRegistered),
+      catalogue: items,
+      vat: { registered, rate: settings.business?.vatRate ?? 0.12 },
+      pricesExcludeVat: registered,
       // So the page promises a free trial only while there is one.
       trialDays: settings.billing?.trialDays ?? 0,
     });

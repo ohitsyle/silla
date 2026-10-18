@@ -1,74 +1,44 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { billingApi } from "./billingApi.js";
+import { DEFAULT_PLANS } from "./defaultPlans.js";
+import { DEFAULT_CATALOG } from "./defaultCatalog.js";
 
 /**
- * The plans, and the ONE money formatter.
+ * The plans, the catalogue, and the ONE money formatter.
  *
- * The catalogue is data now: staff edit plans in the console, and the
- * storefront reads GET /api/vendor/plans. This file holds the OFFLINE
- * FALLBACK — what the pricing page shows until the live catalogue answers,
- * or if it never does — not the source. Keep FALLBACK_PLANS in step with
- * vendor/src/lib/defaultPlans.js, which seeds the catalogue the first time.
+ * What SILLA sells is data: staff edit plans and the catalogue (extra
+ * buildings, hardware, services, support) in the console, and the
+ * storefront reads both from GET /api/vendor/plans. This file holds the
+ * OFFLINE FALLBACK — what the pricing page and the configurator show
+ * until the live catalogue answers, or if it never does — and it is not
+ * a second opinion: defaultPlans.js and defaultCatalog.js here are byte
+ * for byte the vendor's seed files, and the vendor's pricing suite fails
+ * if they drift.
  *
  * Shared by the pricing section (which sells them), the entry dialog and
- * the configurator (which records which one an order is for). Two copies
+ * the configurator (which records what an order is for). Two copies
  * would drift, and the copy that mattered would be whichever one the order
- * was written from — see lib/adminSections.js in the product.
+ * was written from — see lib/adminSections.js in the product. Whatever
+ * this module shows, the ORDER is priced by the server (lib/quote.js,
+ * run again there on the catalogue as it stands).
  *
- * ⚠️  THE PRICES ARE STILL PLACEHOLDERS, in Philippine pesos — guesses,
- * not a pricing decision. Change them in the console's Plans section;
- * the fallback here only has to resemble them.
- *
- * Money is in MINOR units (centavos) everywhere: in a plan's `prices`, in
- * an order's quotedAmount, on every invoice. The old fallback held MAJOR
- * units while orders held minor ones — both correct, 100x apart, which is
- * exactly how a $39 plan once rendered as "$3900/month".
+ * Money is in MINOR units (centavos) everywhere, and EXCLUDES VAT: in a
+ * plan's `prices`, an order's quotedAmount, on every invoice. The old
+ * fallback held MAJOR units while orders held minor ones — both correct,
+ * 100x apart, which is exactly how a $39 plan once rendered as
+ * "$3900/month".
  *
  *   prices.monthly        charged each month on monthly billing
  *   prices.annualMonthly  the per-month figure on yearly billing, billed as × 12
- *   null for both         "priced with you" (Campus)
+ *   null for both         "priced with you"
  */
 
 export const DEFAULT_CURRENCY = "PHP";
 
-export const FALLBACK_PLANS = [
-  {
-    key: "room",
-    name: "One Room",
-    tagline: "A single floor, a reading room, a studio.",
-    highlights: ["Up to 60 bookable units", "One building, one floor", "Every feature, no exceptions", "Email support"],
-    featured: false,
-    currency: "PHP",
-    prices: { monthly: 2_900_00, annualMonthly: 2_300_00 },
-    orderable: true,
-  },
-  {
-    key: "building",
-    name: "Whole Building",
-    tagline: "Several floors and the staff to run them.",
-    highlights: [
-      "Up to 600 bookable units",
-      "One building, unlimited floors and rooms",
-      "Unlimited staff accounts",
-      "Priority support",
-      "Onboarding call and layout help",
-    ],
-    featured: true,
-    currency: "PHP",
-    prices: { monthly: 8_700_00, annualMonthly: 6_900_00 },
-    orderable: true,
-  },
-  {
-    key: "campus",
-    name: "Campus",
-    tagline: "More than one building, more than one team.",
-    highlights: ["Unlimited units and buildings", "Multiple sites", "Custom identity formats and policy", "A named contact who answers"],
-    featured: false,
-    currency: "PHP",
-    prices: { monthly: null, annualMonthly: null },
-    orderable: true,
-  },
-];
+/** The seed plans as the API shapes them: orderable, with every limit stated. */
+export const FALLBACK_PLANS = DEFAULT_PLANS.map((plan) => ({ ...plan, active: true, orderable: true }));
+/** The seed catalogue — everything besides a plan. */
+export const FALLBACK_CATALOGUE = DEFAULT_CATALOG.filter((item) => item.active !== false);
 
 /** The fallback, under its old name, for anything still importing it. Prefer usePlans(). */
 export const PLANS = FALLBACK_PLANS;
@@ -82,7 +52,17 @@ export const PLANS = FALLBACK_PLANS;
  */
 export const PLAN_BY_KEY = {};
 
-let state = { plans: FALLBACK_PLANS, live: false, failed: false, pricesExcludeVat: false, trialDays: null };
+let state = {
+  plans: FALLBACK_PLANS,
+  catalogue: FALLBACK_CATALOGUE,
+  live: false,
+  failed: false,
+  // Unknown until the API says: the fallback assumes VAT is not added,
+  // and the pages say "excluding VAT" only once they know it applies.
+  vat: { registered: false, rate: 0.12 },
+  pricesExcludeVat: false,
+  trialDays: null,
+};
 const listeners = new Set();
 let inflight = null;
 
@@ -103,14 +83,17 @@ export function loadPlans({ force = false } = {}) {
   if (inflight && !force) return inflight;
   inflight = billingApi
     .plans()
-    .then(({ plans, pricesExcludeVat, trialDays }) => {
+    .then(({ plans, catalogue, vat, pricesExcludeVat, trialDays }) => {
       const sellable = (plans || []).filter((p) => p.orderable !== false);
       if (sellable.length) {
+        const registered = Boolean(vat ? vat.registered : pricesExcludeVat);
         publish({
           plans: sellable,
+          catalogue: Array.isArray(catalogue) ? catalogue.filter((i) => i.active !== false) : state.catalogue,
           live: true,
           failed: false,
-          pricesExcludeVat: Boolean(pricesExcludeVat),
+          vat: { registered, rate: Number.isFinite(vat?.rate) ? vat.rate : 0.12 },
+          pricesExcludeVat: registered,
           trialDays: Number.isInteger(trialDays) ? trialDays : null,
         });
       }
@@ -133,9 +116,10 @@ const subscribe = (listener) => {
 const snapshot = () => state;
 
 /**
- * { plans, live, failed, pricesExcludeVat, trialDays } — re-renders when
- * the live catalogue lands. trialDays is null until it does: unknown, so
- * say nothing rather than promise a trial that may not exist.
+ * { plans, catalogue, live, failed, vat, pricesExcludeVat, trialDays } —
+ * re-renders when the live catalogue lands. trialDays is null until it
+ * does: unknown, so say nothing rather than promise a trial that may not
+ * exist.
  */
 export function usePlans() {
   const current = useSyncExternalStore(subscribe, snapshot, snapshot);
@@ -164,9 +148,9 @@ function formatter(currency, digits) {
 /**
  * The one money formatter. Minor units in.
  *
- *   formatMoney(690000)                       "₱6,900"        a price tag: no decimals when whole
- *   formatMoney(690000, { period: "month" })  "₱6,900/month"
- *   formatMoney(8280000, { exact: true })     "₱82,800.00"    a sum owed: always two decimals
+ *   formatMoney(600000)                       "₱6,000"        a price tag: no decimals when whole
+ *   formatMoney(600000, { period: "month" })  "₱6,000/month"
+ *   formatMoney(7200000, { exact: true })     "₱72,000.00"    a sum owed: always two decimals
  *   formatMoney(null)                         "Priced with you"
  *
  * `currency` defaults to the catalogue's (pesos). Existing callers that
@@ -180,7 +164,7 @@ export function formatMoney(minorUnits, { period, currency, exact = false } = {}
   return `${shown}${period ? `/${period}` : ""}`;
 }
 
-/** The symbol and the figure apart, for type that sets them at different sizes: { symbol: "₱", amount: "6,900" }. */
+/** The symbol and the figure apart, for type that sets them at different sizes: { symbol: "₱", amount: "6,000" }. */
 export function moneyParts(minorUnits, { currency } = {}) {
   if (minorUnits == null) return null;
   const major = minorUnits / 100;
@@ -209,10 +193,40 @@ export const periodPrice = (plan, annual) => {
   return amount == null ? null : annual ? amount * 12 : amount;
 };
 
+/** What billing yearly saves on a plan over a year, in minor units — or null when it can't be said. */
+export function yearlySavingOf(plan) {
+  const monthly = plan?.prices?.monthly;
+  const annual = plan?.prices?.annualMonthly;
+  return Number.isInteger(monthly) && Number.isInteger(annual) && annual < monthly ? (monthly - annual) * 12 : null;
+}
+
+/**
+ * What billing yearly saves on one plan, as a whole percentage, worked out
+ * in integers: 1 − 6000/7500 is 0.19999… in floating point, and a floor
+ * of that advertised 19% for a plan that saves exactly 20%.
+ */
+export function yearlyPercent(plan) {
+  const monthly = plan?.prices?.monthly;
+  const annual = plan?.prices?.annualMonthly;
+  if (!Number.isInteger(monthly) || !Number.isInteger(annual) || monthly <= 0) return null;
+  return Math.max(0, Math.floor(((monthly - annual) * 100) / monthly));
+}
+
 /** The yearly saving to advertise, as a whole percentage — the smallest across priced plans, so it is never overstated. */
 export function yearlySaving(plans) {
-  const savings = plans
-    .filter((p) => Number.isInteger(p.prices?.monthly) && Number.isInteger(p.prices?.annualMonthly) && p.prices.monthly > 0)
-    .map((p) => Math.floor((1 - p.prices.annualMonthly / p.prices.monthly) * 100));
-  return savings.length ? Math.max(0, Math.min(...savings)) : 0;
+  const savings = plans.map(yearlyPercent).filter((n) => n != null);
+  return savings.length ? Math.min(...savings) : 0;
+}
+
+/**
+ * The VAT sentence, said ONCE wherever prices are listed. Every price
+ * excludes VAT; whether any is added depends on SILLA's registration, so
+ * a page never tells a buyer to budget 12% that will not be charged — and
+ * says nothing either way until the live catalogue has said which.
+ */
+export function vatSentence({ vat, live } = state) {
+  if (!live) return "All prices are in Philippine pesos and exclude VAT.";
+  return vat?.registered
+    ? `All prices are in Philippine pesos and exclude ${Math.round((vat.rate ?? 0.12) * 100)}% VAT, which is added to your invoice.`
+    : "All prices are in Philippine pesos, excluding VAT. SILLA isn't VAT-registered, so none is added.";
 }

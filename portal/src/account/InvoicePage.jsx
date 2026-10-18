@@ -177,6 +177,8 @@ function Sheet({ invoice, howToPay, footer }) {
               <tr key={i} className="border-b border-line/[0.08] align-top">
                 <td className="py-3.5 pr-3">
                   <div className="font-semibold">{line.description}</div>
+                  {/* A warranty or "travel is billed at cost" — kept with the line it is about. */}
+                  {line.note && <div className="mt-0.5 text-xs text-ink-muted">{line.note}</div>}
                   {line.quantity > 1 && (
                     <div className="text-xs text-ink-muted sm:hidden">
                       {line.quantity} × {money(line.unitAmount)}

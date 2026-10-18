@@ -42,7 +42,7 @@ function readDraft() {
   }
 }
 
-const STEP_ORDER = ["details", "terminology", "branding", "policy", "catalog", "floors", "review"];
+const STEP_ORDER = ["details", "terminology", "branding", "policy", "catalog", "floors", "hardware", "review"];
 
 function Choice({ icon: Icon, title, children, onClick, primary, autoFocus }) {
   return (
@@ -91,7 +91,7 @@ export default function EntryDialog({ open, onClose, planKey, annual = true, onE
       onClose={onClose}
       icon={Sparkles}
       title="Before you start"
-      subtitle="Seven short steps — name it, choose your words, pick your colours, lay out your floors. About five minutes, and nothing is charged."
+      subtitle="Eight short steps — name it, choose your words, pick your colours, lay out your floors, then the hardware and support you want, priced as you go. About five minutes, and nothing is charged."
       width="max-w-xl"
     >
       {plan && (
@@ -104,7 +104,7 @@ export default function EntryDialog({ open, onClose, planKey, annual = true, onE
             {price}
             {billing ? `, ${billing}` : ""}
           </span>
-          <span className="ml-auto text-xs text-ink-muted">You can change this at the end.</span>
+          <span className="ml-auto text-xs text-ink-muted">You can change it when you choose your hardware.</span>
         </div>
       )}
 

@@ -60,13 +60,44 @@ const orderSchema = new mongoose.Schema(
     billingPeriod: { type: String, enum: ["monthly", "yearly"], default: "yearly" },
 
     /**
-     * What was quoted when the order was placed, in minor units (cents).
-     * Recorded on the ORDER rather than read from the price list at
-     * render time: a plan's price will change, and an order must still
-     * say what this customer was actually offered.
+     * The PLAN's price per month on the chosen billing period, in minor
+     * units — the figure on the pricing card ("₱6,000/month, billed
+     * yearly"), and the meaning this field has always had. Only the plan:
+     * the whole order's price is `quote`. Set by the SERVER from the
+     * catalogue when a draft is saved and from the frozen quote at
+     * submission; whatever a browser sends here is ignored.
      */
     quotedAmount: { type: Number, default: null },
     currency: { type: String, default: "PHP" },
+
+    /**
+     * What the buyer chose besides the plan: catalogue keys
+     * (models/CatalogItem.js) with a quantity, and "buy" or "rent" for
+     * what can be either. ONLY these three fields — lib/quote.js
+     * readSelections drops anything sent beside them, prices included. A
+     * draft may hold any; every save is priced against the catalogue and
+     * refused with the problems, by field, if it can't be ordered.
+     */
+    selections: [
+      {
+        _id: false,
+        key: { type: String, required: true },
+        quantity: { type: Number, required: true, min: 1 },
+        mode: { type: String, enum: ["buy", "rent", null], default: null },
+      },
+    ],
+
+    /**
+     * The quote FROZEN at submission — lib/quote.js buildQuote, computed on
+     * the server from the plans, the catalogue and the VAT settings at that
+     * moment: every line, the one-time, per-month and first-invoice
+     * totals, the limits it buys, the rental commitments. Null on a draft,
+     * which is priced live. Never rewritten afterwards: staff changing the
+     * catalogue changes NEW quotes, not this one, and the first invoice
+     * and the subscription's add-ons are issued from it.
+     */
+    quote: { type: mongoose.Schema.Types.Mixed, default: null },
+    quotedAt: { type: Date, default: null },
 
     status: { type: String, enum: ORDER_STATUS, default: "draft", index: true },
 

@@ -6,7 +6,7 @@ import { Badge, Button, Notice, Panel } from "../components/ui.jsx";
 import { buildProfile } from "../lib/profile.js";
 
 /**
- * Step 7 — read it back, then hand it over.
+ * Step 8 — read it back, see what it costs, then hand it over.
  *
  * The JSON below is the deliverable: the wizard's whole job is to
  * produce a file the existing seeder already knows how to consume, which
@@ -65,7 +65,7 @@ function Swatch({ colour }) {
   );
 }
 
-export default function ReviewStep({ config, errors, onDownload, preview }) {
+export default function ReviewStep({ config, errors, onDownload, preview, quote }) {
   const profile = useMemo(() => buildProfile(config), [config]);
   const json = useMemo(() => JSON.stringify(profile, null, 2), [profile]);
 
@@ -103,6 +103,10 @@ export default function ReviewStep({ config, errors, onDownload, preview }) {
       )}
 
       {preview}
+
+      {/* The same quote the Hardware step added up, and the one the saved
+          order will show — the server prices it again on save. */}
+      {quote}
 
       <Panel title="What this deployment will be" icon={CircleCheck}>
         <Row label="Organization">{profile.organizationName}</Row>

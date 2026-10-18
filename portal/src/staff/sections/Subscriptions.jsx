@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
-  AlertTriangle, Ban, CalendarClock, Check, ExternalLink, FileText, History, Layers, Megaphone, Minus, Pause, Play,
-  Plus, RefreshCw, Server, SlidersHorizontal, Undo2,
+  AlertTriangle, Ban, Boxes, CalendarClock, Check, ExternalLink, FileText, History, Layers, Megaphone, Minus, PackageCheck, Pause,
+  Play, Plus, RefreshCw, Server, SlidersHorizontal, Undo2, X,
 } from "lucide-react";
 
 import { Button, EmptyState, Notice, Panel, Segmented, Skeleton, Textarea } from "../../components/ui.jsx";
@@ -11,8 +11,9 @@ import { billingApi } from "../../lib/billingApi.js";
 import { formatMoney } from "../../lib/plans.js";
 import { useToast } from "../../lib/toast.jsx";
 import { ROUTES } from "../../lib/useHashRoute.js";
-import { dateTime, fromDateInput, limitPhrase, longDate, shortDate, toDateInput, toMinor } from "../../billing/format.js";
+import { dateTime, fromDateInput, invoiceSummary, limitPhrase, longDate, shortDate, toDateInput, toMinor } from "../../billing/format.js";
 import { InvoiceBadge, MoneyInput, ToneBadge } from "../../billing/ui.jsx";
+import { iconFor } from "../../lib/catalogue.js";
 import {
   BackTo, FilterTabs, ManualInvoiceDialog, ReasonDialog, Row, SearchBox, SubscriptionBadge, useDebounced,
 } from "../../billing/console.jsx";
@@ -181,7 +182,8 @@ function SubscriptionList({ navigate, query: address = {} }) {
                     <span className="font-semibold">{s.planName}</span>
                     <span className="text-ink-muted">
                       {" · "}
-                      {s.needsPricing || s.price.amount == null ? "price to agree" : `${money(s.price.amount, s.price.currency)}/${PERIOD[s.billingPeriod]}`}
+                      {s.needsPricing || s.price.amount == null ? "price to agree" : `${money(s.perPeriod ?? s.price.amount, s.price.currency)}/${PERIOD[s.billingPeriod]}`}
+                      {s.addOnCount > 0 ? ` · ${s.addOnCount} add-on${s.addOnCount === 1 ? "" : "s"}` : ""}
                     </span>
                   </span>
                   <span className="hidden lg:block">
@@ -333,6 +335,229 @@ function PlanAndPrice({ sub, manage, onSaved }) {
           <Button variant="primary" loading={busy} onClick={commit}>
             Save
           </Button>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/* ───────────────────────────── add-ons ───────────────────────────── */
+
+const MONTHS = { monthly: 1, yearly: 12 };
+const addOnLabel = (a) => `${a.name}${a.kind === "rental" ? " rental" : ""}`;
+const addOnId = (a) => `${a.key}:${a.kind}`;
+
+/** A quantity with − and + for the add-ons list. */
+function QuantityStepper({ value, onChange, min = 1, max = null, disabled, label }) {
+  const n = Number(value) || 0;
+  return (
+    <span className="inline-flex h-9 items-stretch overflow-hidden rounded-full border border-line/12 bg-bg-panel">
+      <button
+        type="button"
+        aria-label={`Fewer ${label}`}
+        disabled={disabled || n <= min}
+        onClick={() => onChange(String(Math.max(min, n - 1)))}
+        className="grid w-8 place-items-center text-ink-secondary hover:bg-line/[0.06] disabled:opacity-35"
+      >
+        <Minus size={13} strokeWidth={2.6} />
+      </button>
+      <input
+        aria-label={label}
+        inputMode="numeric"
+        disabled={disabled}
+        value={value}
+        onChange={(e) => onChange(e.target.value.replace(/\D/g, "").slice(0, 6))}
+        className="w-12 bg-transparent text-center text-sm font-bold tabular-nums outline-none"
+      />
+      <button
+        type="button"
+        aria-label={`More ${label}`}
+        disabled={disabled || (max != null && n >= max)}
+        onClick={() => onChange(String(n + 1))}
+        className="grid w-8 place-items-center text-ink-secondary hover:bg-line/[0.06] disabled:opacity-35"
+      >
+        <Plus size={13} strokeWidth={2.6} />
+      </button>
+    </span>
+  );
+}
+
+/**
+ * What the customer pays for besides the plan — extra buildings, rentals,
+ * support — and what they bought once with the order. Billing staff change
+ * quantities, add or take off add-ons; the deployment's limits change on
+ * save, the price from the next invoice. An add-on already on the
+ * subscription keeps the price agreed for it; one added takes today's
+ * catalogue price. The server checks the catalogue's rules again.
+ */
+function AddOnsPanel({ sub, manage, onSaved }) {
+  const months = MONTHS[sub.billingPeriod] || 12;
+  const per = PERIOD[sub.billingPeriod];
+  const source = useMemo(
+    () => sub.addOns.map((a) => ({ key: a.key, kind: a.kind, name: a.name, quantity: String(a.quantity), unitAmount: a.unitAmount, isNew: false })),
+    [sub]
+  );
+  const [draft, setDraft] = useState(source);
+  const [adding, setAdding] = useState("");
+  useEffect(() => setDraft(source), [source]);
+  const { busy, fields, save } = useSaver(sub.id, onSaved);
+  const options = sub.addOnOptions || [];
+  const optionFor = (a) => options.find((o) => o.key === a.key && o.kind === a.kind);
+  const dirty = JSON.stringify(draft.map((a) => [a.key, a.kind, a.quantity])) !== JSON.stringify(source.map((a) => [a.key, a.kind, a.quantity]));
+  const cur = sub.price.currency;
+
+  const addable = options.filter(
+    (o) => o.active && o.monthly != null && !draft.some((a) => a.key === o.key && a.kind === o.kind) && (!o.plans?.length || o.plans.includes(sub.plan))
+  );
+  const add = () => {
+    const o = options.find((x) => `${x.key}:${x.kind}` === adding);
+    if (!o) return;
+    setDraft((d) => [
+      // One per group: adding Care takes Standard (or Care Plus) off.
+      ...d.filter((a) => !o.group || optionFor(a)?.group !== o.group),
+      { key: o.key, kind: o.kind, name: o.name, quantity: String(o.minQuantity || 1), unitAmount: o.monthly, isNew: true },
+    ]);
+    setAdding("");
+  };
+  const total = (sub.price.amount ?? 0) + draft.reduce((sum, a) => sum + a.unitAmount * months * (Number(a.quantity) || 0), 0);
+  const buildingsAdded = draft.reduce((sum, a) => sum + (optionFor(a)?.adds?.buildings || 0) * (Number(a.quantity) || 0), 0);
+  const planBuildings = sub.overrides?.limits?.buildings !== undefined ? sub.overrides.limits.buildings : sub.planDefaults?.limits?.buildings;
+
+  const commit = () =>
+    save(
+      { addOns: draft.map((a) => ({ key: a.key, quantity: Number(a.quantity) || 0, mode: a.kind === "rental" ? "rent" : null })) },
+      "Add-ons saved — the deployment's limits change now, the price from the next invoice"
+    );
+
+  return (
+    <Panel
+      icon={Boxes}
+      title="Add-ons"
+      subtitle={`Billed with the plan every ${per}: extra buildings, rentals and support. Limits change when saved; prices from the next invoice.`}
+    >
+      {draft.length === 0 ? (
+        <p className="text-sm text-ink-secondary">None — the plan alone.</p>
+      ) : (
+        <ul className="-mx-5 divide-y divide-line/[0.07] border-y border-line/[0.07]">
+          {draft.map((a) => {
+            const Icon = iconFor({ key: a.key, category: optionFor(a)?.category });
+            const error = fields[`addOns.${a.key}`];
+            const n = Number(a.quantity) || 0;
+            return (
+              <li key={addOnId(a)} className="flex items-start gap-3 px-5 py-3">
+                <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-[10px] bg-line/[0.05] text-ink-secondary">
+                  <Icon size={15} />
+                </span>
+                <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+                  <span className="min-w-[11rem] flex-1">
+                    <span className="block font-semibold">{addOnLabel(a)}</span>
+                    <span className="block text-xs text-ink-muted">
+                      {a.unitAmount === 0 ? "Included" : `${money(a.unitAmount * months, cur)} each a ${per}`}
+                      {a.isNew ? " · today's price" : " · as agreed"}
+                      {optionFor(a)?.adds?.buildings ? ` · +${optionFor(a).adds.buildings} building each` : ""}
+                    </span>
+                  </span>
+                  <span className="flex items-center gap-3">
+                  {manage && optionFor(a)?.maxQuantity !== 1 ? (
+                    <QuantityStepper
+                      value={a.quantity}
+                      label={addOnLabel(a)}
+                      min={1}
+                      max={optionFor(a)?.maxQuantity ?? null}
+                      onChange={(q) => setDraft((d) => d.map((x) => (addOnId(x) === addOnId(a) ? { ...x, quantity: q } : x)))}
+                    />
+                  ) : (
+                    <span className="text-sm tabular-nums text-ink-secondary">× {a.quantity}</span>
+                  )}
+                  <span className="w-24 text-right text-sm font-bold tabular-nums">{a.unitAmount === 0 ? "—" : money(a.unitAmount * months * n, cur)}</span>
+                  {manage && (
+                    <button
+                      type="button"
+                      aria-label={`Take off ${addOnLabel(a)}`}
+                      onClick={() => setDraft((d) => d.filter((x) => addOnId(x) !== addOnId(a)))}
+                      className="grid h-8 w-8 place-items-center rounded-full text-ink-muted hover:bg-line/[0.06] hover:text-ink-primary"
+                    >
+                      <X size={15} />
+                    </button>
+                  )}
+                  </span>
+                </div>
+                {error && <p className="mt-1.5 text-xs font-medium text-state-unavailable">{error}</p>}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {manage && addable.length > 0 && (
+        <div className="mt-4 flex flex-wrap items-end gap-2">
+          <SelectInput label="Add" className="min-w-[220px] flex-1" value={adding} onChange={(e) => setAdding(e.target.value)}>
+            <option value="">Choose something billed every {per}…</option>
+            {addable.map((o) => (
+              <option key={`${o.key}:${o.kind}`} value={`${o.key}:${o.kind}`}>
+                {o.name}
+                {o.kind === "rental" ? " (rented)" : ""} — {o.monthly === 0 ? "included" : `${money(o.monthly, cur)}/month`}
+              </option>
+            ))}
+          </SelectInput>
+          <Button icon={Plus} onClick={add} disabled={!adding}>
+            Add
+          </Button>
+        </div>
+      )}
+
+      <div className="mt-4 space-y-1 rounded-lg bg-bg-panel/70 px-4 py-3 text-sm">
+        <div className="flex justify-between gap-3">
+          <span className="text-ink-secondary">Each {per}, plan included</span>
+          <span className="font-bold tabular-nums">{sub.price.amount == null ? "Plan price to agree" : money(total, cur)}</span>
+        </div>
+        {(planBuildings != null || buildingsAdded > 0) && (
+          <div className="flex justify-between gap-3">
+            <span className="text-ink-secondary">Buildings they can have</span>
+            <span className="font-semibold tabular-nums">
+              {planBuildings == null ? "Unlimited" : `${planBuildings} + ${buildingsAdded} added = ${planBuildings + buildingsAdded}`}
+            </span>
+          </div>
+        )}
+      </div>
+      {fields._form && <Notice tone="error" className="mt-4">{fields._form}</Notice>}
+      {Object.entries(fields)
+        .filter(([k]) => k === "addOns" || (k.startsWith("addOns.") && !draft.some((a) => `addOns.${a.key}` === k)))
+        .map(([k, message]) => (
+          <Notice key={k} tone="error" className="mt-3">
+            {message}
+          </Notice>
+        ))}
+      {manage && dirty && (
+        <div className="mt-4 flex flex-wrap items-center justify-end gap-3 border-t border-line/[0.08] pt-4">
+          <span className="mr-auto text-xs text-ink-muted">Open invoices keep their amounts. Taking off a support tier leaves Standard.</span>
+          <Button variant="ghost" onClick={() => setDraft(source)} disabled={busy}>
+            Discard
+          </Button>
+          <Button variant="primary" loading={busy} onClick={commit}>
+            Save add-ons
+          </Button>
+        </div>
+      )}
+
+      {sub.oneTime?.length > 0 && (
+        <div className="mt-5 border-t border-line/[0.08] pt-4">
+          <h3 className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.1em] text-ink-muted">
+            <PackageCheck size={14} /> Bought once, with the order
+          </h3>
+          <ul className="mt-2 space-y-1 text-sm">
+            {sub.oneTime.map((l) => (
+              <li key={`${l.key}:${l.description}`} className="flex justify-between gap-3">
+                <span>
+                  {l.name}
+                  {l.quantity > 1 && <span className="ml-1.5 tabular-nums text-ink-muted">× {l.quantity.toLocaleString("en-PH")}</span>}
+                </span>
+                <span className="tabular-nums text-ink-secondary">{l.waived ? "Waived" : money(l.amount, cur)}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </Panel>
@@ -642,7 +867,7 @@ function InvoicesPanel({ sub, manage, navigate, onIssued }) {
               >
                 <span className="font-mono text-sm font-semibold">{inv.number}</span>
                 <InvoiceBadge invoice={inv} size="sm" />
-                <span className="mr-auto min-w-0 truncate text-sm text-ink-muted">{inv.lines[0]?.description}</span>
+                <span className="mr-auto min-w-0 truncate text-sm text-ink-muted">{invoiceSummary(inv)}</span>
                 <span className="text-sm font-bold tabular-nums">{formatMoney(inv.total, { currency: inv.currency, exact: true })}</span>
               </button>
             </li>
@@ -691,7 +916,7 @@ function StandingPanel({ sub, manage, act }) {
     sub.trialEndsAt && !sub.currentPeriodEnd ? ["Trial ends", longDate(sub.trialEndsAt)] : null,
     sub.currentPeriodEnd ? ["Paid period", `${shortDate(sub.currentPeriodStart)} – ${shortDate(sub.currentPeriodEnd)}`] : null,
     sub.graceEndsAt ? ["Grace until", longDate(sub.graceEndsAt)] : null,
-    ["Price", sub.needsPricing || sub.price.amount == null ? "To agree" : `${money(sub.price.amount, sub.price.currency)} / ${PERIOD[sub.billingPeriod]}`],
+    ["Price", sub.needsPricing || sub.price.amount == null ? "To agree" : `${money(sub.perPeriod ?? sub.price.amount, sub.price.currency)} / ${PERIOD[sub.billingPeriod]}`],
     ["Open", sub.openInvoices.count ? formatMoney(sub.openInvoices.total, { currency: sub.price.currency, exact: true }) : "Nothing owed"],
     sub.cancelledAt ? ["Ended", longDate(sub.cancelledAt)] : null,
   ].filter(Boolean);
@@ -838,6 +1063,7 @@ function SubscriptionDetail({ id, navigate, can }) {
       <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="space-y-5 max-lg:order-2">
           <PlanAndPrice sub={sub} manage={manage} onSaved={setSub} />
+          <AddOnsPanel sub={sub} manage={manage} onSaved={setSub} />
           <OverridesEditor sub={sub} manage={manage} onSaved={setSub} />
           <InvoicesPanel sub={sub} manage={manage} navigate={navigate} onIssued={(inv) => { load(); toast(`${inv.number} issued and emailed`); }} />
         </div>

@@ -58,6 +58,18 @@ export const code = (value, caption) => ({ kind: "code", value: String(value), c
 export const details = (rows) => ({ kind: "details", rows: rows.filter(([, v]) => v != null && v !== "") });
 export const button = (label, href) => ({ kind: "button", label, href });
 export const note = (text, tone = "neutral") => ({ kind: "note", text, tone });
+/**
+ * An itemised bill: rows of { description, detail?, amount } and, under
+ * them, totals as [label, amount] — the last one set as the total. Its
+ * own block rather than `details`, whose label column does not wrap: a
+ * line like "RFID card, printed with your logo and member ID" needs the
+ * width, and the amount needs to sit right where an eye looks for it.
+ */
+export const lines = (rows, totals = []) => ({
+  kind: "lines",
+  rows: rows.filter((r) => r && r.description),
+  totals: totals.filter(([, v]) => v != null && v !== ""),
+});
 
 function blockHtml(b) {
   switch (b.kind) {
@@ -101,6 +113,34 @@ function blockHtml(b) {
       );
     }
 
+    case "lines": {
+      const cell = "padding:11px 16px;vertical-align:top;";
+      const rows = b.rows
+        .map(
+          (r, i) =>
+            `<tr><td style="${cell}font-size:14px;line-height:1.45;color:${BRAND.ink};${i ? `border-top:1px solid ${BRAND.rule};` : ""}">` +
+            `${esc(r.description)}${r.detail ? `<div style="margin-top:2px;font-size:12.5px;color:${BRAND.faint};">${esc(r.detail)}</div>` : ""}</td>` +
+            `<td align="right" style="${cell}font-size:14px;font-weight:600;color:${BRAND.ink};white-space:nowrap;` +
+            `${i ? `border-top:1px solid ${BRAND.rule};` : ""}">${esc(r.amount)}</td></tr>`
+        )
+        .join("");
+      const totals = b.totals
+        .map(([label, value], i) => {
+          const last = i === b.totals.length - 1;
+          const top = i === 0 ? `border-top:2px solid ${BRAND.rule};` : "";
+          const weight = last ? "font-weight:800;font-size:15px;" : "font-size:13.5px;";
+          return (
+            `<tr><td align="right" style="padding:${i === 0 ? 12 : 4}px 16px ${last ? 12 : 4}px;${top}${weight}color:${last ? BRAND.ink : BRAND.soft};">${esc(label)}</td>` +
+            `<td align="right" style="padding:${i === 0 ? 12 : 4}px 16px ${last ? 12 : 4}px;${top}${weight}color:${BRAND.ink};white-space:nowrap;">${esc(value)}</td></tr>`
+          );
+        })
+        .join("");
+      return (
+        `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" ` +
+        `style="margin:4px 0 20px;background:${BRAND.well};border-radius:14px;">${rows}${totals}</table>`
+      );
+    }
+
     case "button":
       return (
         `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 22px;"><tr>` +
@@ -133,6 +173,12 @@ function blockText(b) {
     case "details": {
       const width = Math.max(...b.rows.map(([l]) => l.length));
       return b.rows.map(([l, v]) => `  ${l.padEnd(width)}   ${v}`).join("\n");
+    }
+    case "lines": {
+      // One line each, amount last: plain text is read, not scanned in columns.
+      const body = b.rows.map((r) => `  ${r.description}${r.detail ? ` (${r.detail})` : ""}: ${r.amount}`);
+      const sums = b.totals.map(([label, value]) => `  ${label}: ${value}`);
+      return [...body, ...(sums.length ? ["  ———", ...sums] : [])].join("\n");
     }
     case "button":
       return `${b.label}: ${b.href}`;

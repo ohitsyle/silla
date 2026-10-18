@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
-  ArrowLeft, ArrowRight, CircleCheck, CreditCard, Eye, EyeOff, RotateCcw, Send, UserPlus,
+  ArrowLeft, ArrowRight, CircleCheck, Eye, EyeOff, Pencil, RotateCcw, Send, UserPlus,
 } from "lucide-react";
 
-import { Button, Modal, Notice, Panel, Segmented, Stepper, panelEnter } from "./components/ui.jsx";
+import { Button, Modal, Notice, Stepper, panelEnter } from "./components/ui.jsx";
 import Preview from "./components/Preview.jsx";
+import QuoteSummary from "./components/QuoteSummary.jsx";
 import { DEFAULT_CONFIG, buildProfile, validate } from "./lib/profile.js";
-import { formatMoney, monthlyPrice, usePlans, yearlySaving } from "./lib/plans.js";
+import { formatMoney, usePlans } from "./lib/plans.js";
+import { DEFAULT_EXTRAS, count, extrasErrors, quoteFor, selectionsFrom, suggestPlan, withExtrasDefaults } from "./lib/extras.js";
 import { vendorApi } from "./lib/vendorApi.js";
 import { useAccount } from "./lib/AccountContext.jsx";
 import { ROUTES } from "./lib/useHashRoute.js";
@@ -20,6 +22,7 @@ import BrandingStep from "./steps/BrandingStep.jsx";
 import PolicyStep from "./steps/PolicyStep.jsx";
 import CatalogStep from "./steps/CatalogStep.jsx";
 import FloorsStep from "./steps/FloorsStep.jsx";
+import HardwareStep from "./steps/HardwareStep.jsx";
 import ReviewStep from "./steps/ReviewStep.jsx";
 
 /**
@@ -102,10 +105,20 @@ const STEPS = [
     fields: ["floors", "demoLayout"],
   },
   {
+    key: "hardware",
+    label: "Hardware",
+    title: "Hardware & support",
+    blurb: "How many buildings, the kiosks and cards you want from us, help setting up, and support. Priced as you go.",
+    Component: HardwareStep,
+    // The answers live beside the config, not in it; their problems are
+    // the live quote's, keyed "extras.<field>" (lib/extras.js).
+    fields: ["extras"],
+  },
+  {
     key: "review",
     label: "Review",
-    title: "Provisioning profile",
-    blurb: "This is the file SILLA's seeder consumes to build your system. Download it and send it over.",
+    title: "Your system and your quote",
+    blurb: "Everything you configured, what it costs, and the file SILLA's seeder builds it from.",
     Component: ReviewStep,
     fields: null,
   },
@@ -157,7 +170,13 @@ function readDraft() {
     const raw = window.localStorage.getItem(DRAFT_KEY);
     if (!raw) return null;
     const draft = JSON.parse(raw);
-    return { stepKey: draft.stepKey, config: withDefaults(draft.config) };
+    return {
+      stepKey: draft.stepKey,
+      config: withDefaults(draft.config),
+      extras: withExtrasDefaults(draft.extras),
+      plan: typeof draft.plan === "string" ? draft.plan : null,
+      annual: typeof draft.annual === "boolean" ? draft.annual : null,
+    };
   } catch {
     // Private-mode browsers throw on localStorage access, and a truncated
     // draft is not worth refusing to start over.
@@ -217,8 +236,13 @@ export default function Wizard({ onExit, navigate }) {
   // Whole Building at three times the price. Reading is pure; the
   // clearing is a side effect and belongs in an effect.
   const [entryIntent] = useState(peekIntent);
-  const [plan, setPlan] = useState(() => entryIntent?.plan || "building");
-  const [annual, setAnnual] = useState(() => entryIntent?.annual !== false);
+  // A plan clicked on the way in wins over a draft's; a draft's over the default.
+  const [plan, setPlan] = useState(() => entryIntent?.plan || restored?.plan || "building");
+  const [annual, setAnnual] = useState(() =>
+    entryIntent ? entryIntent.annual !== false : restored?.annual ?? true
+  );
+  /** The Hardware & support answers (lib/extras.js) — kept beside the config, never in the profile. */
+  const [extras, setExtras] = useState(() => restored?.extras || DEFAULT_EXTRAS);
 
   // Cleared once, after mount, so a plan chosen on the way in cannot
   // still be overriding an unrelated configuration later.
@@ -232,7 +256,8 @@ export default function Wizard({ onExit, navigate }) {
    * read from the SAME list the cards below show, so what a buyer saw is
    * what their order records.
    */
-  const { plans: catalogue, trialDays } = usePlans();
+  const store = usePlans();
+  const { plans: catalogue, catalogue: items, trialDays, vat } = store;
   const chosenPlan = catalogue.find((p) => p.key === plan) || null;
   // A plan that is no longer sold (retired since a draft was saved, say)
   // can't be ordered; fall back to the one most people take.
@@ -258,13 +283,13 @@ export default function Wizard({ onExit, navigate }) {
     try {
       window.localStorage.setItem(
         DRAFT_KEY,
-        JSON.stringify({ stepKey: STEPS[stepIndex].key, config })
+        JSON.stringify({ stepKey: STEPS[stepIndex].key, config, extras, plan, annual })
       );
     } catch {
       // Nothing to recover here: an unsaved draft costs the buyer a
       // re-entry, while a thrown quota error would cost them the page.
     }
-  }, [config, stepIndex]);
+  }, [config, stepIndex, extras, plan, annual]);
 
   // A downloaded file stops being the current answer the moment the
   // config moves on, so the confirmation must not outlive the edit.
@@ -283,10 +308,34 @@ export default function Wizard({ onExit, navigate }) {
     setConfig(pending.config);
     setPlan(pending.plan || "building");
     setAnnual(pending.annual !== false);
+    if (pending.extras) setExtras(withExtrasDefaults(pending.extras));
     setStepIndex(STEPS.length - 1);
   }, [isSignedIn]);
 
-  const errors = useMemo(() => toErrorMap(validate(config)), [config]);
+  /**
+   * The live quote: lib/quote.js on the answers, against the catalogue as
+   * this page has it. The server prices the order again from its own
+   * catalogue — this is what the buyer watches add up, not what they pay.
+   */
+  const profile = useMemo(() => buildProfile(config), [config]);
+  const layout = useMemo(() => {
+    const seats = new Map(profile.catalog.map((type) => [type.key, type.seatCount || 0]));
+    const units = profile.floors.reduce((sum, f) => sum + f.resources.reduce((n, piece) => n + (seats.get(piece.type) || 0), 0), 0);
+    return { floors: profile.floors.length, units };
+  }, [profile]);
+  const priced = useMemo(
+    () => (chosenPlan ? quoteFor(extras, { plan: chosenPlan, plans: catalogue, catalogue: items, annual, vat }) : null),
+    [extras, chosenPlan, catalogue, items, annual, vat]
+  );
+  const suggestion = useMemo(
+    () => suggestPlan({ plans: catalogue, catalogue: items, buildings: count(extras.buildings) || 1, ...layout, annual }),
+    [catalogue, items, extras.buildings, layout, annual]
+  );
+
+  const errors = useMemo(
+    () => ({ ...toErrorMap(validate(config)), ...extrasErrors(priced?.problems, items) }),
+    [config, priced, items]
+  );
 
   const step = STEPS[stepIndex];
   const isLast = stepIndex === STEPS.length - 1;
@@ -354,6 +403,7 @@ export default function Wizard({ onExit, navigate }) {
       // we cannot remove will simply be overwritten by the next edit.
     }
     setConfig(DEFAULT_CONFIG);
+    setExtras(DEFAULT_EXTRAS);
     setRevealed({});
     setDownloaded(false);
     setConfirmReset(false);
@@ -371,7 +421,7 @@ export default function Wizard({ onExit, navigate }) {
    */
   async function saveToAccount() {
     if (!isSignedIn) {
-      savePending({ config, plan, annual });
+      savePending({ config, plan, annual, extras });
       navigate?.(ROUTES.signUp);
       return;
     }
@@ -379,19 +429,18 @@ export default function Wizard({ onExit, navigate }) {
     setSaving(true);
     setSaveError(null);
     try {
+      // What was chosen, never what it costs: keys, quantities and buy or
+      // rent. The server prices the order from its catalogue and refuses,
+      // by field, anything that can't be ordered.
       const order = await vendorApi.createOrder({
         profile: buildProfile(config),
         plan,
         billingPeriod: annual ? "yearly" : "monthly",
-        // Per month, in minor units, in the plan's own currency — the
-        // figure on the card. The invoice is priced from the catalogue on
-        // the server; this records what the buyer was shown.
-        quotedAmount: monthlyPrice(chosenPlan, annual),
-        currency: chosenPlan?.currency || "PHP",
+        selections: selectionsFrom(extras, { plan: chosenPlan, catalogue: items }),
       });
       navigate?.(`${ROUTES.orders}/${order.order.id}`);
     } catch (e) {
-      setSaveError(e.message);
+      setSaveError(Object.values(e.fields || {})[0] || e.message);
     } finally {
       setSaving(false);
     }
@@ -514,9 +563,9 @@ export default function Wizard({ onExit, navigate }) {
             <div className="max-w-6xl mx-auto px-6 pt-10 sm:pt-14 pb-2 text-center">
               <h1 className="display text-[clamp(2rem,5vw,3.25rem)]">Let's build yours.</h1>
               <p className="mt-4 mx-auto max-w-xl text-base text-ink-secondary leading-relaxed">
-                Seven short steps. Name it, colour it, choose your words and lay out your floors —
-                then walk away with a file that builds the whole system. Nothing is locked in; you
-                can change any of it later.
+                Eight short steps. Name it, colour it, choose your words, lay out your floors and pick
+                the hardware you want — with the price added up beside you as you go. Nothing is locked
+                in; you can change any of it later.
               </p>
             </div>
           </motion.div>
@@ -533,7 +582,27 @@ export default function Wizard({ onExit, navigate }) {
         <div className="mt-6 grid gap-6 items-start lg:grid-cols-[minmax(0,1fr)_360px]">
           {/* top-[88px], not top-6: the site header is sticky and 72px
               tall, so a 24px offset parked the preview underneath it. */}
-          <aside className="order-1 lg:order-2 min-w-0 lg:sticky lg:top-[88px]">
+          {/* On the Hardware step the quote takes the preview's place: it is
+              the thing that changes as the buyer answers. Below lg it comes
+              after the form, so the questions stay first on a phone. */}
+          {step.key === "hardware" && priced && (
+            <aside className="hidden lg:block lg:order-2 min-w-0 lg:sticky lg:top-[88px] lg:max-h-[calc(100vh-104px)] lg:overflow-y-auto lg:pb-2">
+              <div className="hidden lg:flex items-center gap-2 mb-2 px-1">
+                <span className="relative flex h-2 w-2" aria-hidden>
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full opacity-60" style={{ background: "var(--color-accent)" }} />
+                  <span className="relative inline-flex h-2 w-2 rounded-full" style={{ background: "var(--color-accent)" }} />
+                </span>
+                <span className="text-[11px] font-bold uppercase tracking-[0.14em] text-ink-muted">Live quote</span>
+              </div>
+              <QuoteSummary
+                quote={priced.quote}
+                onSwitchYearly={() => setAnnual(true)}
+                footer="Priced from today's catalogue. Your order is priced again when you submit it, and the first invoice is issued from that."
+              />
+            </aside>
+          )}
+
+          <aside className={`order-1 lg:order-2 min-w-0 lg:sticky lg:top-[88px] ${step.key === "hardware" ? "hidden" : ""}`}>
             <Button
               className="lg:hidden w-full mb-3"
               icon={previewOpen ? EyeOff : Eye}
@@ -619,6 +688,36 @@ export default function Wizard({ onExit, navigate }) {
                   update={update}
                   errors={visibleErrors}
                   onDownload={download}
+                  pricing={{
+                    extras,
+                    setExtras,
+                    plan,
+                    setPlan,
+                    annual,
+                    setAnnual,
+                    plans: catalogue,
+                    catalogue: items,
+                    layout,
+                    suggestion,
+                  }}
+                  quote={
+                    isLast && priced ? (
+                      <QuoteSummary
+                        quote={priced.quote}
+                        problems={priced.problems}
+                        title={`Your quote — ${chosenPlan?.name || "plan"}`}
+                        onSwitchYearly={() => setAnnual(true)}
+                        action={
+                          <Button size="sm" variant="ghost" icon={Pencil} onClick={() => goTo(STEPS.findIndex((s) => s.key === "hardware"))}>
+                            Change
+                          </Button>
+                        }
+                        footer={`Nothing is charged now. Submitting your order sends the first invoice${
+                          trialDays > 0 ? `, and the ${trialDays}-day free trial starts when your system goes live` : ""
+                        }.`}
+                      />
+                    ) : null
+                  }
                 />
               </motion.div>
             </AnimatePresence>
@@ -695,62 +794,24 @@ export default function Wizard({ onExit, navigate }) {
               </motion.div>
             )}
 
-            {/* A Panel like every other block on the step. It used to be
-                a bare bordered div with a 14px heading — the one section
-                on the page that did not match the ones above it, which
-                reads as something bolted on rather than part of the
-                same form. */}
-            {isLast && (
-              <Panel
-                className="mt-6"
-                title="Which plan?"
-                icon={CreditCard}
-                subtitle="Priced by how much room you have. You can change this before we build it."
-              >
-                <div className="grid gap-2 sm:grid-cols-3">
-                  {catalogue.map((p) => {
-                    const chosen = p.key === plan;
-                    return (
-                      <button
-                        key={p.key}
-                        type="button"
-                        onClick={() => setPlan(p.key)}
-                        className="rounded-lg border-2 p-3 text-left transition-colors duration-fast"
-                        style={{
-                          borderColor: chosen ? "var(--color-accent)" : "rgb(var(--c-line) / 0.12)",
-                          background: chosen ? "rgb(var(--c-accent) / 0.08)" : "transparent",
-                        }}
-                      >
-                        <span className="block text-sm font-bold">{p.name}</span>
-                        <span className="mt-0.5 block text-sm text-ink-secondary">
-                          {formatMoney(monthlyPrice(p, annual), { period: "month", currency: p.currency })}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="mt-4 flex flex-wrap items-center gap-3">
-                  <Segmented
-                    size="sm"
-                    value={annual ? "yearly" : "monthly"}
-                    onChange={(v) => setAnnual(v === "yearly")}
-                    options={[
-                      // From the prices, like the pricing page's badge, so the two never disagree.
-                      { value: "yearly", label: yearlySaving(catalogue) > 0 ? `Yearly (−${yearlySaving(catalogue)}%)` : "Yearly" },
-                      { value: "monthly", label: "Monthly" },
-                    ]}
-                  />
-                  <span className="text-xs text-ink-muted">
-                    Nothing is charged now. Submitting sends your first invoice
-                    {trialDays > 0 ? `, and the ${trialDays}-day free trial starts when your system goes live` : ""}.
-                  </span>
-                </div>
-                {saveError && (
-                  <Notice tone="error" className="mt-4">
-                    {saveError}
-                  </Notice>
-                )}
-              </Panel>
+            {/* Below lg the quote follows the questions, above the floating
+                bar's resting place, so it is read before Continue. */}
+            {step.key === "hardware" && priced && (
+              <QuoteSummary
+                className="mt-4 lg:hidden"
+                quote={priced.quote}
+                onSwitchYearly={() => setAnnual(true)}
+                footer="Priced from today's catalogue. Your order is priced again when you submit it."
+              />
+            )}
+
+            {/* The plan is chosen with the hardware now (step 7), where the
+                buildings that decide it are asked; Review shows the quote
+                that results, with a way back to change it. */}
+            {isLast && saveError && (
+              <Notice tone="error" className="mt-4">
+                {saveError}
+              </Notice>
             )}
 
             {/*
@@ -784,6 +845,16 @@ export default function Wizard({ onExit, navigate }) {
                     from the corner of the eye, which "Step 4 of 7"
                     does not. The count stays for anyone who wants it. */}
                 <div className="ml-auto flex items-center gap-3 pr-1">
+                  {/* Below lg the quote sits after the form, so the bar
+                      carries its bottom line while the buyer answers. */}
+                  {step.key === "hardware" && priced?.quote?.totals?.firstInvoice && (
+                    <span className="lg:hidden text-right leading-tight">
+                      <span className="block text-[10px] font-bold uppercase tracking-[0.12em] text-ink-muted">First invoice</span>
+                      <span className="block text-sm font-extrabold tabular-nums">
+                        {formatMoney(priced.quote.totals.firstInvoice.total, { currency: priced.quote.currency })}
+                      </span>
+                    </span>
+                  )}
                   <span className="hidden sm:flex items-center gap-2">
                     <span className="h-1.5 w-24 overflow-hidden rounded-full bg-line/10">
                       <motion.span

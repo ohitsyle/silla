@@ -9,7 +9,7 @@
  *
  *   staff   GET   /subscriptions              ?status ?plan ?q ?attention=1
  *           GET   /subscriptions/:id          with its invoices, history and plan defaults
- *           PATCH /subscriptions/:id          plan, billingPeriod, price, overrides, notice, trialEndsAt
+ *           PATCH /subscriptions/:id          plan, billingPeriod, price, overrides, notice, trialEndsAt, addOns
  *           POST  /subscriptions/:id/suspend  { reason }
  *           POST  /subscriptions/:id/resume   lifts a suspension, or withdraws a scheduled end
  *           POST  /subscriptions/:id/cancel   { when: "now" | "period_end", reason }
@@ -35,6 +35,7 @@ import { requireAccount } from "../middleware/auth.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 import { can, requirePermission } from "../middleware/staff.js";
 import { FEATURES, LIMITS } from "../lib/planKeys.js";
+import { itemMonthly, monthsIn } from "../lib/quote.js";
 import * as billing from "../services/billing.js";
 
 const { BillingError, NUMBERED } = billing;
@@ -66,7 +67,14 @@ function invoiceShape(inv, { now = new Date() } = {}) {
     subscription: idOf(inv.subscription),
     issuer: inv.issuer,
     billTo: inv.billTo,
-    lines: (inv.lines || []).map((l) => ({ description: l.description, quantity: l.quantity, unitAmount: l.unitAmount, amount: l.amount })),
+    lines: (inv.lines || []).map((l) => ({
+      description: l.description,
+      quantity: l.quantity,
+      unitAmount: l.unitAmount,
+      amount: l.amount,
+      kind: l.kind || "",
+      note: l.note || "",
+    })),
     subtotal: inv.subtotal,
     tax: inv.tax,
     total: inv.total,
@@ -128,18 +136,46 @@ function staffInvoiceShape(inv, { now = new Date(), accounts = new Map() } = {})
 }
 
 const featureList = (features) => Object.entries(FEATURES).map(([key, label]) => ({ key, label, on: features[key] !== false }));
-const limitList = (limits) => Object.entries(LIMITS).map(([key, label]) => ({ key, label, value: limits[key] ?? null }));
+const limitList = (limits, raises = {}) =>
+  Object.entries(LIMITS).map(([key, label]) => ({ key, label, value: limits[key] ?? null, raisedBy: raises[key] || 0 }));
+
+/**
+ * What a subscription pays for besides the plan, each with what it comes
+ * to for one billing period — and the whole period, plan included. The
+ * same reading the next invoice will make (services/billing.js periodLines).
+ */
+function addOnsOf(sub) {
+  const months = monthsIn(sub.billingPeriod);
+  const addOns = (sub.addOns || []).map((a) => ({
+    key: a.key,
+    name: a.name,
+    kind: a.kind,
+    category: a.category || "",
+    quantity: a.quantity,
+    unitAmount: a.unitAmount,
+    periodUnitAmount: a.unitAmount * months,
+    periodAmount: a.unitAmount * months * a.quantity,
+    adds: a.adds || {},
+    minimumMonths: a.minimumMonths || 0,
+    since: a.since || null,
+  }));
+  const perPeriod = sub.price?.amount == null ? null : sub.price.amount + addOns.reduce((sum, a) => sum + a.periodAmount, 0);
+  return { addOns, perPeriod };
+}
 
 /** A subscription as its customer sees it. No overrides, history or sync — those are SILLA's. */
 function buyerSubscriptionShape(sub, { plan, order, open = [], now = new Date() }) {
   const words = billing.plainStatus(sub, { now });
-  const { features, limits } = billing.entitlementsFor(sub, plan || {});
+  const { features, limits, raises } = billing.entitlementsFor(sub, plan || {});
+  const { addOns, perPeriod } = addOnsOf(sub);
   return {
     id: String(sub._id),
     organizationName: sub.organizationName,
     plan: { key: sub.plan, name: sub.planName || plan?.name || sub.plan },
     billingPeriod: sub.billingPeriod,
     price: { amount: sub.price?.amount ?? null, currency: sub.price?.currency || "PHP" },
+    addOns,
+    perPeriod,
     priceToBeAgreed: Boolean(sub.needsPricing),
     status: sub.status,
     statusLabel: words.label,
@@ -155,7 +191,7 @@ function buyerSubscriptionShape(sub, { plan, order, open = [], now = new Date() 
     orderId: idOf(sub.order),
     // The line staff set for this organization; its administrators see it in the product too.
     notice: sub.notice || null,
-    includes: { features: featureList(features), limits: limitList(limits) },
+    includes: { features: featureList(features), limits: limitList(limits, raises) },
     openInvoices: open.map((inv) => invoiceShape(inv, { now })),
   };
 }
@@ -171,6 +207,8 @@ function staffSubscriptionRow(sub, { account, open = [], now = new Date() }) {
     planName: sub.planName,
     billingPeriod: sub.billingPeriod,
     price: { amount: sub.price?.amount ?? null, currency: sub.price?.currency || "PHP" },
+    perPeriod: addOnsOf(sub).perPeriod,
+    addOnCount: (sub.addOns || []).filter((a) => a.unitAmount > 0).length,
     needsPricing: Boolean(sub.needsPricing),
     status: sub.status,
     statusLabel: billing.plainStatus(sub, { now }).label,
@@ -350,24 +388,56 @@ async function loadSubscription(req, res) {
   return sub;
 }
 
+/**
+ * What staff can put on a subscription: everything billed every period —
+ * extra buildings, support, and anything that can be rented — priced for
+ * this subscription's billing period. Something paid once is a manual
+ * invoice, not an add-on.
+ */
+const addOnOptions = (items, sub) =>
+  items
+    .filter((i) => i.charge === "recurring" || i.charge === "buy_or_rent")
+    .map((i) => ({
+      key: i.key,
+      name: i.name,
+      category: i.category,
+      kind: i.charge === "recurring" ? "recurring" : "rental",
+      unit: i.unit,
+      monthly: itemMonthly(i, sub.billingPeriod),
+      plans: i.plans,
+      group: i.group,
+      groupDefault: i.groupDefault,
+      minQuantity: i.minQuantity,
+      maxQuantity: i.maxQuantity,
+      adds: i.adds,
+      active: i.active,
+    }));
+
 async function subscriptionDetail(sub) {
   const now = new Date();
-  const [invoices, plan, order, plans] = await Promise.all([
+  const [invoices, plan, order, plans, items] = await Promise.all([
     Invoice.find({ subscription: sub._id, ...NUMBERED }).sort({ issuedAt: -1 }),
     billing.planByKey(sub.plan),
-    Order.findById(sub.order).select("status deploymentUrl provisionedOrganizationId createdAt"),
+    Order.findById(sub.order).select("status deploymentUrl provisionedOrganizationId createdAt quote"),
     billing.catalogue({ includeRetired: true }),
+    billing.catalogItems({ includeRetired: true }),
   ]);
   const historyBy = (sub.history || []).map((h) => h.by).filter(Boolean);
   const accounts = await accountsById([sub.account, ...historyBy, ...invoices.map((i) => i.payment?.recordedBy)]);
   const open = invoices.filter((i) => i.status === "open");
   const shapedPlan = plan ? billing.planShape(plan) : null;
-  const { features, limits } = billing.entitlementsFor(sub, plan || {});
+  const { features, limits, raises } = billing.entitlementsFor(sub, plan || {});
   return {
     ...staffSubscriptionRow(sub, { account: accounts.get(String(sub.account)), open, now }),
+    ...addOnsOf(sub),
+    addOnOptions: addOnOptions(items, sub),
     overrides: { features: sub.overrides?.features || {}, limits: sub.overrides?.limits || {} },
     planDefaults: shapedPlan ? { features: shapedPlan.features, limits: shapedPlan.limits, prices: shapedPlan.prices, currency: shapedPlan.currency, active: shapedPlan.active } : null,
-    effective: { features, limits },
+    effective: { features, limits, raises },
+    // What was paid once, from the order's frozen quote — staff deliver it.
+    oneTime: (order?.quote?.lines || [])
+      .filter((l) => l.kind === "one_time")
+      .map((l) => ({ key: l.key, name: l.name, description: l.description, quantity: l.quantity, amount: l.amount, waived: Boolean(l.waived) })),
     cancelReason: sub.cancelReason || "",
     order: order ? { id: String(order._id), status: order.status, deploymentUrl: order.deploymentUrl || "" } : null,
     plans: plans.map((p) => ({ key: p.key, name: p.name, active: p.active, prices: p.prices, currency: p.currency })),
@@ -404,7 +474,7 @@ router.patch(
     if (!sub) return;
     const body = req.body || {};
     const patch = Object.fromEntries(
-      ["plan", "billingPeriod", "price", "overrides", "notice", "trialEndsAt"].filter((k) => body[k] !== undefined).map((k) => [k, body[k]])
+      ["plan", "billingPeriod", "price", "overrides", "notice", "trialEndsAt", "addOns"].filter((k) => body[k] !== undefined).map((k) => [k, body[k]])
     );
     if (!Object.keys(patch).length) return res.status(400).json({ error: "Nothing to change." });
     const { subscription, invoice } = await billing.updateSubscription(sub, patch, req.account);

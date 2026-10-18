@@ -34,6 +34,7 @@
  */
 import mongoose from "mongoose";
 import Plan from "../models/Plan.js";
+import CatalogItem, { CATALOG_CATEGORIES, CATALOG_CHARGES } from "../models/CatalogItem.js";
 import Subscription from "../models/Subscription.js";
 import Invoice, { PAYMENT_METHODS } from "../models/Invoice.js";
 import Settings from "../models/Settings.js";
@@ -42,7 +43,11 @@ import Order from "../models/Order.js";
 import { nextSequence } from "../models/Counter.js";
 import { callDeployment } from "../lib/controlPlane.js";
 import { DEFAULT_PLANS } from "../lib/defaultPlans.js";
+import { DEFAULT_CATALOG } from "../lib/defaultCatalog.js";
 import { FEATURES, LIMITS } from "../lib/planKeys.js";
+import {
+  MAX_QUANTITY, buildQuote, describeLine, itemMonthly as itemMonthlyOf, monthsIn, readSelections, scaledAdds, vatLabel, vatOn,
+} from "../lib/quote.js";
 import { audit } from "../lib/audit.js";
 import { isUndeliverable, sendEmail } from "./email/index.js";
 import * as mail from "./email/billingTemplates.js";
@@ -396,6 +401,286 @@ async function resyncPlan(key) {
   return ids.length;
 }
 
+/* ───────────────────────────── the catalogue: everything besides a plan ───────────────────────────── */
+
+/**
+ * Extra buildings, hardware, services and support — seeded with
+ * DEFAULT_CATALOG the first time it is empty, exactly as the plans are,
+ * then owned by staff (models/CatalogItem.js says what each field means).
+ */
+export async function ensureCatalog() {
+  if ((await CatalogItem.estimatedDocumentCount()) === 0) {
+    await CatalogItem.insertMany(DEFAULT_CATALOG).catch((err) => {
+      if (err?.code !== 11000) throw err; // a concurrent first read already seeded it
+    });
+  }
+  return CatalogItem.find({}).sort({ sort: 1, createdAt: 1 }).lean();
+}
+
+const amountOrNull = (v) => (isAmount(v) ? v : null);
+
+/** Per-unit limit raises, keyed by lib/planKeys.js — anything else is dropped. */
+function cleanAdds(adds) {
+  const out = {};
+  for (const [key, n] of Object.entries(adds || {})) {
+    if (key in LIMITS && Number.isInteger(n) && n > 0) out[key] = n;
+  }
+  return out;
+}
+
+/** One catalogue item as the storefront, the configurator and lib/quote.js read it. */
+export function catalogItemShape(item) {
+  const prices = item.prices || {};
+  return {
+    key: item.key,
+    name: item.name,
+    description: item.description || "",
+    highlights: item.highlights || [],
+    category: item.category,
+    charge: item.charge,
+    unit: { one: item.unit?.one || "unit", many: item.unit?.many || "units" },
+    currency: item.currency || "PHP",
+    prices: {
+      oneTime: amountOrNull(prices.oneTime),
+      monthly: amountOrNull(prices.monthly),
+      annualMonthly: amountOrNull(prices.annualMonthly),
+    },
+    minQuantity: Number.isInteger(item.minQuantity) && item.minQuantity >= 1 ? item.minQuantity : 1,
+    maxQuantity: Number.isInteger(item.maxQuantity) && item.maxQuantity >= 1 ? item.maxQuantity : null,
+    plans: [...(item.plans || [])],
+    group: item.group || "",
+    groupDefault: Boolean(item.groupDefault),
+    adds: cleanAdds(item.adds),
+    note: item.note || "",
+    waivedOnYearly: Boolean(item.waivedOnYearly),
+    alwaysIncluded: Boolean(item.alwaysIncluded),
+    rentalMinimumMonths: Number.isInteger(item.rentalMinimumMonths) && item.rentalMinimumMonths > 0 ? item.rentalMinimumMonths : 0,
+    active: item.active !== false,
+    sort: item.sort || 0,
+  };
+}
+
+/** The catalogue, shaped: active items for the storefront, everything for staff. */
+export async function catalogItems({ includeRetired = false } = {}) {
+  const items = await ensureCatalog();
+  return items.filter((i) => includeRetired || i.active !== false).map(catalogItemShape);
+}
+
+const catalogTarget = (item) => ({ type: "catalog", id: item.key, label: item.name });
+const GROUP_KEY = /^[a-z0-9-]{2,40}$/;
+/** The fields a new item starts from, so a create is validated as the whole item it will be. */
+const BLANK_ITEM = catalogItemShape({ key: "", name: "", category: "hardware", charge: "one_time", unit: {}, prices: {} });
+
+/**
+ * Validates a create or an edit. Each field is checked on its own, then
+ * the item AS IT WOULD BE SAVED is checked as a whole: a charge that
+ * needs a price it doesn't have, a limit raise on something paid once, a
+ * waiver on something that isn't one-time. An edit sends only what
+ * changed, so the whole is the stored item with the edit laid over it.
+ */
+function readCatalogItem(input = {}, { creating, current = null, planKeys = [] }) {
+  const fields = {};
+  const value = {};
+
+  if (creating) {
+    value.key = String(input.key || "").trim().toLowerCase();
+    if (!PLAN_KEY.test(value.key)) fields.key = "Use 2–40 lowercase letters, digits or hyphens.";
+  }
+  if (creating || input.name !== undefined) {
+    value.name = clean(input.name, 200);
+    if (!value.name) fields.name = "Name it — this is what an invoice line says.";
+    else if (value.name.length > 60) fields.name = "Keep the name under 60 characters.";
+  }
+  if (input.description !== undefined) {
+    value.description = clean(input.description, 600);
+    if (value.description.length > 300) fields.description = "Keep it under 300 characters.";
+  }
+  if (input.highlights !== undefined) {
+    const list = lines(input.highlights);
+    if (list.length > 8) fields.highlights = "Up to 8 points.";
+    else if (list.some((s) => s.length > 120)) fields.highlights = "Keep each point under 120 characters.";
+    value.highlights = list;
+  }
+  if (creating || input.category !== undefined) {
+    value.category = String(input.category || "");
+    if (!CATALOG_CATEGORIES.includes(value.category)) fields.category = "Choose what kind of thing it is.";
+  }
+  if (creating || input.charge !== undefined) {
+    value.charge = String(input.charge || "");
+    if (!CATALOG_CHARGES.includes(value.charge)) fields.charge = "Choose how it is charged.";
+  }
+  if (input.unit !== undefined) {
+    value.unit = { one: clean(input.unit?.one, 60), many: clean(input.unit?.many, 60) };
+    for (const n of ["one", "many"]) {
+      if (!value.unit[n]) fields[`unit.${n}`] = n === "one" ? "What is one called — “card”?" : "And more than one — “cards”?";
+      else if (value.unit[n].length > 30) fields[`unit.${n}`] = "Keep it under 30 characters.";
+    }
+  }
+  if (input.currency !== undefined) {
+    value.currency = String(input.currency || "").trim().toUpperCase();
+    if (!/^[A-Z]{3}$/.test(value.currency)) fields.currency = "A three-letter currency code, like PHP.";
+  }
+  if (input.prices !== undefined) {
+    const raw = input.prices && typeof input.prices === "object" ? input.prices : {};
+    // Only the prices sent change; null clears one.
+    value.prices = { ...(current ? catalogItemShape(current).prices : BLANK_ITEM.prices) };
+    for (const p of ["oneTime", "monthly", "annualMonthly"]) {
+      if (p in raw) value.prices[p] = readAmount(raw[p], fields, `prices.${p}`, "Enter a price in pesos, or leave it empty.");
+    }
+  }
+  const readCount = (key, { nullable = false } = {}) => {
+    if (input[key] === undefined) return;
+    if (nullable && (input[key] === null || input[key] === "")) {
+      value[key] = null;
+      return;
+    }
+    const n = Number(input[key]);
+    if (!Number.isInteger(n) || n < 1 || n > MAX_QUANTITY) fields[key] = `A whole number from 1 to ${MAX_QUANTITY.toLocaleString("en-PH")}.`;
+    value[key] = n;
+  };
+  readCount("minQuantity");
+  readCount("maxQuantity", { nullable: true });
+  if (input.plans !== undefined) {
+    const list = (Array.isArray(input.plans) ? input.plans : []).map((k) => String(k).trim().toLowerCase()).filter(Boolean);
+    const unknown = list.find((k) => !planKeys.includes(k));
+    if (!Array.isArray(input.plans)) fields.plans = "List the plans it is offered on, or none for every plan.";
+    else if (unknown) fields.plans = `There is no plan called “${unknown}”.`;
+    value.plans = [...new Set(list)];
+  }
+  if (input.group !== undefined) {
+    value.group = String(input.group || "").trim().toLowerCase();
+    if (value.group && !GROUP_KEY.test(value.group)) fields.group = "2–40 lowercase letters, digits or hyphens — “support”.";
+  }
+  for (const flag of ["groupDefault", "waivedOnYearly", "alwaysIncluded", "active"]) {
+    if (input[flag] !== undefined) value[flag] = Boolean(input[flag]);
+  }
+  if (input.adds !== undefined) {
+    const raw = input.adds;
+    value.adds = {};
+    if (raw !== null && (typeof raw !== "object" || Array.isArray(raw))) fields.adds = "Limit raises are a set of numbers, like { buildings: 1 }.";
+    else {
+      for (const [k, n] of Object.entries(raw || {})) {
+        if (!(k in LIMITS)) fields[`adds.${k}`] = `There is no limit called "${k}".`;
+        else if (n === null || n === 0 || n === "") continue;
+        else if (!Number.isInteger(n) || n < 1 || n > 1000) fields[`adds.${k}`] = "A whole number per unit, from 1.";
+        else value.adds[k] = n;
+      }
+    }
+  }
+  if (input.note !== undefined) {
+    value.note = clean(input.note, 400);
+    if (value.note.length > 200) fields.note = "Keep the note under 200 characters — it is printed beside the price.";
+  }
+  if (input.rentalMinimumMonths !== undefined) {
+    const n = Number(input.rentalMinimumMonths || 0);
+    if (!Number.isInteger(n) || n < 0 || n > 60) fields.rentalMinimumMonths = "A whole number of months, 0–60.";
+    value.rentalMinimumMonths = n;
+  }
+  if (input.sort !== undefined) {
+    value.sort = Number(input.sort);
+    if (!Number.isInteger(value.sort)) fields.sort = "A whole number — lower comes first.";
+  }
+
+  const next = { ...(current ? catalogItemShape(current) : BLANK_ITEM), ...value };
+  if (!Object.keys(fields).length) {
+    const p = next.prices;
+    if (next.charge === "one_time" && p.oneTime == null) fields["prices.oneTime"] = "Enter the price of one.";
+    if (next.charge === "recurring" && p.monthly == null) fields["prices.monthly"] = "Enter the price per month.";
+    if (next.charge === "buy_or_rent") {
+      if (p.oneTime == null) fields["prices.oneTime"] = "Enter the price to buy one.";
+      if (p.monthly == null) fields["prices.monthly"] = "Enter the rent per month.";
+    }
+    if (next.maxQuantity != null && next.maxQuantity < next.minQuantity) fields.maxQuantity = "It can't be less than the minimum.";
+    if (Object.keys(next.adds || {}).length && next.charge !== "recurring") {
+      fields.adds = "Only something paid monthly can raise a limit — the limit lasts as long as it is paid for.";
+    }
+    if (next.waivedOnYearly && next.charge !== "one_time") fields.waivedOnYearly = "Only a one-time charge can be waived on yearly billing.";
+    if (next.rentalMinimumMonths > 0 && next.charge !== "buy_or_rent") fields.rentalMinimumMonths = "Only something that can be rented has a minimum rental.";
+    if (next.groupDefault && !next.group) fields.groupDefault = "Only an item in a group can be that group's default.";
+    else if (next.groupDefault && next.charge !== "recurring") fields.groupDefault = "A group's default must be something paid monthly.";
+    if (next.alwaysIncluded && next.group) fields.alwaysIncluded = "Something on every order can't also be one choice of a group.";
+  }
+  return { value, fields, next };
+}
+
+/** One default per group: a second would leave the quote to pick between them. */
+async function checkGroupDefault(next, fields) {
+  if (fields.groupDefault || !next.groupDefault || !next.active) return;
+  const other = await CatalogItem.findOne({ key: { $ne: next.key }, group: next.group, groupDefault: true, active: { $ne: false } }).lean();
+  if (other) fields.groupDefault = `${other.name} is already the default “${next.group}” choice. Turn that off first.`;
+}
+
+export async function createCatalogItem(input, by) {
+  await ensureCatalog();
+  const planKeys = (await ensurePlans()).map((p) => p.key);
+  const { value, fields, next } = readCatalogItem(input, { creating: true, planKeys });
+  if (!fields.key && (await CatalogItem.exists({ key: value.key }))) fields.key = "Something with that key already exists.";
+  await checkGroupDefault(next, fields);
+  if (Object.keys(fields).length) refuse(fields);
+
+  const item = await CatalogItem.create(next);
+  const shaped = catalogItemShape(item);
+  await audit(actor(by), "catalog.create", catalogTarget(item), `Added ${item.name} to the catalogue`, shaped);
+  return shaped;
+}
+
+/**
+ * Edit an item. Its price, minimums and rules reach NEW quotes only: an
+ * order froze its quote when it was submitted, and a subscription keeps
+ * the price — and the limit raise — agreed for each add-on it carries.
+ */
+export async function updateCatalogItem(key, input, by) {
+  const item = await CatalogItem.findOne({ key });
+  if (!item) throw new BillingError("There is nothing in the catalogue with that key.", { status: 404 });
+  const planKeys = (await ensurePlans()).map((p) => p.key);
+  const { value, fields, next } = readCatalogItem(input, { creating: false, current: item, planKeys });
+  await checkGroupDefault(next, fields);
+  if (Object.keys(fields).length) refuse(fields);
+
+  const before = catalogItemShape(item);
+  for (const [field, v] of Object.entries(value)) {
+    item.set(field, v);
+    if (field === "adds") item.markModified("adds");
+  }
+  await item.save();
+  const after = catalogItemShape(item);
+  const changed = Object.keys(value).filter((f) => JSON.stringify(before[f]) !== JSON.stringify(after[f]));
+  if (changed.length) {
+    const pick = (o) => Object.fromEntries(changed.map((f) => [f, o[f]]));
+    await audit(actor(by), "catalog.update", catalogTarget(item), `Updated ${item.name} in the catalogue (${changed.join(", ")})`, {
+      changed,
+      before: pick(before),
+      after: pick(after),
+    });
+  }
+  return after;
+}
+
+/**
+ * The quote for an order's choices, priced HERE from the plans, the
+ * catalogue and the VAT settings as they stand — the only way an order is
+ * priced. lib/quote.js does the maths, and the configurator runs the same
+ * module to show its live quote, but nothing a browser computes or sends
+ * is trusted: the order route passes only keys, quantities and buy/rent.
+ * Retired items are passed in so that choosing one says it is no longer
+ * offered rather than that it never existed.
+ */
+export async function quoteOrder({ plan, billingPeriod, selections = [] }) {
+  const [plans, items, settings] = await Promise.all([
+    catalogue({ includeRetired: true }),
+    catalogItems({ includeRetired: true }),
+    getSettings(),
+  ]);
+  return buildQuote({
+    plan: planShape(plan),
+    plans,
+    billingPeriod,
+    selections,
+    catalogue: items,
+    vat: { registered: Boolean(settings.business?.vatRegistered), rate: settings.business?.vatRate ?? 0.12 },
+  });
+}
+
 /* ───────────────────────────── settings ───────────────────────────── */
 
 /** SILLA's business settings — one document, created with its defaults on first read. */
@@ -598,8 +883,6 @@ const issuerFrom = (s) => ({
   vatRegistered: Boolean(s.business?.vatRegistered),
 });
 
-const percent = (rate) => `${Math.round(rate * 10000) / 100}%`;
-
 /**
  * Issues one invoice: numbered, taxed per Settings, addressed from the
  * account's billing details, emailed. The single way an invoice comes
@@ -630,13 +913,17 @@ async function issueInvoice({
     quantity: l.quantity,
     unitAmount: l.unitAmount,
     amount: l.quantity * l.unitAmount,
+    kind: l.kind || "",
+    key: l.key || "",
+    note: l.note || "",
   }));
   const subtotal = priced.reduce((sum, l) => sum + l.amount, 0);
   // VAT on top of the price, as Philippine B2B prices are usually quoted;
-  // the storefront says "excluding VAT" whenever this applies.
+  // the storefront says "excluding VAT" whenever this applies. Rounded the
+  // way lib/quote.js rounds it, so an invoice says what its quote said.
   const vat = Boolean(settings.business?.vatRegistered);
   const rate = vat ? Number(settings.business.vatRate) || 0 : 0;
-  const tax = vat ? { label: `VAT ${percent(rate)}`, rate, amount: Math.round(subtotal * rate) } : { label: "", rate: 0, amount: 0 };
+  const tax = vat ? { label: vatLabel(rate), rate, amount: vatOn(subtotal, rate) } : { label: "", rate: 0, amount: 0 };
 
   const base = {
     account: account._id,
@@ -731,17 +1018,92 @@ export async function numberReservedInvoices({ olderThanMs = 5 * 60_000, now = n
   return stuck.length;
 }
 
+/* ── what a period is billed with ── */
+
+/**
+ * The lines one billing period is invoiced with: the plan at its agreed
+ * price, then every add-on the subscription carries — extra buildings,
+ * rentals, support — at the prices agreed for them, per unit for the
+ * period. The first invoice and every renewal are built from this, so a
+ * renewal bills exactly what the first did, less what was paid once.
+ * `occasion` only changes the words (lib/quote.js describeLine).
+ */
+function periodLines(sub, { occasion }) {
+  const billingPeriod = sub.billingPeriod;
+  const months = monthsIn(billingPeriod);
+  return [
+    {
+      description: describeLine({ kind: "plan", name: sub.planName }, { billingPeriod, occasion }),
+      quantity: 1,
+      unitAmount: sub.price.amount,
+      kind: "plan",
+      key: "plan",
+    },
+    ...(sub.addOns || []).map((a) => ({
+      description: describeLine(
+        { kind: a.kind, name: a.name, minimumMonths: a.minimumMonths, included: a.unitAmount === 0 },
+        { billingPeriod, occasion }
+      ),
+      quantity: a.quantity,
+      unitAmount: a.unitAmount * months,
+      kind: a.kind,
+      key: a.key,
+    })),
+  ];
+}
+
+/** "Extra building × 2, SILLA Kiosk rental × 2, Care support" — for history notes and the activity log. */
+const describeAddOns = (addOns) =>
+  addOns?.length
+    ? addOns.map((a) => `${a.name}${a.kind === "rental" ? " rental" : ""}${a.quantity > 1 ? ` × ${a.quantity}` : ""}`).join(", ")
+    : "no add-ons";
+
+/** An order's one-time items — hardware bought, services — as invoice lines, from its frozen quote. */
+const oneTimeLinesOf = (quote) =>
+  (quote?.lines || [])
+    .filter((l) => l.kind === "one_time")
+    .map((l) => ({
+      description: l.description,
+      quantity: l.quantity,
+      // A waived line is billed at nothing and says so in its words.
+      unitAmount: l.waived ? 0 : l.unitAmount,
+      kind: "one_time",
+      key: l.key,
+      note: l.note || "",
+    }));
+
+/** The add-ons a subscription starts with: every recurring line and rental of the order's frozen quote. */
+const addOnsFromQuote = (quote, since = new Date()) =>
+  (quote?.lines || [])
+    .filter((l) => l.kind === "recurring" || l.kind === "rental")
+    .map((l) => ({
+      key: l.key,
+      name: l.name,
+      category: l.category || "",
+      kind: l.kind,
+      quantity: l.quantity,
+      unitAmount: l.unitAmount,
+      adds: l.unitAdds || {},
+      minimumMonths: l.minimumMonths || 0,
+      since,
+    }));
+
 /**
  * The invoice that pays for a subscription's first period. Its period is
  * left open: the service starts when the deployment goes live, after the
  * trial, which nobody knows yet — applyPaidInvoices() writes it when the
  * payment buys its period.
  *
+ * It carries the plan, every add-on, and the order's one-time items —
+ * billed ONCE: they are left off if an invoice still standing (open or
+ * paid) already carries them, so a voided first invoice puts them back on
+ * its replacement and nothing else ever bills them twice.
+ *
  * If a first invoice already exists (even a voided one) the next one is
  * a manual extending invoice instead: there is one "first" per
  * subscription, and a voided one keeps its place in the record.
  */
-async function issuePeriodInvoice(sub, { account = null, settings = null, firstOnly = false } = {}) {
+async function issuePeriodInvoice(sub, { account = null, settings = null, firstOnly = false, quote = undefined } = {}) {
   if (sub.price?.amount == null) return { invoice: null, created: false };
   account = account || (await Account.findById(sub.account));
   if (!account) return { invoice: null, created: false };
@@ -749,11 +1111,14 @@ async function issuePeriodInvoice(sub, { account = null, settings = null, firstO
   // the first must be refused by the unique index, not see the first one
   // and issue itself as a "manual" invoice beside it — which it did.
   const hasFirst = !firstOnly && (await Invoice.exists({ subscription: sub._id, kind: "first" }));
+  const frozen = quote !== undefined ? quote : (await Order.findById(sub.order).select("quote").lean())?.quote;
+  const oneTimeBilled =
+    !firstOnly && (await Invoice.exists({ subscription: sub._id, status: { $in: ["open", "paid"] }, "lines.kind": "one_time" }));
   return issueInvoice({
     account,
     subscription: sub,
     kind: hasFirst ? "manual" : "first",
-    lines: [{ description: `${sub.planName} plan — first ${PERIOD_WORD[sub.billingPeriod]}`, quantity: 1, unitAmount: sub.price.amount }],
+    lines: [...periodLines(sub, { occasion: "first" }), ...(oneTimeBilled ? [] : oneTimeLinesOf(frozen))],
     currency: sub.price.currency || "PHP",
     extendsSubscription: true,
     billingPeriod: sub.billingPeriod,
@@ -785,7 +1150,8 @@ export async function issueRenewalInvoice(sub, { settings = null } = {}) {
     account,
     subscription: sub,
     kind: "renewal",
-    lines: [{ description: `${sub.planName} plan — renewal, 1 ${PERIOD_WORD[sub.billingPeriod]}`, quantity: 1, unitAmount: sub.price.amount }],
+    // The plan and every add-on, never the one-time items: those were paid once.
+    lines: periodLines(sub, { occasion: "renewal" }),
     currency: sub.price.currency || "PHP",
     extendsSubscription: true,
     billingPeriod: sub.billingPeriod,
@@ -859,7 +1225,14 @@ async function reissueVoidedPeriods(sub, by) {
       account,
       subscription: sub,
       kind: "manual",
-      lines: old.lines.map((l) => ({ description: l.description, quantity: l.quantity, unitAmount: l.unitAmount })),
+      lines: old.lines.map((l) => ({
+        description: l.description,
+        quantity: l.quantity,
+        unitAmount: l.unitAmount,
+        kind: l.kind || "",
+        key: l.key || "",
+        note: l.note || "",
+      })),
       currency: old.currency,
       extendsSubscription: true,
       billingPeriod: old.billingPeriod || sub.billingPeriod,
@@ -960,22 +1333,29 @@ export async function issueManualInvoice(input = {}, by = null) {
  * Called once an order is submitted: creates its subscription and the
  * first invoice. Idempotent — a retried submit finds both already there.
  *
- * The price is the CATALOGUE's, read here on the server. The order's
- * quotedAmount is what the buyer's browser sent, and the order route
- * accepts any number in it; billing from it would let anyone set their
- * own price. When the two disagree (staff repriced between a draft and
- * its submission) the history says so, for staff to honour if they wish.
+ * The price is the SERVER's: the quote order.routes.js froze onto the
+ * order at submission, computed from the catalogue then — the plan's price
+ * for the period, every add-on and rental with its quantity and price, and
+ * the one-time items the first invoice carries. Nothing the buyer's
+ * browser sent is billed from.
+ *
+ * An order submitted before quotes existed has none; it is billed as it
+ * always was, the plan alone at the catalogue's price, and when that
+ * differs from what the buyer was shown the history says so.
  */
 export async function onOrderSubmitted(order) {
   const plan = await planByKey(order.plan);
-  const amount = periodPrice(plan, order.billingPeriod);
-  const currency = plan?.currency || "PHP";
+  const frozen = order.quote?.plan ? order.quote : null;
+  const amount = frozen ? frozen.plan.perPeriod ?? null : periodPrice(plan, order.billingPeriod);
+  const currency = frozen?.currency || plan?.currency || "PHP";
+  const addOns = frozen ? addOnsFromQuote(frozen) : [];
 
   const notes = [amount == null ? "Order submitted — priced with you: no invoice until a price is agreed" : "Order submitted"];
   const shown = monthlyFigure(plan, order.billingPeriod);
-  if (Number.isFinite(order.quotedAmount) && order.currency === currency && shown != null && order.quotedAmount !== shown) {
+  if (!frozen && Number.isFinite(order.quotedAmount) && order.currency === currency && shown != null && order.quotedAmount !== shown) {
     notes.push(`quoted ${money(order.quotedAmount, currency)}/month when configured; catalogue price ${money(shown, currency)}/month used`);
   }
+  if (addOns.length) notes.push(`with ${describeAddOns(addOns)}`);
 
   const result = await Subscription.findOneAndUpdate(
     { order: order._id },
@@ -988,6 +1368,7 @@ export async function onOrderSubmitted(order) {
         planName: plan?.name || order.plan,
         billingPeriod: order.billingPeriod,
         price: { amount, currency },
+        addOns,
         needsPricing: amount == null,
         status: "pending",
         history: [{ status: "pending", by: order.account, note: notes.join("; ") }],
@@ -1004,12 +1385,13 @@ export async function onOrderSubmitted(order) {
         plan: sub.plan,
         billingPeriod: sub.billingPeriod,
         price: sub.price?.amount ?? null,
+        addOns: (sub.addOns || []).map((a) => ({ key: a.key, kind: a.kind, quantity: a.quantity, unitAmount: a.unitAmount })),
       });
   }
 
   if (sub.status === "pending" && !sub.needsPricing && account) {
     if (!(await Invoice.exists({ subscription: sub._id, kind: "first" }))) {
-      const { invoice, created } = await issuePeriodInvoice(sub, { account, firstOnly: true });
+      const { invoice, created } = await issuePeriodInvoice(sub, { account, firstOnly: true, quote: frozen });
       if (created) {
         await audit(actor(account), "invoice.issue", invoiceTarget(invoice),
           `Issued first invoice ${invoice.number} to ${invoice.organizationName}`, {
@@ -1058,16 +1440,25 @@ const DEPLOYMENT_STATUS = {
   cancelled: "cancelled",
 };
 
+/** What the add-ons a subscription carries raise, in all: two extra buildings → { buildings: 2 }. */
+export function addOnRaises(subscription) {
+  const raises = {};
+  for (const a of subscription?.addOns || []) {
+    for (const [key, n] of Object.entries(scaledAdds(a.adds, a.quantity))) {
+      if (key in LIMITS) raises[key] = (raises[key] || 0) + n;
+    }
+  }
+  return raises;
+}
+
 /**
- * The entitlement snapshot for a subscription: plan defaults, then this
- * client's overrides, then status. The shape is the contract the product
- * enforces (server/src/services/entitlements.js; docs/control-plane.md).
- */
-/**
- * What a plan plus this client's overrides allow: every feature true or
- * false, every limit a number or null (unlimited). An override wins over
- * the plan; a key neither mentions is allowed — the same reading the
- * product applies (docs/control-plane.md §2).
+ * What a plan, this client's overrides and the add-ons they pay for
+ * allow: every feature true or false, every limit a number or null
+ * (unlimited). In that order — the plan's limit, replaced by an override
+ * if staff set one, then raised by what the add-ons add (an extra
+ * building is one more building whatever the base is). Unlimited stays
+ * unlimited. A key none of them mentions is allowed — the same reading
+ * the product applies (docs/control-plane.md §2).
  */
 export function entitlementsFor(subscription, plan = {}) {
   const features = {};
@@ -1075,15 +1466,22 @@ export function entitlementsFor(subscription, plan = {}) {
     const override = subscription.overrides?.features?.[key];
     features[key] = override !== undefined && override !== null ? Boolean(override) : plan?.features?.[key] !== false;
   }
+  const raises = addOnRaises(subscription);
   const limits = {};
   for (const key of Object.keys(LIMITS)) {
     const override = subscription.overrides?.limits?.[key];
     const value = override !== undefined ? override : plan?.limits?.[key];
-    limits[key] = typeof value === "number" && value >= 0 ? value : null;
+    limits[key] = typeof value === "number" && value >= 0 ? value + (raises[key] || 0) : null;
   }
-  return { features, limits };
+  return { features, limits, raises };
 }
 
+/**
+ * The entitlement snapshot for a subscription: plan defaults, this
+ * client's overrides and add-ons, then status. The shape is the contract
+ * the product enforces (server/src/services/entitlements.js;
+ * docs/control-plane.md).
+ */
 export async function snapshotFor(subscription) {
   const plan = (await planByKey(subscription.plan)) || {};
   const { features, limits } = entitlementsFor(subscription, plan);
@@ -1565,6 +1963,151 @@ const describeOverrides = (o) => {
   return parts.length ? parts.join(", ") : "none — the plan's own";
 };
 
+const CATEGORY_ORDER = { building: 1, hardware: 2, service: 3, support: 4 };
+const addOnSignature = (list) => JSON.stringify((list || []).map((a) => [a.key, a.kind, a.quantity, a.unitAmount]));
+const plainAddOns = (list) =>
+  (list || []).map((a) => ({
+    key: a.key,
+    name: a.name,
+    category: a.category || "",
+    kind: a.kind,
+    quantity: a.quantity,
+    unitAmount: a.unitAmount,
+    adds: { ...(a.adds || {}) },
+    minimumMonths: a.minimumMonths || 0,
+    since: a.since || null,
+  }));
+
+/**
+ * A subscription's add-ons as staff set them — [{ key, quantity, mode }],
+ * the WHOLE list: anything left out is removed. Only what is billed every
+ * period can be on a subscription — extra buildings, rentals ("rent"),
+ * support; something paid once goes on a manual invoice instead.
+ *
+ * The catalogue's rules apply to what is NEW: an add-on added, a quantity
+ * changed. What the customer already has, and keeps as it is, stays as
+ * agreed — an item retired since, or a minimum raised since, never blocks
+ * an unrelated change. A plan's own availability is checked again whenever
+ * the plan changes: Starter takes no extra buildings, however long they
+ * were held. An agreed price stays agreed; an add-on added, or every
+ * add-on when the billing period changes, takes the catalogue's price —
+ * the rule the plan's own price follows.
+ *
+ * Problems are written into `fields`; the caller refuses if there are any.
+ */
+function readAddOns(raw, sub, { plan, planChanged, periodChanged, period, items, fields, sentByStaff }) {
+  const fieldFor = (key) => (sentByStaff ? `addOns.${key}` : planChanged ? "plan" : "billingPeriod");
+  const { selections, problems } = readSelections(raw);
+  for (const [field, message] of Object.entries(problems)) fields[field.replace(/^selections/, "addOns")] = message;
+  const current = sub.addOns || [];
+  const currency = sub.price?.currency || "PHP";
+  const now = new Date();
+  const next = [];
+  const groups = new Map();
+
+  for (const choice of selections) {
+    const item = items.get(choice.key);
+    const field = fieldFor(choice.key);
+    if (!item) {
+      fields[field] = `There's no “${choice.key}” in the catalogue.`;
+      continue;
+    }
+    let kind = null;
+    if (item.charge === "recurring" && choice.mode !== "rent") kind = "recurring";
+    else if (item.charge === "buy_or_rent" && choice.mode === "rent") kind = "rental";
+    if (!kind) {
+      fields[field] =
+        item.charge === "recurring"
+          ? `${item.name} can't be rented.`
+          : item.charge === "buy_or_rent"
+            ? `${item.name} is an add-on only when rented — a bought one goes on a manual invoice.`
+            : `${item.name} — paid once, so it goes on a manual invoice instead.`;
+      continue;
+    }
+    const existing = current.find((a) => a.key === item.key && a.kind === kind);
+    if (!existing && item.active === false) {
+      fields[field] = `${item.name} isn't offered any more.`;
+      continue;
+    }
+    if ((!existing || planChanged) && item.plans?.length && !item.plans.includes(plan.key)) {
+      fields[field] = `${item.name} isn't available on the ${plan.name} plan${sentByStaff ? "" : " — take it off the add-ons first"}.`;
+      continue;
+    }
+    if (!existing && (item.currency || "PHP") !== currency) {
+      fields[field] = `${item.name} is priced in ${item.currency}; this subscription is billed in ${currency}.`;
+      continue;
+    }
+    if (!existing || existing.quantity !== choice.quantity) {
+      const min = item.minQuantity || 1;
+      if (choice.quantity < min) {
+        fields[field] = `${item.name}: the minimum is ${min.toLocaleString("en-PH")} ${min === 1 ? item.unit.one : item.unit.many}.`;
+        continue;
+      }
+      if (Number.isInteger(item.maxQuantity) && choice.quantity > item.maxQuantity) {
+        fields[field] = item.maxQuantity === 1 ? `${item.name}: one at a time.` : `${item.name}: up to ${item.maxQuantity.toLocaleString("en-PH")}.`;
+        continue;
+      }
+    }
+    if (item.group) {
+      const already = groups.get(item.group);
+      if (already && already.key !== item.key) {
+        fields[field] = `One ${item.group} option at a time — ${already.name} or ${item.name}, not both.`;
+        continue;
+      }
+      groups.set(item.group, item);
+    }
+    const unitAmount = existing && !periodChanged ? existing.unitAmount : itemMonthlyOf(item, period);
+    if (unitAmount == null) {
+      fields[field] = `${item.name} has no price yet.`;
+      continue;
+    }
+    next.push({
+      key: item.key,
+      name: existing?.name || item.name,
+      category: item.category,
+      kind,
+      quantity: choice.quantity,
+      unitAmount,
+      adds: existing ? { ...(existing.adds || {}) } : kind === "recurring" ? scaledAdds(item.adds, 1) : {},
+      minimumMonths: existing ? existing.minimumMonths || 0 : kind === "rental" ? item.rentalMinimumMonths || 0 : 0,
+      since: existing?.since || now,
+    });
+  }
+
+  // A group left empty gets its default when staff set the list, as an
+  // order does: no support chosen is Standard support.
+  if (sentByStaff) {
+    for (const item of items.values()) {
+      if (!item.group || !item.groupDefault || item.active === false || item.charge !== "recurring" || groups.has(item.group)) continue;
+      if (item.plans?.length && !item.plans.includes(plan.key)) continue;
+      const existing = current.find((a) => a.key === item.key && a.kind === "recurring");
+      const unitAmount = existing && !periodChanged ? existing.unitAmount : itemMonthlyOf(item, period);
+      if (unitAmount == null) continue;
+      groups.set(item.group, item);
+      next.push({
+        key: item.key,
+        name: existing?.name || item.name,
+        category: item.category,
+        kind: "recurring",
+        quantity: 1,
+        unitAmount,
+        adds: existing ? { ...(existing.adds || {}) } : scaledAdds(item.adds, 1),
+        minimumMonths: 0,
+        since: existing?.since || now,
+      });
+    }
+  }
+
+  // The order the quote gives them, which is the order an invoice reads
+  // in: buildings, then rentals, then support.
+  const placeOf = (a) => [CATEGORY_ORDER[a.category] ?? 9, items.get(a.key)?.sort ?? 0, a.key, a.kind === "rental" ? 1 : 0];
+  return next.sort((x, y) => {
+    const [a, b] = [placeOf(x), placeOf(y)];
+    for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+    return 0;
+  });
+}
+
 /**
  * Staff changes to a subscription, all through one path: everything is
  * validated before anything is applied, one save, an audit line per
@@ -1576,6 +2119,9 @@ const describeOverrides = (o) => {
  *   overrides      { features: { key: bool }, limits: { key: n | null } }
  *   notice         a line shown to the organization's administrators
  *   trialEndsAt    a new trial end (only while nothing has been paid)
+ *   addOns         [{ key, quantity, mode }] — the whole list of extra buildings,
+ *                  rentals and support (readAddOns); entitlements now, prices
+ *                  from the next invoice
  *
  * Open invoices are never rewritten by any of these: an invoice says what
  * was billed when it was sent.
@@ -1615,6 +2161,29 @@ export async function updateSubscription(sub, patch = {}, by = null) {
     else if (d <= now) fields.trialEndsAt = "Pick a day in the future.";
     else if (sub.currentPeriodEnd) fields.trialEndsAt = `Already paid through ${date(sub.currentPeriodEnd)} — there's no trial to change.`;
     else trialEndsAt = d;
+  }
+  // The add-ons: the list staff sent, or — when only the plan or the
+  // period moves — the current list, checked against the new plan and
+  // re-priced for the new period.
+  let addOns;
+  if ((patch.addOns !== undefined || plan || period) && !fields.plan && !fields.billingPeriod) {
+    const sentByStaff = patch.addOns !== undefined;
+    if (sentByStaff && !Array.isArray(patch.addOns)) fields.addOns = "Add-ons are a list of what this customer pays for.";
+    else {
+      const items = new Map((await catalogItems({ includeRetired: true })).map((i) => [i.key, i]));
+      const raw = sentByStaff
+        ? patch.addOns
+        : (sub.addOns || []).map((a) => ({ key: a.key, quantity: a.quantity, mode: a.kind === "rental" ? "rent" : null }));
+      addOns = readAddOns(raw, sub, {
+        plan: plan || (await planByKey(sub.plan)) || { key: sub.plan, name: sub.planName },
+        planChanged: Boolean(plan),
+        periodChanged: Boolean(period),
+        period: period || sub.billingPeriod,
+        items,
+        fields,
+        sentByStaff,
+      });
+    }
   }
   if (Object.keys(fields).length) refuse(fields);
 
@@ -1688,6 +2257,21 @@ export async function updateSubscription(sub, patch = {}, by = null) {
     entries.push(["subscription.trial", `Trial for ${sub.organizationName} now ends ${date(trialEndsAt)}`, { from: before, to: trialEndsAt }]);
   }
 
+  let addOnsChange = null;
+  if (addOns && addOnSignature(addOns) !== addOnSignature(sub.addOns)) {
+    const before = plainAddOns(sub.addOns);
+    sub.addOns = addOns;
+    sub.markModified("addOns");
+    const priced = period && patch.addOns === undefined ? `re-priced for ${period} billing` : "from the next invoice";
+    sub.history.push({ status: sub.status, by: byId(by), note: `Add-ons: ${describeAddOns(addOns)} — ${priced}` });
+    entries.push([
+      "subscription.addons",
+      `Add-ons for ${sub.organizationName}: ${describeAddOns(before)} → ${describeAddOns(addOns)}`,
+      { before, after: plainAddOns(addOns) },
+    ]);
+    addOnsChange = { before, after: plainAddOns(addOns) };
+  }
+
   if (!entries.length) return { subscription: sub, invoice: null };
   await sub.save();
   if (sub.status !== from) await statusAudit(sub, from, by, "trial extended");
@@ -1711,6 +2295,12 @@ export async function updateSubscription(sub, patch = {}, by = null) {
   }
 
   await syncDeployment(sub);
+  // Told only of what they would notice: a move of plan says the new
+  // price itself, so add-ons re-priced with it are not a second email.
+  if (addOnsChange && !movedFrom && patch.addOns !== undefined) {
+    const account = await Account.findById(sub.account);
+    if (account) sendEmail(mail.addOnsChangedEmail({ subscription: sub, account, before: addOnsChange.before, after: addOnsChange.after }));
+  }
   if (movedFrom || (from === "suspended" && sub.status !== "suspended")) {
     const account = await Account.findById(sub.account);
     if (account && movedFrom) sendEmail(mail.planChangedEmail({ subscription: sub, account, fromName: movedFrom }));

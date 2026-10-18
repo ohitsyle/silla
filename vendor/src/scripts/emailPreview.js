@@ -11,19 +11,37 @@ import path from "node:path";
 import * as t from "../services/email/templates.js";
 import * as b from "../services/email/billingTemplates.js";
 import * as st from "../services/email/staffTemplates.js";
+import { buildQuote } from "../lib/quote.js";
+import { DEFAULT_PLANS } from "../lib/defaultPlans.js";
+import { DEFAULT_CATALOG } from "../lib/defaultCatalog.js";
 
 const out = path.resolve(process.argv[2] || "email-preview");
 mkdirSync(out, { recursive: true });
 
 const account = { firstName: "Ana", lastName: "Reyes", name: "Ana Reyes", email: "ana@harborview.org" };
+/** A two-building order on Building, with rented kiosks, printed cards, installation and Care — priced by lib/quote.js. */
+const { quote } = buildQuote({
+  plan: DEFAULT_PLANS.find((p) => p.key === "building"),
+  plans: DEFAULT_PLANS,
+  billingPeriod: "yearly",
+  catalogue: DEFAULT_CATALOG,
+  selections: [
+    { key: "extra-building", quantity: 1, mode: null },
+    { key: "kiosk", quantity: 2, mode: "rent" },
+    { key: "rfid-card-printed", quantity: 300, mode: null },
+    { key: "installation", quantity: 1, mode: null },
+    { key: "support-care", quantity: 1, mode: null },
+  ],
+});
 const order = {
   _id: "66f0c0ffee0000000000abcd",
   organizationName: "Harborview Reading Room",
   plan: "building",
-  planName: "Whole Building",
+  planName: "Building",
   billingPeriod: "yearly",
-  quotedAmount: 6_900_00, // per month, in centavos
+  quotedAmount: quote.plan.perMonth, // the plan's price per month, in centavos
   currency: "PHP",
+  quote,
   deploymentUrl: "https://harborview.silla.example",
 };
 
@@ -62,15 +80,39 @@ const invoice = {
   kind: "first",
   organizationName: "Harborview Reading Room",
   billTo: { name: "Ana Reyes", email: "accounts@harborview.example" },
-  lines: [{ description: "Whole Building plan — first year", quantity: 1, unitAmount: 82_800_00, amount: 82_800_00 }],
-  subtotal: 82_800_00,
-  tax: { label: "VAT 12%", rate: 0.12, amount: 9_936_00 },
-  total: 92_736_00,
+  // The first invoice the order above is issued with.
+  lines: quote.lines.map((l) => ({
+    description: l.description,
+    quantity: l.quantity,
+    unitAmount: l.kind === "one_time" ? (l.waived ? 0 : l.unitAmount) : l.periodUnitAmount,
+    amount: l.amount,
+    note: l.kind === "one_time" ? l.note : "",
+  })),
+  subtotal: quote.totals.firstInvoice.subtotal,
+  tax: { label: "VAT 12%", rate: 0.12, amount: Math.round(quote.totals.firstInvoice.subtotal * 0.12) },
+  total: quote.totals.firstInvoice.subtotal + Math.round(quote.totals.firstInvoice.subtotal * 0.12),
   currency: "PHP",
   issuedAt: at(-6),
   dueAt: at(1),
 };
-const renewal = { ...invoice, number: "SILLA-2026-00031", kind: "renewal", lines: [{ ...invoice.lines[0], description: "Whole Building plan — renewal, 1 year" }], dueAt: at(7) };
+const renewalLines = quote.lines
+  .filter((l) => l.kind !== "one_time")
+  .map((l) => ({
+    description: l.description.replace("first year", "renewal, 1 year").replace(" (12-month minimum)", ""),
+    quantity: l.quantity,
+    unitAmount: l.periodUnitAmount,
+    amount: l.amount,
+  }));
+const renewal = {
+  ...invoice,
+  number: "SILLA-2026-00031",
+  kind: "renewal",
+  lines: renewalLines,
+  subtotal: quote.totals.renewal.subtotal,
+  tax: { label: "VAT 12%", rate: 0.12, amount: Math.round(quote.totals.renewal.subtotal * 0.12) },
+  total: quote.totals.renewal.subtotal + Math.round(quote.totals.renewal.subtotal * 0.12),
+  dueAt: at(7),
+};
 const overdue = { ...invoice, number: "SILLA-2026-00027", issuedAt: at(-16), dueAt: at(-9) };
 const paid = {
   ...invoice,
@@ -84,9 +126,9 @@ const claimed = {
 const dismissed = { ...claimed, claimedPayment: { ...claimed.claimedPayment, dismissNote: "No GCash transfer with that reference has arrived yet." } };
 const subscription = {
   organizationName: "Harborview Reading Room",
-  planName: "Whole Building",
+  planName: "Building",
   billingPeriod: "yearly",
-  price: { amount: 82_800_00, currency: "PHP" },
+  price: { amount: 72_000_00, currency: "PHP" },
   status: "active",
   currentPeriodEnd: at(365),
   trialEndsAt: at(3),
@@ -107,7 +149,17 @@ Object.assign(samples, {
   "22-suspended-unpaid": b.subscriptionSuspendedEmail({ subscription: { ...subscription, status: "suspended" }, account, invoice: overdue, settings }),
   "23-suspended-by-staff": b.subscriptionSuspendedEmail({ subscription: { ...subscription, status: "suspended" }, account, reason: "Paused at your request while the building is renovated." }),
   "24-reactivated": b.subscriptionReactivatedEmail({ subscription, account }),
-  "25-plan-changed": b.planChangedEmail({ subscription: { ...subscription, planName: "Campus", price: { amount: null, currency: "PHP" } }, account, fromName: "Whole Building" }),
+  "25-plan-changed": b.planChangedEmail({ subscription: { ...subscription, planName: "Campus", price: { amount: 180_000_00, currency: "PHP" } }, account, fromName: "Building" }),
+  "25b-add-ons-changed": b.addOnsChangedEmail({
+    subscription,
+    account,
+    before: [{ key: "extra-building", name: "Extra building", kind: "recurring", quantity: 1, unitAmount: 2_500_00 }],
+    after: [
+      { key: "extra-building", name: "Extra building", kind: "recurring", quantity: 2, unitAmount: 2_500_00 },
+      { key: "kiosk", name: "SILLA Kiosk", kind: "rental", quantity: 2, unitAmount: 1_500_00 },
+      { key: "support-care", name: "Care support", kind: "recurring", quantity: 1, unitAmount: 1_500_00 },
+    ],
+  }),
   "26-cancelled": b.subscriptionCancelledEmail({ subscription: { ...subscription, status: "cancelled" }, account, reason: "Moving to another provider at the end of the school year." }),
 });
 

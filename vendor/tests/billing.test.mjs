@@ -159,6 +159,7 @@ export async function run(check) {
   const settingsBefore = billing.settingsShape(await billing.getSettings());
   let roomTagline = null;
   const teamKey = `team-${tag}`.slice(0, 40);
+  const bespokeKey = `bespoke-${tag}`.slice(0, 40);
 
   try {
     /* ── who is asking ── */
@@ -389,7 +390,15 @@ export async function run(check) {
       includes?.features?.find((f) => f.key === "kiosk")?.on === false && includes?.limits?.find((l) => l.key === "resources")?.value === 900);
 
     /* ── priced with you: no invoice until staff agree one ── */
-    const orderC = await submitOrder(B, "Other Billing Campus", "campus", "yearly");
+    // Every default plan has a list price now, so this one is made for the
+    // purpose — the console's "Has a list price: off".
+    await post("/api/vendor/plans", {
+      key: bespokeKey,
+      name: "Bespoke",
+      tagline: "Priced with each customer.",
+      prices: { monthly: null, annualMonthly: null },
+    }, OWNER);
+    const orderC = await submitOrder(B, "Other Billing Campus", bespokeKey, "yearly");
     const subC = await Subscription.findOne({ order: orderC.id });
     check("BIL-21", "A plan priced with each customer issues no invoice on submit",
       subC?.needsPricing === true && (await Invoice.countDocuments({ subscription: subC?._id })) === 0);
@@ -444,9 +453,12 @@ export async function run(check) {
     const teamOrder = await submitOrder(A, `Team Co ${tag}`, teamKey, "monthly");
     const teamSub = await Subscription.findOne({ order: teamOrder.id });
     const teamInvoice = teamSub ? await Invoice.findOne({ subscription: teamSub._id, kind: "first" }) : null;
+    // On monthly billing the first invoice carries onboarding too — it is
+    // waived only on yearly (lib/defaultCatalog.js).
+    const teamPlanLine = teamInvoice?.lines?.find((l) => l.kind === "plan");
     check("BIL-24", "…an order for it is accepted and billed at its price",
-      teamOrder.status === "submitted" && teamSub?.plan === teamKey && teamSub?.planName === "Team" && teamInvoice?.subtotal === 1_500_00,
-      `${teamOrder.status} ${teamSub?.plan} ${teamInvoice?.subtotal}`);
+      teamOrder.status === "submitted" && teamSub?.plan === teamKey && teamSub?.planName === "Team" && teamPlanLine?.amount === 1_500_00,
+      `${teamOrder.status} ${teamSub?.plan} ${teamPlanLine?.amount}`);
     const teamRow = (await get(`/api/vendor/orders/${teamOrder.id}`, A)).body?.order;
     check("BIL-24", "…and the order keeps the plan's name and currency", teamRow?.planName === "Team" && teamRow?.currency === "PHP");
     const snapshot = await billing.snapshotForOrder(await Order.findById(teamOrder.id));
@@ -463,7 +475,7 @@ export async function run(check) {
     // Leave the database as it was found: the settings and the plan this suite touched, and its records.
     await billing.updateSettings({ business: settingsBefore.business, invoice: settingsBefore.invoice, billing: settingsBefore.billing }).catch(() => {});
     if (roomTagline !== null) await billing.updatePlan("room", { tagline: roomTagline, active: true }).catch(() => {});
-    await Plan.deleteOne({ key: teamKey }).catch(() => {});
+    await Plan.deleteMany({ key: { $in: [teamKey, bespokeKey] } }).catch(() => {});
     await cleanupBilling();
   }
 }

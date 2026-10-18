@@ -11,7 +11,7 @@
  * was not you. A code with no "if you didn't ask for this" line trains
  * people to type codes they did not request.
  */
-import { button, code, details, note, p, renderEmail } from "./layout.js";
+import { button, code, details, lines, note, p, renderEmail } from "./layout.js";
 import { formatMoney } from "./billingTemplates.js";
 
 const PORTAL = () => (process.env.PORTAL_URL || "http://localhost:5174").replace(/\/+$/, "");
@@ -135,12 +135,65 @@ export const passwordResetEmail = ({ account, code: value, expiryMinutes }) =>
 
 /* ─────────────────────────────── orders ─────────────────────────────── */
 
-const orderRows = (order) => [
-  ["Organization", order.organizationName],
-  ["Plan", planOf(order)],
-  ["Billing", order.billingPeriod === "monthly" ? "Monthly" : "Yearly"],
-  ["Quoted", quoted(order)],
-];
+const PER = { monthly: "month", yearly: "year" };
+
+/**
+ * The headline rows. An order submitted with a quote (all of them now)
+ * says what the first invoice comes to; an older one says the plan's
+ * per-month figure it was quoted at.
+ */
+const orderRows = (order) => {
+  const quote = order.quote;
+  const cur = quote?.currency || order.currency || "PHP";
+  const first = quote?.totals?.firstInvoice;
+  return [
+    ["Organization", order.organizationName],
+    ["Plan", planOf(order)],
+    ["Billing", order.billingPeriod === "monthly" ? "Monthly" : "Yearly"],
+    quote ? ["First invoice", first ? `${formatMoney(first.total, cur)}${first.tax ? " incl. VAT" : ""}` : "To be agreed with you"] : ["Quoted", quoted(order)],
+  ];
+};
+
+/**
+ * Every line of the frozen quote, through the ONE formatter: what each
+ * thing is, how many at what price, and what the first invoice, every
+ * later period and the one-time items come to. Rentals' minimum terms are
+ * said under it, because they are a commitment and not a price.
+ */
+function quoteBlocks(order) {
+  const quote = order.quote;
+  if (!quote?.lines?.length) return [];
+  const cur = quote.currency || order.currency || "PHP";
+  const per = PER[quote.billingPeriod] || "period";
+  const money = (n) => formatMoney(n, cur);
+  const rows = quote.lines.map((l) => {
+    const recurring = l.kind !== "one_time";
+    const each = recurring ? l.periodUnitAmount : l.unitAmount;
+    return {
+      description: l.description,
+      detail: [
+        l.quantity > 1 && each != null ? `${l.quantity.toLocaleString("en-PH")} × ${money(each)}${recurring ? ` a ${per}` : ""}` : null,
+        l.kind === "one_time" ? l.note || null : null,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+      amount: l.amount == null ? "To be agreed" : money(l.amount),
+    };
+  });
+  const t = quote.totals || {};
+  const first = t.firstInvoice;
+  const totals = [
+    t.oneTime ? ["Paid once", money(t.oneTime)] : null,
+    [`Every ${per} after`, t.renewal ? money(t.renewal.subtotal) : "To be agreed"],
+    first?.tax ? [quote.vat?.label || "VAT", money(first.tax)] : null,
+    ["First invoice", first ? money(first.total) : "To be agreed"],
+  ].filter(Boolean);
+  return [
+    lines(rows, totals),
+    quote.commitments?.length ? note(quote.commitments.join(" ")) : null,
+    quote.vat?.registered ? null : note("Prices exclude VAT; SILLA isn't VAT-registered, so none is added."),
+  ].filter(Boolean);
+}
 
 const orderLink = (order) => `${PORTAL()}/#/orders/${order._id}`;
 
@@ -154,6 +207,7 @@ export const orderSubmittedEmail = ({ account, order }) =>
     blocks: [
       p(`Your configuration for ${order.organizationName} is with us.`),
       details(orderRows(order)),
+      ...quoteBlocks(order),
       p(
         "We'll build it from exactly what you configured — the same names, colours and floors — and email you as it moves along."
       ),
@@ -161,7 +215,7 @@ export const orderSubmittedEmail = ({ account, order }) =>
       // In step with billing, which issues the first invoice the moment an
       // order is submitted — unless the plan is priced with each customer.
       note(
-        order.quotedAmount == null
+        (order.quote ? !order.quote.totals?.firstInvoice : order.quotedAmount == null)
           ? "Nothing has been charged. We'll agree a price with you before anything is billed."
           : "Your first invoice follows in a separate email, with how to pay. Nothing is taken automatically — there's no card on file."
       ),
@@ -177,6 +231,7 @@ export const orderSubmittedInternalEmail = ({ account, order, to }) => {
     title: "A buyer submitted an order",
     blocks: [
       details([["Buyer", `${buyer} <${account.email}>`], ...orderRows(order)]),
+      ...quoteBlocks(order),
       button("Open it in the console", `${PORTAL()}/#/staff/orders/${order._id}`),
     ],
     reason: "because an order was submitted to the SILLA queue",

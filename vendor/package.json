@@ -16,7 +16,8 @@
     "test:clean": "node tests/cleanup.mjs",
     "email:preview": "node src/scripts/emailPreview.js",
     "migrate:accounts": "node src/scripts/migrateAccounts.js",
-    "test:isolated": "node tests/isolated.mjs"
+    "test:isolated": "node tests/isolated.mjs",
+    "migrate:pricing": "node src/scripts/migratePricing.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
