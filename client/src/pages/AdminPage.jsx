@@ -682,7 +682,7 @@ function Members({ org }) {
             mono
             value={cardUid}
             onChange={(e) => setCardUid(e.target.value)}
-            hint="4–32 hex characters. Case and separators are ignored."
+            hint="The code printed on the card: 4 to 32 digits and letters A–F. Spaces and dashes don't matter."
           />
           <div className="mt-5 flex justify-end gap-3">
             <Button onClick={() => setReissueFor(null)}>Cancel</Button>
@@ -849,8 +849,8 @@ function Staff() {
           <Button type="submit" variant="primary" size="lg">Create</Button>
         </form>
         <p className="text-xs text-ink-muted mt-2">
-          Staff are email-provisioned with no card and no kiosk tap, and must change their PIN
-          and accept the terms at first sign-in.
+          New staff get their sign-in details by email — no card needed. The first time they sign
+          in, they choose their own PIN and accept the terms.
         </p>
       </Panel>
       )}
@@ -936,7 +936,7 @@ function Settings() {
         endTime: new Date(closure.endTime).toISOString(),
         reason: closure.reason,
       });
-      setNotice("Closure scheduled. Affected reservations are cancelled and emailed by the worker.");
+      setNotice("Closure scheduled. Any reservations it covers are cancelled, and the people who held them are emailed the reason.");
       setClosure({ startTime: "", endTime: "", reason: "" });
       load();
     } catch (e2) {
@@ -1045,18 +1045,19 @@ function Settings() {
 
       <Branding branding={o.branding} />
 
-      <Panel title="White-label configuration">
+      <Panel title="Words and member IDs">
         <div className="grid sm:grid-cols-3 gap-3 text-sm">
-          <KV label="Resource noun" value={o.terminology.resourceNoun} />
-          <KV label="Member noun" value={o.terminology.memberNoun} />
-          <KV label="Facility label" value={o.terminology.facilityLabel} />
+          <KV label="A bookable thing is a" value={o.terminology.resourceNoun} />
+          <KV label="A person who books is a" value={o.terminology.memberNoun} />
+          <KV label="The place is called" value={o.terminology.facilityLabel} />
           <KV label="Member ID format" value={o.identity.memberIdFormat} />
-          <KV label="Check-in method" value={o.identity.checkInMethod} />
+          <KV label="Check-in" value={CHECK_IN_METHODS[o.identity.checkInMethod] || o.identity.checkInMethod} />
         </div>
+        {/* This said "Every value above came from your provisioning
+            profile… contact your provider" to the buyer's own superadmin. */}
         <p className="text-xs text-ink-muted mt-3">
-          Every value above came from your provisioning profile. To change your vocabulary or identity
-          format, contact your provider — the whole product follows from these, so they are changed
-          together rather than one at a time.
+          These were set when your system was built. Every screen, email and kiosk prompt follows
+          from them, so they are changed together: ask SILLA when you want them changed.
         </p>
       </Panel>
     </div>
@@ -1378,6 +1379,9 @@ function SectionLabel({ children }) {
     </h3>
   );
 }
+
+/** How members check in, in words — the organization stores a method key. */
+const CHECK_IN_METHODS = { rfid: "Tap an RFID card", qr: "Scan a QR code" };
 
 function KV({ label, value, swatch }) {
   return (

@@ -291,7 +291,7 @@ export default function KioskPage() {
 
       {requirements && requirements.selfServiceRegistration === false && step === STEP.TAP && (
         <div className="mb-4">
-          <Notice>Self-service registration is disabled — accounts are provisioned by staff.</Notice>
+          <Notice>New cards are registered by staff. If yours isn't recognised, please ask at the desk.</Notice>
         </div>
       )}
 
@@ -648,7 +648,7 @@ function TapStep({ onTap, busy, memberNoun, ready }) {
             data-autofocus
             placeholder="04A22B9C"
             mono
-            hint="4–32 hex characters. Case and separators are ignored."
+            hint="The code printed on the card: 4 to 32 digits and letters A–F. Spaces and dashes don't matter."
           />
           <div className="mt-5 flex justify-end gap-3">
             <Button onClick={() => setManualOpen(false)}>Cancel</Button>

@@ -792,8 +792,8 @@ export default function EditorPage() {
       )}
 
       <p className="mt-4 text-xs text-ink-muted">
-        Fixed footprints, whole cells, no rotation — that constraint is what keeps the editor simple. Overlaps and
-        bounds are checked on the server.
+        Pieces keep their size and sit on whole squares; they can't be rotated. Anything that would overlap another
+        piece or fall outside the floor is refused, with the reason.
       </p>
 
       {/* ── Dialogs ── */}

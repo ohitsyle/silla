@@ -159,12 +159,10 @@ const LIBRARY = {
     "By using this service you agree to the following.",
     "",
     "1. Your account is personal. Reservations are self-only — you may not reserve on behalf of another person.",
-    "2. One active reservation at a time. Check in by tapping your card within the grace period, or the reservation is released as a no-show.",
+    "2. You may hold one reservation for now and one booked ahead, never overlapping. Check in by tapping your card within the grace period, or the reservation is released as a no-show.",
     "3. Sessions end at the maximum-stay cap or at closing, whichever comes first. If your session is auto-released while you are still present, staff may ask you to re-tap or to move.",
     "4. Your card is your credential. Report a lost card to staff immediately so it can be reissued and the old one invalidated.",
     "5. Misuse — holding resources you are not using, sharing credentials, or repeated no-shows — may result in your access being suspended.",
-    "",
-    "This text is configured per organization and can be edited by a superadmin in Settings.",
   ].join("\n"),
 };
 
@@ -298,12 +296,10 @@ const OFFICE = {
     "Workplace booking terms.",
     "",
     "1. Bookings are personal and self-only. Do not book a desk or room on behalf of a colleague.",
-    "2. One active booking at a time. Tap in within the grace period or the booking is released.",
+    "2. You may hold one booking for now and one booked ahead, never overlapping. Tap in within the grace period or the booking is released.",
     "3. Bookings end at the maximum-stay cap or at close of business. Tap out when you leave so the space frees for others.",
     "4. Your access card is your credential. Report a lost card to facilities immediately.",
     "5. Repeatedly holding space you are not using may result in booking privileges being suspended.",
-    "",
-    "This text is configured per organization and can be edited by a superadmin in Settings.",
   ].join("\n"),
 };
 

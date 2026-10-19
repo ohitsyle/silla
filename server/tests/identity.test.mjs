@@ -213,6 +213,19 @@ export async function run(check) {
     body: JSON.stringify({ userId: "6a8ed2b8587f249ffe338781" }) });
   check("AUTH-3", "accept-terms refuses unauthenticated callers (the old IDOR)", noAuth.status === 401);
 
+  // Organizations provisioned before the seeded terms stopped ending in a
+  // note to the superadmin still hold it; members are not shown it.
+  const { LEGACY_TERMS_NOTE, termsForMembers } = await import("../src/routes/organization.routes.js");
+  const Organization = (await import("../src/models/Organization.js")).default;
+  const stored = (await Organization.findById(ORG).select("termsOfServiceText").lean())?.termsOfServiceText || "";
+  await Organization.updateOne({ _id: ORG }, { termsOfServiceText: `${stored}\n\n${LEGACY_TERMS_NOTE}` });
+  const shown = await req(`/api/organizations/${ORG}/terms`);
+  await Organization.updateOne({ _id: ORG }, { termsOfServiceText: stored });
+  check("AUTH-3", "The terms members read leave out the old note to the superadmin, and keep the rest",
+    shown.status === 200 && !shown.body?.termsOfServiceText?.includes(LEGACY_TERMS_NOTE) &&
+      shown.body?.termsOfServiceText === termsForMembers(stored).trimEnd() && shown.body.termsOfServiceText.length > 40,
+    JSON.stringify(shown.body?.termsOfServiceText?.slice(-80)));
+
   const accepted = await req("/api/auth/accept-terms", { method: "POST", headers: auth(first.token) });
   check("AUTH-3", "An authenticated user can accept their own terms", accepted.status === 200);
   const again = await req("/api/auth/accept-terms", { method: "POST", headers: auth(first.token) });
