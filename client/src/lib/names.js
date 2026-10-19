@@ -94,9 +94,16 @@ export function pieceName(typeLabel, number) {
  * One unit's full name: "Long Table 2 · Seat 3" — the piece, then the
  * organization's noun and the unit's label. A piece with a single unit is
  * just the piece ("Solo Desk 4"): "Solo Desk 4 · Seat 1" says nothing more.
+ *
+ * A piece already named for the noun — a two-person "Desk" where a desk is
+ * what people book — would read "Desk 1 · Desk 2", the same word twice for
+ * two different things; its units are "Desk 1 · Place 2" instead.
  */
 export function unitName({ piece, unitLabel, units = 1, noun = "resource" }) {
   const name = String(piece || "").trim() || capitalise(noun);
   if (units <= 1) return name;
-  return `${name} · ${capitalise(noun) || "Unit"} ${unitLabel}`;
+  const word = capitalise(noun) || "Unit";
+  const lower = name.toLowerCase();
+  const echoes = lower === word.toLowerCase() || lower.startsWith(`${word.toLowerCase()} `);
+  return `${name} · ${echoes ? "Place" : word} ${unitLabel}`;
 }

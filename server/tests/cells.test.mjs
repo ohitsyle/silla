@@ -205,6 +205,11 @@ check(
   unitName({ piece: pieceName("Long Table", 2), unitLabel: "3", units: 5, noun: "seat" }) === "Long Table 2 · Seat 3"
 );
 check("a single-unit piece is just its name", unitName({ piece: pieceName("Solo Desk", 4), unitLabel: "1", units: 1, noun: "seat" }) === "Solo Desk 4");
+check(
+  "a piece named for the noun does not repeat it",
+  unitName({ piece: pieceName("Desk", 1), unitLabel: "2", units: 2, noun: "desk" }) === "Desk 1 · Place 2" &&
+    unitName({ piece: pieceName("Desktop Bench", 1), unitLabel: "2", units: 4, noun: "desk" }) === "Desktop Bench 1 · Desk 2"
+);
 
 const serverNames = readFileSync(new URL("../src/lib/names.js", import.meta.url), "utf8");
 const clientNames = readFileSync(new URL("../../client/src/lib/names.js", import.meta.url), "utf8");
