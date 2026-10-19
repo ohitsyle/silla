@@ -17,6 +17,7 @@
  * behaviour for a test.
  */
 import "dotenv/config";
+import { isUndeliverable } from "../services/email/index.js";
 
 const to = process.argv[2];
 const key = process.env.EMAIL_API_KEY;
@@ -31,7 +32,14 @@ const die = (message, hint) => {
   process.exit(1);
 };
 
-if (!to) die("No recipient.", "Usage: npm run email:test -- you@example.com");
+if (!to) die("No recipient.", "Usage: npm run email:test -- you@yourdomain.com");
+// The transport drops reserved test addresses (RFC 2606's .test, .example
+// and example.com, and our own @test.silla) before a provider sees them.
+// This script calls the provider directly, so it applies the same rule
+// rather than spending quota on a guaranteed bounce.
+if (isUndeliverable(to)) {
+  die(`${to} is a reserved test address, so nothing sent to it can arrive.`, "Use a real inbox you can read.");
+}
 
 const useSmtp = Boolean(smtpUser && smtpPass);
 

@@ -27,6 +27,24 @@ export async function run(check) {
   const password = "a-long-enough-password";
   const base = { firstName: "Ana", middleName: "Maria", lastName: "Reyes", suffix: "", email, confirmEmail: email, password, acceptTerms: true };
 
+  /* ── no reserved test address ever reaches a mail provider ── */
+  // The transport's own guard, read directly: the suites sign up at
+  // @test.silla, staff here live at owner@silla.test, and a product's demo
+  // accounts at admin@demo.test. RFC 2606 reserves .test, .example,
+  // .invalid and .localhost, and example.com, .net and .org.
+  const { isUndeliverable } = await import("../src/services/email/index.js");
+  const reserved = [
+    "admin@demo.test", "owner@silla.test", "billing@harborview.test", "Ana Reyes <ana@demo.test>", "ADMIN@DEMO.TEST.",
+    "x@school.example", "a@example.com", "a@mail.example.org", email, "x@host.invalid", "x@localhost",
+  ];
+  const leaked = reserved.filter((address) => !isUndeliverable(address));
+  check("MAIL-1", "The mail transport refuses every reserved test address (.test, .example, example.com, @test.silla)",
+    leaked.length === 0, leaked.length ? "would send: " + leaked.join(", ") : `${reserved.length} refused`);
+  const real = ["someone@gmail.com", "ana@library.edu.ph", "x@testing.com", "x@example.com.ph", "x@contest.org", "x@test.silla.ph"];
+  const refused = real.filter((address) => isUndeliverable(address));
+  check("MAIL-1", "…and still sends to real domains that merely contain those words",
+    refused.length === 0, refused.length ? "refused: " + refused.join(", ") : `${real.length} sent`);
+
   /* ── availability ── */
   const free = await req(`/api/vendor/auth/email-available?email=${encodeURIComponent(email)}`);
   check("ACC-1", "An unused email reports as available", free.body?.available === true && free.body?.valid === true);

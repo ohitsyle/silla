@@ -24,6 +24,7 @@ import path from "node:path";
 import { expandFloor } from "./layoutFixture.js";
 import { VERTICAL_PROFILES, PROFILE_KEYS } from "./profiles.js";
 import { memberIdExample } from "../lib/identity.js";
+import { isUndeliverable } from "../services/email/index.js";
 
 // Mirrors GRID_LIMITS in routes/floor.routes.js. A floor authored in the
 // portal has to be one the map editor can later resize and redraw, so a
@@ -250,7 +251,9 @@ function readOwner(value, fail, warn) {
   }
   // This address receives the founding PIN. A typo here is a deployment
   // nobody can get into, so it is worth a word rather than a silent pass.
-  if (out.email && /@(example\.(com|org|net)|test\.silla)$/i.test(out.email)) {
+  // The same test the mail transport applies, so the warning and the
+  // drop can never disagree about which addresses are reserved.
+  if (out.email && isUndeliverable(out.email)) {
     warn("owner.email", "is a reserved test domain — the founding PIN will never be delivered");
   }
   return Object.keys(out).length ? out : null;

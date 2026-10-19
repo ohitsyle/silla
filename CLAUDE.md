@@ -111,17 +111,25 @@ verified, and there is no silla.app to verify — Gmail with an App
 Password (not the account password; needs 2-Step Verification) sends as
 a real address today. Swapping to a provider later is a .env change.
 
-`npm run email:test -- you@example.com` sends one message through the
-configured transport and reports the actual failure. It calls the
+`npm run email:test -- you@yourdomain.com` sends one message through the
+configured transport and reports the actual failure (it refuses a
+reserved test address, below, rather than spend quota on a bounce). It calls the
 provider DIRECTLY rather than through `sendEmail`, because that queue is
 fire-and-forget by design (spec §15) — a broken provider is silently
 swallowed there, which is exactly what you do not want from a test.
 
-**Both transports refuse to send to `@test.silla` and `@example.*`.**
-The suites create accounts at that domain on every run; without the
-guard each run became dozens of real delivery attempts, three retries
-each, against a 500/day quota, every one bouncing against the sender's
-reputation. It is enforced in the transport so a new test cannot forget.
+**Both transports refuse every reserved test address** — RFC 2606's
+TLDs `.test`, `.example`, `.invalid` and `.localhost`, the second-level
+`example.com/.net/.org` (subdomains included), and our own `@test.silla`
+(`isUndeliverable()` in each `services/email/index.js`). The suites
+create accounts at those domains on every run, and every seeded demo
+organization holds `admin@demo.test`; without the guard each run became
+dozens of real delivery attempts, three retries each, against a 500/day
+quota, every one bouncing against the sender's reputation. It is
+enforced in the transport so a new test cannot forget, and both suites
+assert the list (NOT-1 in the server's, MAIL-1 in the vendor's). It used
+to match only `@test.silla` and `@example.com/org/net`, which let
+`admin@demo.test` through.
 
 `vendor/` has its own COPY of this service, not an import — see the
 no-cross-imports rule in the portal section. It sends the buyer a

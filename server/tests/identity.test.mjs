@@ -12,6 +12,26 @@ export async function run(check) {
   // to READ a code step aside instead of failing.
   const liveEmail = await emailIsLive();
 
+  /* ── NOT-1: no reserved test address ever reaches a mail provider ── */
+  // The transport's own guard, read directly. The suites register at
+  // @test.silla and every seeded demo organization holds admin@demo.test,
+  // so once a real provider is configured each of these would be a real
+  // send attempt bouncing against the sender's reputation. RFC 2606
+  // reserves .test, .example, .invalid and .localhost, and example.com,
+  // .net and .org; @test.silla is ours.
+  const { isUndeliverable } = await import("../src/services/email/index.js");
+  const reserved = [
+    "admin@demo.test", "owner@silla.test", "rosa@harborview.test", "Ana Reyes <ana@demo.test>", "ADMIN@DEMO.TEST.",
+    "x@school.example", "a@example.com", "a@mail.example.org", "probe" + TEST_EMAIL_DOMAIN, "x@host.invalid", "x@localhost",
+  ];
+  const leaked = reserved.filter((address) => !isUndeliverable(address));
+  check("NOT-1", "The mail transport refuses every reserved test address (.test, .example, example.com, @test.silla)",
+    leaked.length === 0, leaked.length ? "would send: " + leaked.join(", ") : `${reserved.length} refused`);
+  const real = ["someone@gmail.com", "ana@library.edu.ph", "x@testing.com", "x@example.com.ph", "x@contest.org", "x@test.silla.ph"];
+  const refused = real.filter((address) => isUndeliverable(address));
+  check("NOT-1", "…and still sends to real domains that merely contain those words",
+    refused.length === 0, refused.length ? "refused: " + refused.join(", ") : `${real.length} sent`);
+
   /* ── INF-3: the check-in interface ── */
   const methods = await req("/api/checkin/methods");
   check("INF-3", "RFID is the only registered implementation",

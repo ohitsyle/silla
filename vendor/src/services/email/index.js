@@ -80,22 +80,50 @@ async function drain() {
 /**
  * Addresses that must never be handed to a real mail provider.
  *
- * The suites create accounts at @test.silla on every run. Once a live
- * provider is configured those become real send attempts — three
- * retries each, against a finite daily quota, every one of them
- * bouncing and every bounce counting against the sender's reputation.
- * Dropping them here rather than in each caller means a new test cannot
- * forget.
+ * The suites create accounts at @test.silla on every run, and staff and
+ * demo accounts live at .test addresses (owner@silla.test,
+ * admin@demo.test). Once a live provider is configured those become real
+ * send attempts — three retries each, against a finite daily quota,
+ * every one of them bouncing and every bounce counting against the
+ * sender's reputation. Dropping them here rather than in each caller
+ * means a new test cannot forget.
+ *
+ * RFC 2606 reserves the top-level domains .test, .example, .invalid and
+ * .localhost, and the second-level example.com, example.net and
+ * example.org, so that no real inbox can ever be behind them. Every one
+ * is refused, subdomains included, along with our own @test.silla.
+ * Matching only `@example.com` and `@test.silla` let `admin@demo.test`
+ * through. The same list as the product's transport (a copy, like the
+ * rest of this file).
  */
-const UNDELIVERABLE = /@test\.silla$|@example\.(com|org|net)$/i;
+const RESERVED_TLDS = new Set(["test", "example", "invalid", "localhost"]);
+const RESERVED_DOMAINS = ["test.silla", "example.com", "example.net", "example.org"];
 
-/** True for the test domains the transport drops — for callers deciding whether to notify a REAL inbox about them. */
-export const isUndeliverable = (email) => UNDELIVERABLE.test(String(email || ""));
+/** The domain of an address, lowercased — `"Ana" <ana@x.test>` included. */
+function domainOf(address) {
+  let value = String(address || "").trim();
+  const angled = /<([^<>]*)>\s*$/.exec(value);
+  if (angled) value = angled[1].trim();
+  const at = value.lastIndexOf("@");
+  return at < 0 ? "" : value.slice(at + 1).toLowerCase().replace(/\.+$/, "");
+}
+
+/**
+ * True for an address on a reserved test domain, which the transport
+ * drops — and for callers deciding whether to notify a REAL inbox about
+ * a test customer, or to number their invoice in the TEST- sequence.
+ */
+export function isUndeliverable(address) {
+  const domain = domainOf(address);
+  if (!domain) return false;
+  if (RESERVED_TLDS.has(domain.split(".").pop())) return true;
+  return RESERVED_DOMAINS.some((reserved) => domain === reserved || domain.endsWith("." + reserved));
+}
 
 /** Fire-and-forget by design — see rule 1 above. */
 export function sendEmail({ to, subject, text, html }) {
   if (!to) return;
-  if (UNDELIVERABLE.test(to)) return;
+  if (isUndeliverable(to)) return;
   queue.push({ to, subject, text, html, attempts: 0 });
   drain();
 }
