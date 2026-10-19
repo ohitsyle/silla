@@ -235,10 +235,10 @@ function WholeRoomOption({ room, answer, loading, waitingForTime, blocked, onCho
 }
 
 /**
- * Every unit inside, grouped by the piece it belongs to — unit labels
- * repeat from piece to piece ("Desk · 1" twice), so a flat list would be
- * ambiguous. Hovering or focusing one outlines it on the map, which is
- * what tells two identical rows apart.
+ * Every unit inside, grouped by the piece it belongs to and named by it
+ * ("Long Table 2", then its seats 1–5): unit labels repeat from piece to
+ * piece, so a flat list would be ambiguous. Hovering or focusing one
+ * outlines it on the map as well.
  */
 function UnitsOption({ room, levelNames, units, loading, waitingForTime, blocked, resourceNoun, onPick, onHover }) {
   const pieces = useMemo(() => groupByPiece(room, units || []), [room, units]);
@@ -266,7 +266,7 @@ function UnitsOption({ room, levelNames, units, loading, waitingForTime, blocked
           {pieces.map((piece) => (
             <li key={piece.resourceId} className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
               <span className="min-w-[6.5rem] text-sm text-ink-secondary">
-                {piece.typeLabel}
+                {piece.pieceName || piece.typeLabel}
                 {multiLevel && (
                   <span className="text-ink-muted"> · {levelNames[room.levels.findIndex((l) => l.floorId === piece.floorId)]}</span>
                 )}
@@ -297,7 +297,9 @@ function UnitsOption({ room, levelNames, units, loading, waitingForTime, blocked
  * booking for this time (`blocked`), a plain label that still says free.
  */
 function UnitChip({ unit, blocked, resourceNoun, onPick, onHover }) {
-  const name = `${unit.typeLabel} · ${unit.unitLabel}`;
+  // "Long Table 2 · Seat 3" (lib/names.js): four tables of five no longer
+  // read as four identical "Long Table · 3"s to a screen reader.
+  const name = unit.label || `${unit.typeLabel} · ${unit.unitLabel}`;
   const hover = () => onHover?.(unit);
   if (unit.bookable && blocked) {
     return (
@@ -367,6 +369,7 @@ function groupByPiece(room, units) {
       pieces.set(unit.resourceId, {
         resourceId: unit.resourceId,
         typeLabel: unit.typeLabel,
+        pieceName: unit.pieceName,
         floorId: unit.floorId,
         position: unit.position,
         units: [],

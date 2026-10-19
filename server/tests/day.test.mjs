@@ -190,7 +190,10 @@ try {
   const anaNow = await claim(ana, solos[1], 0, 60);
   check("a booking for later leaves room for one for now", anaLater.status === "held" && anaNow.status === "held");
   const secondNow = await refused("a second booking for now is refused", () => claim(ana, solos[2], 0, 30), "ALREADY_HOLDING");
-  check("the refusal names the booking that holds the place", /Focus desk · 1/.test(secondNow.message) && /for now/.test(secondNow.message));
+  check(
+    "the refusal names the booking that holds the place",
+    /^Focus desk \d+$/.test(anaNow.targetLabel) && secondNow.message.includes(anaNow.targetLabel) && /for now/.test(secondNow.message)
+  );
   const secondLater = await refused("a second booking for later is refused, any day", () => claim(ana, solos[2], 300, 30), "ALREADY_HOLDING");
   check("the refusal says one booking ahead is the limit", /coming up/.test(secondLater.message) && /one booking ahead/.test(secondLater.message));
   const preview = await reservationAvailability({

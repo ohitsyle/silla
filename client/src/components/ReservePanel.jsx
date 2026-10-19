@@ -195,9 +195,10 @@ export function MyReservation({ reservation, resourceNoun = "resource", policy, 
   const upcoming = reservation.phase === "upcoming";
   const heading = !held ? "You're checked in" : upcoming ? "Coming up" : "Your reservation now";
   const badge = !held ? "Checked in" : upcoming ? "Booked" : "Now";
-  const title = reservation.roomId
-    ? reservation.resourceLabel
-    : `${reservation.resourceLabel || resourceNoun} · ${reservation.unitLabel}`;
+  // The name the map uses for it now — "Long Table 2 · Seat 3", or the room.
+  const title =
+    reservation.label ||
+    (reservation.roomId ? reservation.resourceLabel : `${reservation.resourceLabel || resourceNoun} · ${reservation.unitLabel}`);
 
   const cancel = async () => {
     setBusy(true);

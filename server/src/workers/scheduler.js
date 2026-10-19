@@ -17,6 +17,13 @@ import {
   noShowReleasedEmail,
   startingSoonEmail,
 } from "../services/email/templates.js";
+import { labelOf, unitLabels } from "../services/pieceNames.js";
+
+/**
+ * A reservation's name for an email: "Long Table 2 · Seat 3", as the map
+ * names it now, or what it was booked as when the piece is gone.
+ */
+const nameFor = async (reservation) => labelOf(reservation, await unitLabels([reservation]));
 
 /**
  * The shared scheduled worker referenced throughout the spec
@@ -149,7 +156,7 @@ export async function releaseExpiredGraceHolds() {
           org,
           user: member,
           reservation,
-          resourceLabel: reservation.targetLabel || reservation.unitLabel,
+          resourceLabel: await nameFor(reservation),
         })
       );
     }
@@ -186,7 +193,7 @@ export async function releaseOverstayedSessions() {
     const member = await User.findById(reservation.member);
     if (member && org) {
       sendEmail(
-        maxStayReleasedEmail({ org, user: member, reservation, resourceLabel: reservation.targetLabel || reservation.unitLabel })
+        maxStayReleasedEmail({ org, user: member, reservation, resourceLabel: await nameFor(reservation) })
       );
     }
   }
@@ -264,7 +271,7 @@ export async function sendStartingSoonReminders() {
     const member = await User.findById(reservation.member);
     if (member && org) {
       sendEmail(
-        startingSoonEmail({ org, user: member, reservation, resourceLabel: reservation.targetLabel || reservation.unitLabel })
+        startingSoonEmail({ org, user: member, reservation, resourceLabel: await nameFor(reservation) })
       );
     }
     sent += 1;
@@ -317,7 +324,7 @@ export async function applyScheduledClosures() {
             org,
             user: member,
             reservation,
-            resourceLabel: reservation.targetLabel || reservation.unitLabel,
+            resourceLabel: await nameFor(reservation),
             closure,
           })
         );

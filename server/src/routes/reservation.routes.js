@@ -17,6 +17,7 @@ import {
 } from "../services/reservations/index.js";
 import { LIVE_STATUSES } from "../services/reservations/availability.js";
 import { graceOf, memberStanding } from "../services/reservations/standing.js";
+import { floorNames, labelOf, unitLabels } from "../services/pieceNames.js";
 import { SpaceError } from "../services/spaces.js";
 
 const router = Router();
@@ -141,8 +142,12 @@ router.get(
       ...standing.current.map((reservation) => ({ reservation, phase: "current" })),
       ...standing.upcoming.map((reservation) => ({ reservation, phase: "upcoming" })),
     ];
+    // Named as the map names them now ("Long Table 2 · Seat 3").
+    const labels = await unitLabels(holding.map(({ reservation }) => reservation));
     const shaped = [];
-    for (const { reservation, phase } of holding) shaped.push({ ...(await withResource(reservation)), phase });
+    for (const { reservation, phase } of holding) {
+      shaped.push({ ...(await withResource(reservation)), label: labelOf(reservation, labels), phase });
+    }
 
     res.json({
       holding: shaped,
@@ -183,6 +188,8 @@ function shape(reservation) {
     resourceId: reservation.resource.toString(),
     unitLabel: reservation.unitLabel,
     resourceLabel: reservation.targetLabel,
+    // What it was booked as; /mine replaces it with the name the map uses now.
+    label: reservation.targetLabel || null,
     startTime: reservation.startTime,
     endTime: reservation.endTime,
     status: reservation.status,
@@ -199,11 +206,13 @@ async function withResource(reservation) {
   if (!resource) return base;
   const room = resource.kind === "room" ? await Room.findById(resource.room) : null;
   const type = await ResourceType.findById(resource.resourceType).select("label key");
+  const piece = room ? null : (await floorNames([resource.floor])).get(String(resource._id));
   return {
     ...base,
     floorId: resource.floor.toString(),
     position: resource.position,
-    resourceLabel: room?.name || type?.label || null,
+    // The piece ("Long Table 2") or the room; `label` is the unit's full name.
+    resourceLabel: room?.name || piece?.name || type?.label || null,
     roomId: room ? String(room._id) : null,
     roomLevels: room?.levels.map((l) => ({ floorId: String(l.floor), name: l.name })) || [],
   };

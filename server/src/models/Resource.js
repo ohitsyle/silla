@@ -27,6 +27,15 @@ const resourceSchema = new mongoose.Schema(
       row: { type: Number, required: true },
     },
 
+    /**
+     * This piece's number among the pieces of its type on its floor — the
+     * 2 in "Long Table 2" (lib/names.js). Stored when the piece is placed,
+     * and for a whole floor at its first structural change. Null on pieces
+     * placed before numbering existed, which are numbered on read, in
+     * reading order, so nothing had to be migrated.
+     */
+    number: { type: Number, default: null },
+
     // Sub-units for multi-seat pieces (e.g. a long table's individual seats).
     // For a 1-seat piece this array has exactly one entry.
     units: [

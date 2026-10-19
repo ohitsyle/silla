@@ -66,6 +66,7 @@ export function roomUnit(room, status) {
     resourceId: room.resourceId,
     unitIndex: 0,
     unitLabel: "room",
+    label: room.name,
     levels: room.levels,
     status: own,
     statusLabel: own.status,

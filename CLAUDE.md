@@ -640,18 +640,36 @@ so a box across an L's missing corner gives an L-shaped room. Out of scope:
 curves and diagonals (they would be staircases of cells), and the portal
 configurator, which still describes rectangular floors only.
 
+**Names — "Long Table 2 · Seat 3".** Units used to be named by type and
+unit number alone, so four long tables each had a "Long Table · 3" and
+eight solo desks were all "· 1" — in the room panel, the reservation, the
+reminder email and every screen-reader label. Every piece now has a
+number among the pieces of its type on its floor (`Resource.number`), and
+a unit is named by its piece, then the organization's noun and its own
+label; a single-unit piece is just "Solo Desk 4" (`lib/names.js`,
+byte-identical in server/ and client/, checked by the geometry suite).
+Pieces placed before numbering have no number and are numbered on read
+in reading order, after the numbers taken — nothing was migrated. Placing
+or removing a piece first stores the numbers its floor is shown with
+(`services/pieceNames.js stampNumbers`), so a neighbour is never
+renumbered under somebody's reservation; a new piece takes its type's
+smallest free number. The layout serves each piece's `name`; a
+reservation keeps the name it was made under (`targetLabel`, its
+history), and anything showing a LIVE one — /mine, the kiosk, reminders,
+staff schedules and timelines — asks `unitLabels()` for today's name.
+
 SpaceMap now resolves clicks BY CELL on the `<svg>` rather than per drawn
 element. Before, a room's or zone's fill sat over the grid and swallowed the
 click, so the Place tool could not put a piece inside a room by clicking —
 reproduced against main's SpaceMap, not theorised. Pieces stop their own
 clicks so furniture is never mistaken for the cell beneath it.
 
-`npm run test:spaces` runs 52 geometry checks (`tests/cells.test.mjs`, alone
-as `npm run test:cells`), 78 day checks (`tests/day.test.mjs`, alone as
-`npm run test:day`) and then 110 named spatial checks, each in a temporary
-replica set; `npm run test:isolated` runs the system suites' 174 checks in
-another temporary database, including literal-code checks with console
-email. None reads live credentials or touches Atlas. `test:spaces --
+`npm run test:spaces` runs 60 geometry and naming checks
+(`tests/cells.test.mjs`, alone as `npm run test:cells`), 78 day checks
+(`tests/day.test.mjs`, alone as `npm run test:day`) and then 120 named
+spatial checks, each in a temporary replica set; `npm run test:isolated`
+runs the system suites' 176 checks in another temporary database,
+including literal-code checks with console email. None reads live credentials or touches Atlas. `test:spaces --
 --serve` keeps disposable fixture data on :4010 (`--port=<n>` when another
 worktree's preview holds it) for the :5175 browser preview documented there
 — the spatial suite runs last so the flag reaches it.

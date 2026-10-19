@@ -234,6 +234,7 @@ export default function MapPage() {
       kind: "unit",
       resourceId: unit.resourceId,
       unitLabel: unit.unitLabel,
+      label: unit.label,
       floorId,
       roomId: unit.roomId,
       typeLabel: unit.type.label,
@@ -248,6 +249,7 @@ export default function MapPage() {
       kind: "unit",
       resourceId: unit.resourceId,
       unitLabel: unit.unitLabel,
+      label: unit.label,
       floorId: unit.floorId,
       roomId: focusedRoom.id,
       typeLabel: unit.typeLabel,
@@ -290,7 +292,8 @@ export default function MapPage() {
       ? `Everything in ${selection.typeLabel}, on ${listNames(selectionRoom.levels.map((level) => levelName(level, building?.floors)))}`
       : `${selection.typeLabel} and everything in it`;
   } else if (selection) {
-    title = `${selection.typeLabel} · ${selection.unitLabel}`;
+    // "Long Table 2 · Seat 3": which table, not only which seat at one.
+    title = selection.label || `${selection.typeLabel} · ${selection.unitLabel}`;
     subtitle = selectionRoom ? `In ${selectionRoom.name}, ${floor?.name}` : floor ? `On ${floor.name}` : undefined;
   } else if (focusedRoom) {
     title = focusedRoom.name;

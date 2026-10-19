@@ -20,6 +20,7 @@ import { LIVE_STATUSES } from "../services/reservations/availability.js";
 import { floorDay } from "../services/reservations/day.js";
 import { ReservationError } from "../services/reservations/errors.js";
 import { EntitlementError, assertWithinLimit } from "../services/entitlements.js";
+import { numberPieces, pieceName } from "../lib/names.js";
 
 const router = Router();
 
@@ -137,7 +138,7 @@ router.get("/:id/layout", asyncHandler(async (req, res) => {
   const organizationId = site.organization;
 
   const [resources, zones, labels, resourceTypes, rooms, building] = await Promise.all([
-    Resource.find({ floor: floor._id, kind: { $ne: "room" } }).select("floor resourceType position units").sort({ createdAt: 1 }),
+    Resource.find({ floor: floor._id, kind: { $ne: "room" } }).select("floor resourceType position number units").sort({ createdAt: 1 }),
     Zone.find({ floor: floor._id }).select("name bounds areas").sort({ name: 1 }),
     Label.find({ floor: floor._id }).select("text position"),
     ResourceType.find({ organization: organizationId, internal: { $ne: true } }).select(
@@ -148,6 +149,10 @@ router.get("/:id/layout", asyncHandler(async (req, res) => {
   ]);
 
   const staff = isStaff(await readRole(req, organizationId));
+
+  // Each piece's name on this floor, "Long Table 2" (lib/names.js).
+  const numbers = numberPieces(resources.map((r) => ({ id: String(r._id), type: String(r.resourceType), position: r.position, number: r.number })));
+  const typeLabel = new Map(resourceTypes.map((t) => [String(t._id), t.label]));
 
   const roomTargets = await Resource.find({ _id: { $in: rooms.map((r) => r.resource) } });
   const status = {};
@@ -186,6 +191,7 @@ router.get("/:id/layout", asyncHandler(async (req, res) => {
       resources: resources.map((r) => ({
         id: r._id.toString(),
         resourceType: r.resourceType.toString(),
+        name: pieceName(typeLabel.get(String(r.resourceType)), numbers.get(String(r._id))),
         position: r.position,
         // Membership is derived from the room's shape, never stored.
         roomId: rooms.find((room) => roomHolds(room, r, resourceTypes.find((t) => String(t._id) === String(r.resourceType))))?._id?.toString() || null,

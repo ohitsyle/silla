@@ -21,6 +21,7 @@ import {
 import { ReservationError } from "../services/reservations/index.js";
 import { MINIMUM_MINUTES, dayFrom } from "../services/reservations/day.js";
 import { EntitlementError, assertWithinLimit, requireFeature } from "../services/entitlements.js";
+import { floorNames, labelOf, unitLabels } from "../services/pieceNames.js";
 
 const router = Router();
 
@@ -286,21 +287,28 @@ router.post(
       // Why the stay ends when it does, when it ends at a limit.
       limit: limit ? { limit, at: latestEnd, sentence: limitSentence(limit, latestEnd, org) } : null,
       cancelled: cancelled
-        ? { id: String(cancelled._id), startTime: cancelled.startTime, endTime: cancelled.endTime, label: cancelled.targetLabel || null }
+        ? { id: String(cancelled._id), startTime: cancelled.startTime, endTime: cancelled.endTime, label: labelOf(cancelled, await unitLabels([cancelled])) }
         : null,
     });
   })
 );
 
-/** Adds the human-readable piece name so the kiosk can say where to sit. */
+/**
+ * Adds the human-readable names so the kiosk can say where to sit: the
+ * piece ("Long Table 2", or the room) and the unit's full name, "Long
+ * Table 2 · Seat 3" — the same words as the map beside it.
+ */
 async function describeResource(resourceId, unitLabel) {
   const resource = await Resource.findById(resourceId).select("resourceType position floor kind room");
   if (!resource) return { unitLabel };
   const room = resource.kind === "room" ? await Room.findById(resource.room) : null;
   const type = await ResourceType.findById(resource.resourceType).select("label");
+  const piece = room ? null : (await floorNames([resource.floor])).get(String(resource._id));
+  const label = (await unitLabels([{ resource: resource._id, unitLabel }])).get(`${resource._id}:${unitLabel}`);
   return {
     unitLabel,
-    resourceLabel: room?.name || type?.label || null,
+    ...(label ? { label } : {}),
+    resourceLabel: room?.name || piece?.name || type?.label || null,
     kind: room ? "room" : "piece",
     roomLevels: room?.levels.length || 0,
     position: resource.position,

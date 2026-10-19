@@ -896,7 +896,7 @@ function AvailabilityPanel({ unit, resourceNoun, busy, onClose, onSet }) {
   return (
     <Panel
       className="mt-4"
-      title={`${unit.type.label} · ${resourceNoun} ${unit.unitLabel}`}
+      title={unit.label || `${unit.type.label} · ${resourceNoun} ${unit.unitLabel}`}
       action={
         <Button size="sm" variant="ghost" onClick={onClose}>
           Close

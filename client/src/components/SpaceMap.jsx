@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Ban, Check, Clock, DoorOpen, Maximize, TriangleAlert, User, Wrench, ZoomIn, ZoomOut } from "lucide-react";
 import { effectiveStatus, roomMode, roomUnit } from "../lib/rooms.js";
+import { unitName } from "../lib/names.js";
 import { describeDay, entryFor } from "../lib/dayView.js";
 import {
   boundingBox, cellKey, cellsOf, difference, floorAreas, isRectangle, largestRect, regionAreas, union,
@@ -855,6 +856,15 @@ export default function SpaceMap({
                   const locked = faded && selectableOnly;
                   const daySentence = entry && day ? describeDay(entry, day, { noun: resourceNoun, roomName: ownRoom?.name }).headline : null;
                   const hit = touchTargets ? hitArea(r, type.footprint) : null;
+                  // "Long Table 2 · Seat 3" — which table, not only which
+                  // seat at one (lib/names.js). Said to screen readers, shown
+                  // on hover, and handed to whatever opens for this unit.
+                  const unitTitle = unitName({
+                    piece: resource.name || type.label,
+                    unitLabel: unit.label,
+                    units: resource.units.length,
+                    noun: resourceNoun,
+                  });
                   // A unit blocked by its room opens the room: that is where
                   // the booking that matters is made (or why it can't be).
                   // Without a room handler (the kiosk), it chooses the room
@@ -869,6 +879,8 @@ export default function SpaceMap({
                       resourceId: resource.id,
                       unitIndex,
                       unitLabel: unit.label,
+                      label: unitTitle,
+                      pieceName: resource.name || type.label,
                       type,
                       position: resource.position,
                       roomId: resource.roomId || null,
@@ -894,7 +906,7 @@ export default function SpaceMap({
                   // with the room's door — rather than as a row of red
                   // "unavailable" seats that make a free room look broken.
                   if (unitStatus?.includedInRoom && !management) {
-                    const description = `${type.label} · ${unit.label} — comes with ${room?.name || "its room"}`;
+                    const description = `${unitTitle} — comes with ${room?.name || "its room"}`;
                     const iconSize = clamp(Math.min(r.w, r.h) * 0.45, 8, 16);
                     return (
                       <g
@@ -948,7 +960,7 @@ export default function SpaceMap({
                   const isHighlighted = highlighted.has(`${resource.id}:${unit.label}`);
 
                   const description =
-                    `${type.label} · ${resourceNoun} ${unit.label} — ${appearance.statusLabel} now` +
+                    `${unitTitle} — ${appearance.statusLabel} now` +
                     (overstayed ? ` · ${OVERSTAY_META.label}` : "") +
                     (room ? ` (${room.name})` : "") +
                     (daySentence && rings ? `. ${daySentence}` : "") +

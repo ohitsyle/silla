@@ -260,7 +260,8 @@ export function WalkInStep({ organizationId, member, mode, allowance, upcoming, 
       return;
     }
     setNotice(null);
-    onPick({ ...unit, label: unit.kind === "room" ? unit.type?.label : `${unit.type?.label} · ${unit.unitLabel}` }, stay);
+    // The map names it: "Long Table 2 · Seat 3", or the room.
+    onPick({ ...unit, label: unit.label || (unit.kind === "room" ? unit.type?.label : `${unit.type?.label} · ${unit.unitLabel}`) }, stay);
   };
 
   const heading =

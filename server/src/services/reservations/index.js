@@ -45,6 +45,8 @@ import {
 } from "./availability.js";
 import { ReservationError } from "./errors.js";
 import { assertMayHold, graceOf, memberStanding } from "./standing.js";
+import { floorNames } from "../pieceNames.js";
+import { unitName } from "../../lib/names.js";
 
 export { ReservationError };
 
@@ -187,8 +189,8 @@ async function floorsShowing(resource) {
  * Whether `unitLabel` on `resourceId` can be held from `start` to `end`.
  *
  * Throws a ReservationError for the first rule the window breaks, and
- * returns the label the reservation will carry ("Long Table · 3", or the
- * room's name). The order is deliberate: the organization's policy, then
+ * returns the label the reservation will carry ("Long Table 2 · Seat 3",
+ * or the room's name). The order is deliberate: the organization's policy, then
  * the unit itself, then its room, then closures, then other bookings — so
  * the reason given is the most fundamental one.
  *
@@ -250,7 +252,22 @@ async function resolveTarget({ organizationId, resourceId, unitLabel, org, sessi
     : { resource: resource._id, unitLabel: String(unitLabel) };
 
   const floor = await Floor.findById(resource.floor).session(session);
-  return { resource, room, scope, floor, label: resource.kind === "room" ? room.name : `${type.label} · ${unitLabel}` };
+  return { resource, room, scope, floor, label: resource.kind === "room" ? room.name : await unitNameOf(resource, unitLabel, org, session) };
+}
+
+/**
+ * "Long Table 2 · Seat 3": the unit's name as the map shows it, which the
+ * reservation keeps as its `targetLabel` (lib/names.js). It used to be
+ * "Long Table · 3" — the same words for that seat at every long table.
+ */
+async function unitNameOf(resource, unitLabel, org, session = null) {
+  const names = await floorNames([resource.floor], { session });
+  return unitName({
+    piece: names.get(String(resource._id))?.name,
+    unitLabel,
+    units: resource.units.length,
+    noun: nounOf(org),
+  });
 }
 
 /**
@@ -448,6 +465,11 @@ export async function roomBookingOptions({ organizationId, roomId, startTime, en
     return type?.reservable ? piece.units.map((unit) => ({ piece, unit, type })) : [];
   });
 
+  // Each piece's name on its own floor — "Long Table 2" — so a room of
+  // identical tables lists four different ones (lib/names.js).
+  const names = await floorNames(room.levels.map((level) => level.floor));
+  const describe = (candidate) => describeUnit(candidate, names, nounOf(org));
+
   const refusal = (err) => ({ bookable: false, error: err.message, code: err.code || null });
   const refuseAll = (err) => ({
     whole: room.bookingMode === "individual" ? null : refusal(err),
@@ -535,13 +557,16 @@ export async function roomBookingOptions({ organizationId, roomId, startTime, en
   return shaped(whole, units, you);
 }
 
-/** One unit inside a room, as the room panel lists it. */
-function describe({ piece, unit, type }) {
+/** One unit inside a room, as the room panel lists it: its piece's name and its own. */
+function describeUnit({ piece, unit, type }, names, noun) {
+  const name = names.get(String(piece._id))?.name || type.label;
   return {
     resourceId: String(piece._id),
     unitLabel: unit.label,
     floorId: String(piece.floor),
     typeLabel: type.label,
+    pieceName: name,
+    label: unitName({ piece: name, unitLabel: unit.label, units: piece.units.length, noun }),
     position: piece.position,
   };
 }

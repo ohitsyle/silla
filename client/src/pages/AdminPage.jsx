@@ -18,6 +18,7 @@ import {
   Badge, Button, Card, EmptyState, Field, Loading, Modal, Notice, Page, PageHeader, Panel,
   Segmented, Select, SkeletonRows, SkeletonStats, Stat, StatusDot, listContainer, pageEnter,
 } from "../components/ui/index.jsx";
+import { unitName } from "../lib/names.js";
 
 /**
  * AdminPage — the admin surface (spec §14, ADM-1..ADM-5 + RPT-1).
@@ -134,6 +135,8 @@ function Dashboard() {
   }
 
   const m = data.metrics;
+  const resourceNoun = org?.terminology?.resourceNoun || "resource";
+  const floorName = (id) => data.floors.find((f) => f.id === id)?.name || null;
   return (
     <div className="space-y-5">
       <Segmented
@@ -217,7 +220,8 @@ function Dashboard() {
             {data.overstays.map((o) => (
               <li key={`${o.resourceId}-${o.unitLabel}`} className="py-2 flex items-center gap-3 text-sm">
                 <span className="text-ink-primary">
-                  Unit {o.unitLabel} at ({o.position.col}, {o.position.row})
+                  {o.label || `${resourceNoun} ${o.unitLabel}`}
+                  {floorName(o.floorId) && <span className="text-ink-muted"> · {floorName(o.floorId)}</span>}
                 </span>
                 <Button size="sm" icon={MapIcon} onClick={() => navigate(`/map/${o.floorId}`)} className="ml-auto">
                   Show on map
@@ -337,6 +341,7 @@ function Resources() {
       resources: term
         ? g.resources.filter(
             (r) =>
+              (r.name || r.typeLabel).toLowerCase().includes(term) ||
               r.typeLabel.toLowerCase().includes(term) ||
               g.zoneName.toLowerCase().includes(term) ||
               `${r.position.col},${r.position.row}`.includes(term.replace(/\s/g, ""))
@@ -376,7 +381,7 @@ function Resources() {
       <div className="flex flex-wrap items-center gap-3">
         <Field
           className="flex-1 min-w-[220px]"
-          placeholder="Filter by type, zone or cell…"
+          placeholder="Filter by name, type or zone…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           aria-label="Filter resources"
@@ -454,15 +459,20 @@ function Resources() {
                                px-4 py-2.5 last:border-b-0 transition-colors duration-fast
                                hover:bg-line/[0.05]"
                   >
-                    <span className="min-w-[150px] text-sm font-medium">{r.typeLabel}</span>
-                    <span className="text-xs tabular-nums text-ink-muted">
-                      ({r.position.col}, {r.position.row})
-                    </span>
+                    {/* "Long Table 2" — the name members see on the map, not
+                        a type and a grid coordinate. */}
+                    <span className="min-w-[150px] text-sm font-medium">{r.name || r.typeLabel}</span>
                     <div className="ml-auto flex flex-wrap items-center gap-1.5">
                       {r.units.map((u) => (
                         <UnitChip
                           key={u.label}
                           unit={u}
+                          name={unitName({
+                            piece: r.name || r.typeLabel,
+                            unitLabel: u.label,
+                            units: r.units.length,
+                            noun: org?.terminology?.resourceNoun || "resource",
+                          })}
                           busy={busy === `${r.id}:${u.label}`}
                           hasServiceStatus={r.hasServiceStatus}
                           onToggleAvailability={() =>
@@ -529,7 +539,7 @@ function Resources() {
  * not togglable here: the honest action is to cancel the reservation,
  * and a control that silently did nothing would be worse than none.
  */
-function UnitChip({ unit, busy, hasServiceStatus, onToggleAvailability, onToggleService }) {
+function UnitChip({ unit, name, busy, hasServiceStatus, onToggleAvailability, onToggleService }) {
   const derived = unit.status === "occupied" || unit.status === "reserved";
   const broken = unit.serviceStatus === "out_of_service";
   const off = unit.status === "unavailable";
@@ -542,7 +552,7 @@ function UnitChip({ unit, busy, hasServiceStatus, onToggleAvailability, onToggle
         type="button"
         disabled={derived || busy}
         onClick={onToggleAvailability}
-        aria-label={`Unit ${unit.label} — ${label}${derived ? "" : off ? ", enable" : ", disable"}`}
+        aria-label={`${name} — ${label}${derived ? "" : off ? ", enable" : ", disable"}`}
         title={
           derived
             ? "Held by a reservation — cancel that instead"
@@ -578,7 +588,7 @@ function UnitChip({ unit, busy, hasServiceStatus, onToggleAvailability, onToggle
           type="button"
           disabled={busy}
           onClick={onToggleService}
-          aria-label={`Unit ${unit.label} — mark ${broken ? "working" : "out of service"}`}
+          aria-label={`${name} — mark ${broken ? "working" : "out of service"}`}
           title={broken ? "Mark working" : "Mark out of service"}
           className="ml-0.5 grid h-7 w-6 place-items-center rounded-md text-ink-muted
                      transition-colors duration-fast hover:bg-line/10 hover:text-ink-primary"

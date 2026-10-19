@@ -9,6 +9,7 @@ import {
   MAX_AREAS, areasOf, boundingBox, cellKey, cellsOf, contains, difference, floorAreas, floorCells, intersection,
   intersects, isRectangle, largestRect, normaliseAreas, outlineEdges, outlineLoops, regionAreas, translate, union,
 } from "../src/lib/cells.js";
+import { nextNumber, numberPieces, pieceName, unitName } from "../src/lib/names.js";
 
 let passed = 0;
 function check(name, value) {
@@ -172,4 +173,41 @@ const server = readFileSync(new URL("../src/lib/cells.js", import.meta.url), "ut
 const client = readFileSync(new URL("../../client/src/lib/cells.js", import.meta.url), "utf8");
 check("the client's copy of the geometry is identical to the server's", server === client);
 
-console.log(`\n${passed} geometry checks passed.`);
+/* ─────────────────────────────── piece names ─────────────────────────────── */
+
+// Four long tables and two solo desks placed before numbering existed,
+// out of reading order, plus one table that already carries a number.
+const piece = (id, type, col, row, number = null) => ({ id, type, position: { col, row }, number });
+const tables = [piece("t-a", "table", 10, 2), piece("t-b", "table", 2, 2), piece("t-c", "table", 2, 6), piece("t-d", "table", 10, 6)];
+const solos = [piece("s-a", "solo", 4, 9), piece("s-b", "solo", 1, 9)];
+const numbered = numberPieces([...tables, ...solos]);
+check(
+  "pieces without a number are numbered per type in reading order",
+  numbered.get("t-b") === 1 && numbered.get("t-a") === 2 && numbered.get("t-c") === 3 && numbered.get("t-d") === 4 &&
+    numbered.get("s-b") === 1 && numbered.get("s-a") === 2
+);
+const kept = numberPieces([...tables, piece("t-e", "table", 0, 0, 2)]);
+check(
+  "a stored number is kept, and the rest take the numbers still free",
+  kept.get("t-e") === 2 && kept.get("t-b") === 1 && kept.get("t-a") === 3 && kept.get("t-c") === 4 && kept.get("t-d") === 5
+);
+check(
+  "numbering is the same however the pieces are listed",
+  JSON.stringify([...numberPieces([...tables].reverse()).entries()].sort()) === JSON.stringify([...numberPieces(tables).entries()].sort())
+);
+check("a new piece takes its type's smallest free number", nextNumber([...tables, ...solos], "table") === 5 && nextNumber([...tables, ...solos], "lamp") === 1);
+check(
+  "…including a gap a removed piece left",
+  nextNumber([piece("x", "table", 0, 0, 1), piece("y", "table", 2, 0, 3)], "table") === 2
+);
+check(
+  "a unit is named by its piece and the organization's noun",
+  unitName({ piece: pieceName("Long Table", 2), unitLabel: "3", units: 5, noun: "seat" }) === "Long Table 2 · Seat 3"
+);
+check("a single-unit piece is just its name", unitName({ piece: pieceName("Solo Desk", 4), unitLabel: "1", units: 1, noun: "seat" }) === "Solo Desk 4");
+
+const serverNames = readFileSync(new URL("../src/lib/names.js", import.meta.url), "utf8");
+const clientNames = readFileSync(new URL("../../client/src/lib/names.js", import.meta.url), "utf8");
+check("the client's copy of the naming rules is identical to the server's", serverNames === clientNames);
+
+console.log(`\n${passed} geometry and naming checks passed.`);
