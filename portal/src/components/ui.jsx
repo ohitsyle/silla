@@ -769,12 +769,19 @@ export function Modal({
     document.body.style.overflow = "hidden";
     if (gap > 0) document.body.style.paddingRight = `${gap}px`;
 
-    // Focus moves in ONCE, when the dialog opens. A dialog that changes
-    // step moves focus itself (the code boxes focus on mount).
+    // Focus moves in ONCE, when the dialog opens: to what it marks with
+    // data-autofocus, else its first field, and only then its first
+    // button. "First of input, select, textarea, button" used to land on
+    // the header's Close button in every dialog with fields and no mark —
+    // and a space typed into a dialog whose focus is on Close closes it.
+    // A dialog that changes step moves focus itself (the code boxes focus
+    // on mount).
     const frame = requestAnimationFrame(() => {
+      const panel = panelRef.current;
       const target =
-        panelRef.current?.querySelector("[data-autofocus]") ||
-        panelRef.current?.querySelector("input, select, textarea, button");
+        panel?.querySelector("[data-autofocus]") ||
+        panel?.querySelector("input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled])") ||
+        panel?.querySelector("button");
       target?.focus();
     });
 
