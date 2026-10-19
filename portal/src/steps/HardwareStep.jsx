@@ -34,7 +34,7 @@ function CountInput({ value, onChange, min = 1, floor = 0, label, error }) {
     <div
       className={cx(
         "inline-flex h-11 items-stretch overflow-hidden rounded-full border bg-bg-panel",
-        error ? "border-state-unavailable/60" : "border-line/12"
+        error ? "border-state-unavailable/60" : "border-line/[0.12]"
       )}
     >
       <button

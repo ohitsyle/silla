@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { createPortal } from "react-dom";
 import { LoaderCircle, TriangleAlert, CircleCheck, Info, X } from "lucide-react";
@@ -405,6 +405,19 @@ export function Modal({ open, onClose, title, subtitle, icon: Icon, children, fo
   const panelRef = useRef(null);
   const restoreRef = useRef(null);
 
+  // The close handler as it is NOW, read when Escape arrives rather than
+  // captured when the dialog opened. It used to be a dependency of the
+  // effect below, so any re-render that handed in a new inline `onClose`
+  // (`busy ? undefined : …`, a page refreshing on a timer) tore the effect
+  // down and ran it again — focus jumped back to whatever opened the
+  // dialog, then to its first field, mid-sentence. The storefront's copy
+  // of this dialog lost a buyer's message that way. The effect now runs
+  // once per opening; only the handler follows the props.
+  const latestClose = useRef(onClose);
+  useLayoutEffect(() => {
+    latestClose.current = onClose;
+  });
+
   useEffect(() => {
     if (!open) return undefined;
 
@@ -413,7 +426,7 @@ export function Modal({ open, onClose, title, subtitle, icon: Icon, children, fo
     const onKey = (e) => {
       if (e.key === "Escape") {
         e.stopPropagation();
-        onClose?.();
+        latestClose.current?.();
       }
     };
     document.addEventListener("keydown", onKey, true);
@@ -442,7 +455,7 @@ export function Modal({ open, onClose, title, subtitle, icon: Icon, children, fo
       // of the document.
       if (restoreRef.current instanceof HTMLElement) restoreRef.current.focus();
     };
-  }, [open, onClose]);
+  }, [open]);
 
   const reduced = prefersReducedMotion();
 
@@ -464,7 +477,7 @@ export function Modal({ open, onClose, title, subtitle, icon: Icon, children, fo
             aria-modal="true"
             aria-label={typeof title === "string" ? title : undefined}
             className={cx(
-              "relative w-full bg-bg-card border border-line/12 shadow-lg",
+              "relative w-full bg-bg-card border border-line/[0.12] shadow-lg",
               "rounded-t-xl sm:rounded-xl max-h-[92vh] overflow-y-auto",
               width
             )}

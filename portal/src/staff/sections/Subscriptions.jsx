@@ -351,7 +351,7 @@ const addOnId = (a) => `${a.key}:${a.kind}`;
 function QuantityStepper({ value, onChange, min = 1, max = null, disabled, label }) {
   const n = Number(value) || 0;
   return (
-    <span className="inline-flex h-9 items-stretch overflow-hidden rounded-full border border-line/12 bg-bg-panel">
+    <span className="inline-flex h-9 items-stretch overflow-hidden rounded-full border border-line/[0.12] bg-bg-panel">
       <button
         type="button"
         aria-label={`Fewer ${label}`}

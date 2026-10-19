@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useId, useRef, useState } from "react";
+import { forwardRef, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { LoaderCircle, TriangleAlert, CircleCheck, Info, Check, X, Inbox } from "lucide-react";
@@ -124,7 +124,7 @@ const BUTTON_VARIANTS = {
   // class — see the `style` branch in the component below.
   primary: "border-0 hover:brightness-[1.04] active:translate-y-[3px] active:shadow-none",
   secondary:
-    "bg-bg-card border-2 border-line/12 text-ink-primary hover:border-line/25 active:translate-y-[1px]",
+    "bg-bg-card border-2 border-line/[0.12] text-ink-primary hover:border-line/25 active:translate-y-[1px]",
   ghost: "border-0 text-ink-secondary hover:text-ink-primary hover:bg-line/[0.06]",
   danger:
     "border-2 border-state-unavailable/40 text-state-unavailable hover:bg-state-unavailable/10 active:translate-y-[1px]",
@@ -731,6 +731,22 @@ export function Modal({
   const panelRef = useRef(null);
   const restoreRef = useRef(null);
 
+  // The close handler as it is NOW, read when Escape arrives rather than
+  // captured when the dialog opened.
+  //
+  // It used to be a dependency of the effect below. Pages pass an inline
+  // `onClose` (often `busy ? undefined : onClose`) and re-render on their
+  // refresh timers — Messages every 30 seconds, the staff console's
+  // badges — so every refresh tore the effect down and ran it again:
+  // focus went back to the button behind the dialog, then to the
+  // dialog's first field, in the middle of whatever was being typed. A
+  // buyer's message to SILLA ended half in its Subject box. The effect
+  // now runs once per opening, and only the handler follows the props.
+  const latest = useRef({ onClose, dismissible });
+  useLayoutEffect(() => {
+    latest.current = { onClose, dismissible };
+  });
+
   useEffect(() => {
     if (!open) return undefined;
 
@@ -741,7 +757,7 @@ export function Modal({
       e.stopPropagation();
       // A destructive confirmation can opt out, so a stray keypress
       // cannot dismiss the question it is asking.
-      if (dismissible) onClose?.();
+      if (latest.current.dismissible) latest.current.onClose?.();
     };
     document.addEventListener("keydown", onKey, true);
 
@@ -753,6 +769,8 @@ export function Modal({
     document.body.style.overflow = "hidden";
     if (gap > 0) document.body.style.paddingRight = `${gap}px`;
 
+    // Focus moves in ONCE, when the dialog opens. A dialog that changes
+    // step moves focus itself (the code boxes focus on mount).
     const frame = requestAnimationFrame(() => {
       const target =
         panelRef.current?.querySelector("[data-autofocus]") ||
@@ -769,7 +787,7 @@ export function Modal({
       // the document.
       if (restoreRef.current instanceof HTMLElement) restoreRef.current.focus();
     };
-  }, [open, onClose, dismissible]);
+  }, [open]);
 
   const reduced = prefersReducedMotion();
 

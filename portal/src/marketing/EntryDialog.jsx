@@ -125,7 +125,7 @@ export default function EntryDialog({ open, onClose, planKey, annual = true, onE
           almost never wants to start again, and losing it silently is
           the worst outcome this dialog can produce. */}
       {draft && (
-        <div className="mb-4 rounded-lg border border-line/12 p-4">
+        <div className="mb-4 rounded-lg border border-line/[0.12] p-4">
           <p className="text-sm">
             <span className="font-bold">You have a saved draft</span>
             {draft.name ? (

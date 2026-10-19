@@ -284,7 +284,7 @@ export function OtpInput({ value, onChange, onComplete, disabled, error, autoFoc
               ? "border-state-unavailable/70"
               : d
                 ? "border-line/30"
-                : "border-line/12 focus:border-[color:var(--color-accent)]"
+                : "border-line/[0.12] focus:border-[color:var(--color-accent)]"
           )}
         />
       ))}

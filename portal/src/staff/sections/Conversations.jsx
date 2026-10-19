@@ -560,6 +560,8 @@ export function ComposeDialog({ open, onClose, customer: fixedCustomer = null, o
   const [body, setBody] = useState("");
   const [fields, setFields] = useState({});
   const [busy, setBusy] = useState(false);
+  const subjectRef = useRef(null);
+  const searchRef = useRef(null);
 
   useEffect(() => {
     if (!open) return;
@@ -643,6 +645,7 @@ export function ComposeDialog({ open, onClose, customer: fixedCustomer = null, o
           <div>
             <TextInput
               label="Customer"
+              inputRef={searchRef}
               placeholder="Name, email or organization"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -656,7 +659,14 @@ export function ComposeDialog({ open, onClose, customer: fixedCustomer = null, o
                   <li key={c.id} className="border-b border-line/[0.07] last:border-0">
                     <button
                       type="button"
-                      onClick={() => setCustomer(c)}
+                      onClick={() => {
+                        setCustomer(c);
+                        // The list this button sits in goes away with the
+                        // choice, which would drop focus on the page behind.
+                        // The dialog focuses once, on opening, so it moves on
+                        // to the next thing to fill in here.
+                        requestAnimationFrame(() => subjectRef.current?.focus());
+                      }}
                       className="flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors hover:bg-line/[0.04]"
                     >
                       <Avatar name={c.name} email={c.email} size={30} />
@@ -675,7 +685,14 @@ export function ComposeDialog({ open, onClose, customer: fixedCustomer = null, o
           </div>
         )}
         {customer && !fixedCustomer && (
-          <button type="button" className="text-sm font-semibold text-ink-secondary underline underline-offset-2" onClick={() => setCustomer(null)}>
+          <button
+            type="button"
+            className="text-sm font-semibold text-ink-secondary underline underline-offset-2"
+            onClick={() => {
+              setCustomer(null);
+              requestAnimationFrame(() => searchRef.current?.focus());
+            }}
+          >
             Someone else
           </button>
         )}
@@ -689,7 +706,7 @@ export function ComposeDialog({ open, onClose, customer: fixedCustomer = null, o
             ))}
           </SelectInput>
         )}
-        <TextInput label="Subject" value={subject} onChange={(e) => setSubject(e.target.value)} error={fields.subject} maxLength={160} {...(customer ? { "data-autofocus": true } : {})} />
+        <TextInput label="Subject" inputRef={subjectRef} value={subject} onChange={(e) => setSubject(e.target.value)} error={fields.subject} maxLength={160} {...(customer ? { "data-autofocus": true } : {})} />
         <Textarea label="Message" rows={5} value={body} onChange={(e) => setBody(e.target.value)} error={fields.body} />
         <p className="text-xs text-ink-muted">
           It appears in their account under Messages, and they're emailed if they haven't read it within {QUIET_MINUTES} minutes. You'll be
