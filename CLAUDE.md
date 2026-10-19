@@ -45,14 +45,31 @@ All 12 Sprint 0 stories (51 pts) are implemented and verified:
   so it could not protect a room booking racing a seat booking inside it.
   Structural map writes and availability changes share the same guard.
   Read the header comment before touching it. Eight racing room/seat
-  claims produce exactly one winner; a member racing two resources also
-  gets only one reservation.
+  claims produce exactly one winner.
+- **RES-3, revised — one booking for now and one for later.** A member
+  holds at most ONE current session (checked in, or a held booking whose
+  check-in window is open: 15 minutes before its start until its grace
+  runs out) and at most ONE upcoming booking (any later day too), never
+  overlapping. `services/reservations/standing.js`, enforced inside the
+  claim's transaction after the `spaceRevision` write — the day suite races
+  seven bookings and walk-ins for one member and fails when the rule is
+  read before the transaction instead. It used to be one live reservation
+  of any kind, which stopped someone booked 3–5 PM from sitting down at
+  8 AM. The website books now and later; the kiosk only seats from now.
 - **OCC-1..OCC-6** — `services/reservations/occupancy.js`. This sits
   DOWNSTREAM of the check-in interface on purpose: `services/checkin/`
   answers "who is this?" and stops. Do not move reservation logic into
   the resolver, or QR becomes a rewrite instead of a new implementation.
+  A tap (`tapStanding`): checked in → out; a booking in its window → in;
+  a booking LATER TODAY → `later-today`, and the kiosk asks (see "The day"
+  below); nothing, or another day's booking → `walk-in`.
 - **MAP-2** — `services/realtime.js` + `client/src/lib/useFloorSocket.js`.
-  Only the `status` half is ever streamed; layout is fetched once.
+  Only the `status` half is ever streamed; layout is fetched once. A
+  second event, `floor:day`, carries only a floor id: something on its
+  DAY changed (a booking for later changes no colour), and open maps
+  re-read GET /api/floors/:id/day. Sent by every status refresh — to a
+  room's every level for a booking inside it — and by closures and new
+  opening hours.
 - **MAP-3** — `routes/resource.routes.js` + `pages/EditorPage.jsx`.
 - **AUTH-4, NOT-1..NOT-3** — PIN reset, async email, reminders.
 - **RES-4 (booking with others) was REMOVED**, not deferred or disabled.
@@ -554,8 +571,10 @@ live is a decent beat in itself). Set them back afterwards, or run
 **Demo path that is known to work:**
 1. `/kiosk` — type `DEADBEEF` and press Enter. A USB RFID reader is a
    keyboard wedge, so typing IS the tap; no hardware needed. The card is
-   recognised, then pick any green seat → "You're checked in". Tap again
-   to check out.
+   recognised → "You don't have a reservation" and the floor with what is
+   free now → tap a bright seat → choose how long → "You're checked in".
+   Tap again to check out. (Book something later today on the website
+   first and the tap asks what to do with it instead.)
 2. `/login` as `member@demo.test` / `111111` → click a green seat → the
    panel scrolls into view → confirm with the PIN → "Your reservation".
 3. `staff@demo.test` / `654321` → hits the terms gate first (AUTH-3),
@@ -620,12 +639,14 @@ reproduced against main's SpaceMap, not theorised. Pieces stop their own
 clicks so furniture is never mistaken for the cell beneath it.
 
 `npm run test:spaces` runs 52 geometry checks (`tests/cells.test.mjs`, alone
-as `npm run test:cells`) and then 110 named spatial checks in a temporary
-replica set; `npm run test:isolated` runs the existing 117 checks in another
-temporary database, including literal-code checks with console email.
-Neither reads live credentials or touches Atlas. `test:spaces -- --serve`
-keeps disposable fixture data on :4010 (`--port=<n>` when another worktree's
-preview holds it) for the :5175 browser preview documented there.
+as `npm run test:cells`), 78 day checks (`tests/day.test.mjs`, alone as
+`npm run test:day`) and then 110 named spatial checks, each in a temporary
+replica set; `npm run test:isolated` runs the system suites' 174 checks in
+another temporary database, including literal-code checks with console
+email. None reads live credentials or touches Atlas. `test:spaces --
+--serve` keeps disposable fixture data on :4010 (`--port=<n>` when another
+worktree's preview holds it) for the :5175 browser preview documented there
+— the spatial suite runs last so the flag reaches it.
 
 Members read the map as building › floor › room: a breadcrumb, a building
 switcher (only when there is more than one), floor tabs, a row of the
@@ -637,6 +658,52 @@ rooms). The scheduler's state moves are CONDITIONAL
 overwrite a newer one — a member who tapped in at the last second used to
 be marked a no-show. Every suite now passes at any time of day; windows
 are built by `tests/clock.mjs`, never "now + 1h", which crossed midnight.
+The last half hour of a day takes no walk-in, so in it the system and
+spatial suites move their own clock to 23:20 (`LATE_EVENING`), and the day
+suite, whose scenarios need hours of today on both sides of now, moves to
+midday when they are not there (`keepClear`). Each says so when it does.
+
+## The day — rings, timelines, When, and the kiosk
+
+The map's colours say what each unit is doing RIGHT NOW, which is what the
+kiosk and a walk-in need. They could not say that a desk free all morning is
+booked from 3 PM, so a member trying 2–4 PM was refused with no way to see
+why. `GET /api/floors/:id/day?date=` (`services/reservations/day.js`)
+answers the rest in ONE reservation query per floor: every unit's and every
+room's booked stretches, whether it is free now and until when, and a day
+state — `free`, `partial`, `full` (no free stretch of 30 minutes left before
+closing), or `closed` (nothing left to book at all, which is not "booked").
+It applies the claim's own rules in bulk: a whole-room booking blocks every
+unit inside on every level, a booking inside blocks the room, an overstay
+blocks the slot it is in until checkout, hours and closures bound the day,
+and anything after closing limits nobody today. Members see time booked,
+never by whom (their own is `mine`); staff and superadmins also get names.
+
+- **The ring** (`SpaceMap` `DayRing`): the fill keeps meaning "now"; a thin
+  ring adds the rest of today — none when free, a neutral hairline with an
+  orange arc as long as the share booked, the whole ring when full. One
+  legend line, "Booked later today", only while a ring shows. Chips are 6
+  map units apart now, to leave each ring its room.
+- **The timeline** (`DayTimeline.jsx`) in the unit and room panels: half
+  hours from opening to closing, 24px each and scrolling sideways, booked
+  blocks at their real times (a room's booking striped), yours, the past,
+  closures, the choice, and a sentence — "Free until 3:00 PM". Tap a start
+  then an end, or drag with a mouse; lengths stop at the maximum stay,
+  closing and the next booking. It writes into the page's ONE booking window.
+- **When** (`WhenBar.jsx`): Now / Later today / Another day over that same
+  window. Looking ahead fades what is taken then and counts the rest,
+  without changing what the colours mean. Rings hide for another day.
+- **The kiosk** (`components/KioskWalkIn.jsx`). A booking later today:
+  "You have a reservation at 3:00 PM… Would you like to:" a) check in now
+  and cancel it — cancelled in the SAME transaction as the walk-in
+  (`walkInAtKiosk`), so a refused walk-in loses nothing; b) check in now
+  and keep it, ending by 3:00 PM, withheld with the reason under half an
+  hour; c) not now. No booking today: what is free now, only units free for
+  30 minutes selectable (whole-share touch targets), then how long in half
+  hours up to the shortest of max stay, closing, the unit's next booking
+  and the member's own, said in words. The server works out every limit
+  itself and REFUSES a stay past one rather than shortening it quietly.
+  Untouched choices return to the tap screen after a minute.
 
 **Live (deployed 16 Oct 2026, shapes included):** the demo organization
 has two buildings, set up from the live editor on 15 Oct — "Building 1"
@@ -931,6 +998,21 @@ worse than an error message.
     reject is a trap). Only the extent is kept, because a floor's grid
     is a size and not a position. The number fields stay alongside for
     whoever does know the figure — each drives the other.
+
+  Three traps the day work walked into:
+  - **Tailwind only knows its own opacity steps.** `border-line/12` is not
+    one (10 and 15 are), so the class generates nothing and the border
+    falls back to preflight's light grey — a white outline on a dark
+    card. Use a step, or brackets: `border-line/[0.12]`. Inspector and
+    Modal still carry a `/12`.
+  - **Motion owns a `motion.*` element's style.** The selected unit's
+    outline was a changed `stroke` on the chip's `motion.rect`, and it
+    never reached the screen: the chosen seat looked like every other.
+    It is its own plain `<rect>` over the chip now.
+  - **Move a test clock before the database driver loads.** Moved after,
+    the connection dropped at the driver's first heartbeat, ten seconds
+    in — every short suite passed and the long one failed. `keepClear`
+    runs before mongoose is imported, for that reason.
 
   Two traps this work walked into, both worth remembering:
   - **Duplicate `style` attributes in JSX are silent.** The last one

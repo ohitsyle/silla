@@ -1,6 +1,6 @@
 import { Clock } from "lucide-react";
 import { Field, Notice, Select } from "./ui/index.jsx";
-import { formatHours, formatWhen } from "../lib/bookingWindow.js";
+import { formatHours, formatLength, formatWhen } from "../lib/bookingWindow.js";
 
 /**
  * "When?" — the start and length of the booking window (lib/bookingWindow).
@@ -30,7 +30,7 @@ export default function WhenFields({ booking }) {
         <Select label="For" value={duration} onChange={(e) => setDuration(Number(e.target.value))}>
           {lengths.map((hoursLong) => (
             <option key={hoursLong} value={hoursLong}>
-              {formatHours(hoursLong)}
+              {formatLength(Math.round(hoursLong * 60))}
             </option>
           ))}
         </Select>

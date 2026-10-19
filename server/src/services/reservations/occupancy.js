@@ -15,16 +15,17 @@
  * logic had been written inside the resolver, it would all have to be
  * duplicated. Keep it that way.
  */
-import Organization from "../../models/Organization.js";
+import Closure from "../../models/Closure.js";
 import Reservation from "../../models/Reservation.js";
-import Resource from "../../models/Resource.js";
-import { ReservationError, announceUnitStatus, assertActivationAvailable, claimReservation, transact } from "./index.js";
-import { assertWithinOperatingHours } from "./availability.js";
+import {
+  ReservationError, announceUnitStatus, assertActivationAvailable, claimInSession, nextBookingStart, transact,
+} from "./index.js";
+import { MINIMUM_MINUTES, SLOT_MINUTES, dayFrom, hoursOn } from "./day.js";
+import { EARLIEST_CHECK_IN_MINUTES, graceOf, memberStanding } from "./standing.js";
 
 const MINUTE = 60_000;
-
-/** How early a member may tap in for a booking (OCC-1). */
-const EARLIEST_CHECK_IN_MINUTES = 15;
+const clock = (date) => new Date(date).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+const nounOf = (org) => org?.terminology?.resourceNoun || "resource";
 
 /**
  * OCC-6 — duplicate taps within 5 seconds are ignored, so an accidental
@@ -59,17 +60,32 @@ export function __resetTapHistory() {
 }
 
 /**
- * The member's current standing: are they checked in somewhere, or
- * holding a reservation they could check into now?
+ * What a tap at the kiosk finds, in the order the kiosk acts on it:
+ *
+ *   active       checked in somewhere           -> the tap checks them out
+ *   held         a booking whose check-in window -> the tap checks them in
+ *                is open — or one whose grace       (or tells them it lapsed)
+ *                has just run out
+ *   later-today  a booking later today, its      -> the kiosk asks: check in now
+ *                window not open yet                and cancel it, check in now
+ *                                                   and keep it, or not now
+ *   none         nothing, or only a booking on   -> walk in
+ *                another day
+ *
+ * A booking on another day does not prompt: a walk-in today ends at closing
+ * at the latest, long before it, so there is nothing to decide.
  */
-export async function getMemberSession(memberId) {
-  const active = await Reservation.findOne({ member: memberId, status: "active" });
-  if (active) return { kind: "active", reservation: active };
-
-  const held = await Reservation.findOne({ member: memberId, status: "held" }).sort({ startTime: 1 });
-  if (held) return { kind: "held", reservation: held };
-
-  return { kind: "none" };
+export async function tapStanding({ organizationId, memberId, org, now = new Date() }) {
+  const standing = await memberStanding(memberId, { organizationId, now, graceMinutes: graceOf(org) });
+  const active = standing.current.find((reservation) => reservation.status === "active");
+  if (active) return { kind: "active", reservation: active, standing };
+  const held = standing.current[0] || standing.lapsed[0];
+  if (held) return { kind: "held", reservation: held, standing };
+  const [next] = standing.upcoming;
+  if (next && dayFrom(null, next.startTime).getTime() === dayFrom(null, now).getTime()) {
+    return { kind: "later-today", reservation: next, standing };
+  }
+  return { kind: "none", standing };
 }
 
 /**
@@ -81,15 +97,18 @@ export async function getMemberSession(memberId) {
  * is still in use. A tap after the grace period expires the booking
  * instead, and that expiry is committed even though the tap is refused.
  */
-export async function checkIn({ organizationId, memberId, io = null }) {
+export async function checkIn({ organizationId, memberId, reservationId = null, io = null }) {
   const outcome = await transact(organizationId, async (session, org) => {
-    const held = await Reservation.findOne({ organization: organizationId, member: memberId, status: "held" })
+    // The booking the tap found, when it named one; else the earliest held.
+    const held = await Reservation.findOne({
+      organization: organizationId, member: memberId, status: "held", ...(reservationId ? { _id: reservationId } : {}),
+    })
       .sort({ startTime: 1 })
       .session(session);
     if (!held) throw new ReservationError("No reservation to check in to.", 404, "NO_RESERVATION");
 
     const now = new Date();
-    const graceMinutes = org.policy?.gracePeriodMinutes ?? 10;
+    const graceMinutes = graceOf(org);
     if (held.startTime - now > EARLIEST_CHECK_IN_MINUTES * MINUTE) {
       throw new ReservationError(
         `You can check in from ${EARLIEST_CHECK_IN_MINUTES} minutes before the reservation starts.`,
@@ -103,6 +122,17 @@ export async function checkIn({ organizationId, memberId, io = null }) {
       held.status = "expired";
       await held.save({ session });
       return { reservation: held, expired: true, graceMinutes };
+    }
+
+    // One current session (RES-3): nobody is checked in two places at
+    // once. The tap checks a member out before it checks them in, so this
+    // only ever refuses a race — two taps, or a walk-in landing at the
+    // same moment — and the transaction makes sure one of them sees the other.
+    const elsewhere = await Reservation.exists({
+      organization: organizationId, member: memberId, status: "active", _id: { $ne: held._id },
+    }).session(session);
+    if (elsewhere) {
+      throw new ReservationError("You're already checked in somewhere else. Check out there first.", 409, "ALREADY_HOLDING");
     }
 
     await assertActivationAvailable(held, org, now, session);
@@ -146,76 +176,206 @@ export async function checkOut({ memberId, io = null }) {
 }
 
 /**
- * OCC-2 — walk-in. "No reservation → map shown; Selected open resource
- * assigned on the spot."
+ * How long a walk-in starting `now` may last before any unit is chosen:
+ * the maximum stay, closing time, the next closure, and the member's own
+ * next booking (`ownNext`), whichever comes first. The unit's own next
+ * booking is the one limit left, and the walk-in adds it (walkInAtKiosk);
+ * the kiosk adds it from the floor's day to show what each unit allows.
  *
- * A walk-in is a reservation created and activated in the same step: it
- * runs from now to the maximum stay, and is checked in immediately. That
- * keeps ONE occupancy model rather than a parallel "walk-in session"
- * concept that every later query would have to remember to union in.
+ *   { available: true, latestEnd, limit, closesAt }
+ *       limit: "max-stay" | "closing" | "closure" | "own"
+ *   { available: false, code, reason }   nothing to offer, and why
+ *
+ * Shorter than MINIMUM_MINUTES is nothing to offer: half an hour is the
+ * shortest stay the map calls free, and the shortest the kiosk sells.
  */
-export async function assignWalkIn({ organizationId, memberId, resourceId, unitLabel, io = null }) {
-  const org = await Organization.findById(organizationId);
-  if (!org) throw new ReservationError("Organization not found", 404);
+export function walkInWindow({ org, now = new Date(), ownNext = null, closures = [] }) {
+  const minimum = MINIMUM_MINUTES * MINUTE;
   if (org.status === "closed") {
-    throw new ReservationError(`${org.name} is currently closed.`, 409, "ORG_CLOSED");
+    return { available: false, code: "ORG_CLOSED", reason: `${org.name} is closed right now.` };
+  }
+  const { opensAt, closesAt } = hoursOn(org, dayFrom(null, now));
+  if (now < opensAt) {
+    return { available: false, code: "OPERATING_HOURS", reason: `Check-in opens at ${clock(opensAt)}.` };
+  }
+  if (closesAt - now < minimum) {
+    return {
+      available: false,
+      code: "OPERATING_HOURS",
+      reason: `Walk-ins have finished for today: we close at ${clock(closesAt)}.`,
+    };
+  }
+  const closedNow = closures.find((closure) => closure.startTime <= now && now < closure.endTime);
+  if (closedNow) {
+    return { available: false, code: "CLOSURE", reason: `We're closed right now: ${closedNow.reason}.` };
   }
 
-  // A walk-in is still a reservation, so it is subject to the same gates
-  // a booked one is. Without this, the operating-hours rule applied to
-  // RES-1 could be sidestepped entirely by tapping in at the kiosk.
-  const now = new Date();
-  const outsideHours = assertWithinOperatingHours(org, now, now);
-  if (outsideHours) throw new ReservationError(outsideHours, 409, "OPERATING_HOURS");
+  const limits = [
+    { at: new Date(now.getTime() + (org.policy?.maxStayHours ?? 4) * 60 * MINUTE), limit: "max-stay" },
+    { at: closesAt, limit: "closing" },
+    ...closures.filter((closure) => closure.startTime > now).map((closure) => ({ at: closure.startTime, limit: "closure", reason: closure.reason })),
+    ...(ownNext ? [{ at: new Date(ownNext.startTime), limit: "own" }] : []),
+  ].sort((a, b) => a.at - b.at);
+  const [first] = limits;
 
-  const standing = await getMemberSession(memberId);
-  if (standing.kind !== "none") {
-    throw new ReservationError(
-      standing.kind === "active"
-        ? "You're already checked in. Tap out first."
-        : "You already have a reservation. Check into that instead.",
-      409,
-      "ALREADY_HOLDING"
-    );
+  if (first.at - now < minimum) {
+    if (first.limit === "own") {
+      const opens = new Date(first.at.getTime() - EARLIEST_CHECK_IN_MINUTES * MINUTE);
+      return {
+        available: false,
+        code: "TOO_CLOSE",
+        reason: `Your reservation starts at ${clock(first.at)}, so there isn't time for a stay before it. ` +
+          `You can check in to it from ${clock(opens)}.`,
+      };
+    }
+    return { available: false, code: "CLOSURE", reason: `We close at ${clock(first.at)} today: ${first.reason}.` };
   }
+  return { available: true, latestEnd: first.at, limit: first.limit, closesAt };
+}
 
-  // A quick answer for the kiosk; the claim below checks everything again.
-  const resource = await Resource.findById(resourceId);
-  if (!resource) throw new ReservationError("Resource not found", 404);
-  const unit = resource.units.find((candidate) => candidate.label === String(unitLabel));
-  if (!unit) throw new ReservationError(`No unit "${unitLabel}" on that resource`, 404);
-  if (unit.status !== "available") {
-    throw new ReservationError("That resource isn't available.", 409, "UNAVAILABLE");
+/** Why a walk-in ends when it does, in the words the kiosk uses. */
+export function limitSentence(limit, at, org) {
+  switch (limit) {
+    case "booking":
+      return `Free until ${clock(at)}.`;
+    case "own":
+      return `You'll need to leave by ${clock(at)}.`;
+    case "closing":
+      return `We close at ${clock(at)}.`;
+    case "closure":
+      return `We're closed from ${clock(at)}.`;
+    default:
+      return `Stays are up to ${org?.policy?.maxStayHours ?? 4} hours.`;
   }
-
-  const end = walkInEnd(org, now);
-  // Walk-ins share the same committed room/unit claim path as online bookings.
-  return claimReservation({
-    organizationId, memberId, resourceId, unitLabel,
-    startTime: now, endTime: end, activate: true, notify: false, io,
-  });
 }
 
 /**
- * When a walk-in session starting `now` ends: the maximum stay, but never
- * past closing — a walk-in at 18:00 with a 4-hour cap must not claim a
- * seat until 22:00 in a building that shuts at 19:00 (spec §10).
+ * OCC-2 — walk-in. "No reservation → map shown; Selected open resource
+ * assigned on the spot."
  *
- * Inside the closing minute itself the opening-hours check above still
- * says "open" (it reads whole minutes), but there is nothing left to
- * book; the max stay would run past midnight and be refused for the
- * wrong reason. Say what is actually true instead.
+ * A walk-in is a reservation created and activated in the same step, from
+ * now. That keeps ONE occupancy model rather than a parallel "walk-in
+ * session" concept that every later query would have to remember to union in.
+ *
+ * It ends at the SHORTEST of the maximum stay, closing time, the next
+ * closure, the unit's next booking and the member's own next booking — the
+ * server works every one of them out itself, inside the space transaction.
+ * The kiosk only asks for a length:
+ *
+ *   minutes        how long, in half hours from now
+ *   untilLimit     as long as allowed (also what no length means)
+ *
+ * A length that would run past the limit is refused, saying what the limit
+ * is, rather than quietly shortened: someone who chose three hours and got
+ * one would find out when they were asked to leave.
+ *
+ *   cancelReservationId   option (a) at the kiosk: the member's booking
+ *                         later today, cancelled in the SAME transaction as
+ *                         the walk-in is created. If the walk-in is refused,
+ *                         the cancellation rolls back with it — a failure
+ *                         never loses the booking.
+ *
+ * Returns { reservation, cancelled, limit, latestEnd }; `limit` says why
+ * the stay ends when it does, when it ends at the limit.
  */
-function walkInEnd(org, now) {
-  const maxStay = new Date(now.getTime() + (org.policy?.maxStayHours ?? 4) * 60 * MINUTE);
-  const close = org.policy?.operatingHours?.close;
-  if (!close) return maxStay;
+export async function walkInAtKiosk({
+  organizationId, memberId, resourceId, unitLabel,
+  minutes = null, untilLimit = false, cancelReservationId = null, io = null,
+}) {
+  const outcome = await transact(organizationId, async (session, org) => {
+    const now = new Date();
 
-  const [hours, minutes] = String(close).split(":").map(Number);
-  const closesAt = new Date(now);
-  closesAt.setHours(hours, minutes || 0, 0, 0);
-  if (closesAt <= now) {
-    throw new ReservationError(`Walk-ins have finished for today: we close at ${close}.`, 409, "OPERATING_HOURS");
-  }
-  return closesAt < maxStay ? closesAt : maxStay;
+    // One current session (RES-3). A booking for LATER does not stop a
+    // walk-in now; it limits how long the walk-in can last.
+    const standing = await memberStanding(memberId, { organizationId, now, graceMinutes: graceOf(org), session });
+    const [current] = standing.current;
+    if (current) {
+      throw new ReservationError(
+        current.status === "active"
+          ? "You're already checked in. Tap out first."
+          : "You already have a reservation for now. Check into that instead.",
+        409,
+        "ALREADY_HOLDING"
+      );
+    }
+
+    // Option (a): give up the booking later today for this walk-in.
+    let cancelled = null;
+    if (cancelReservationId) {
+      cancelled = standing.upcoming.find((reservation) => String(reservation._id) === String(cancelReservationId)) || null;
+      if (!cancelled) {
+        throw new ReservationError(
+          "That reservation has changed since you tapped. Please tap your card again.",
+          409,
+          "NOT_UPCOMING"
+        );
+      }
+      cancelled.status = "cancelled";
+      cancelled.cancelReason = "Checked in at the kiosk instead";
+      await cancelled.save({ session });
+    }
+    const ownNext = standing.upcoming.find((reservation) => reservation !== cancelled) || null;
+
+    // The unit's next booking, by the claim's own rules (a seat's room, a
+    // room's contents), and the closures where it is.
+    const { start: unitNext, siteId } = await nextBookingStart({ organizationId, resourceId, unitLabel, after: now, org, session });
+    const dayEnd = dayFrom(null, now);
+    dayEnd.setDate(dayEnd.getDate() + 1);
+    const closures = await Closure.find({
+      organization: organizationId,
+      $or: [{ site: null }, { site: siteId }],
+      startTime: { $lt: dayEnd },
+      endTime: { $gt: now },
+    })
+      .sort({ startTime: 1 })
+      .session(session);
+
+    const window = walkInWindow({ org, now, ownNext, closures });
+    if (!window.available) throw new ReservationError(window.reason, 409, window.code);
+    let { latestEnd, limit } = window;
+    if (unitNext && unitNext < latestEnd) {
+      latestEnd = unitNext;
+      limit = "booking";
+    }
+    if (latestEnd - now < MINIMUM_MINUTES * MINUTE) {
+      throw new ReservationError(
+        `That ${nounOf(org)} is booked from ${clock(latestEnd)}, less than half an hour from now. Please choose another.`,
+        409,
+        "TOO_SHORT"
+      );
+    }
+
+    // How long: the kiosk asks, and this decides.
+    let end = latestEnd;
+    if (!untilLimit && minutes !== null && minutes !== undefined) {
+      const asked = Number(minutes);
+      if (!Number.isInteger(asked) || asked < MINIMUM_MINUTES || asked % SLOT_MINUTES) {
+        throw new ReservationError("Choose how long to stay in half hours.", 400, "BAD_LENGTH");
+      }
+      const askedEnd = new Date(now.getTime() + asked * MINUTE);
+      // The kiosk counted from its own "now", a moment ago: a minute's
+      // allowance for that, and no more.
+      if (askedEnd - latestEnd > MINUTE) {
+        throw new ReservationError(`${limitSentence(limit, latestEnd, org)} Please choose a shorter time.`, 409, "LIMIT");
+      }
+      if (askedEnd < latestEnd) end = askedEnd;
+    }
+
+    // Walk-ins share the same committed claim path as online bookings.
+    const { reservation } = await claimInSession({
+      session, org, organizationId, memberId, resourceId, unitLabel, start: now, end, activate: true,
+    });
+    return { reservation, cancelled, limit: end.getTime() === latestEnd.getTime() ? limit : null, latestEnd };
+  });
+
+  // Committed — now tell the maps. Neither may turn a walk-in that exists
+  // into an error response.
+  await announceUnitStatus(outcome.reservation.resource, outcome.reservation.unitLabel, { io });
+  if (outcome.cancelled) await announceUnitStatus(outcome.cancelled.resource, outcome.cancelled.unitLabel, { io });
+  return outcome;
+}
+
+/** walkInAtKiosk, answering with the reservation alone — for callers that want only that. */
+export async function assignWalkIn(args) {
+  return (await walkInAtKiosk(args)).reservation;
 }

@@ -2,7 +2,9 @@ import mongoose from "mongoose";
 
 /**
  * Reservation — spec §9 (Reservations) and §10 (Occupancy). Self-only,
- * one active per member, atomic time-range claim. `unit` identifies
+ * atomic time-range claim; a member holds at most one current session and
+ * one upcoming booking, never overlapping (services/reservations/
+ * standing.js). `unit` identifies
  * which specific seat/unit on a Resource was claimed (a long table
  * has several; most pieces have one).
  *

@@ -1,5 +1,6 @@
 import { Router } from "express";
 import mongoose from "mongoose";
+import Closure from "../models/Closure.js";
 import Organization from "../models/Organization.js";
 import Resource from "../models/Resource.js";
 import Room from "../models/Room.js";
@@ -9,13 +10,16 @@ import { OUTCOME } from "../services/checkin/outcomes.js";
 import { ValidationError } from "../services/checkin/errors.js";
 import { tapRateLimit } from "../middleware/rateLimit.js";
 import {
-  assignWalkIn,
   checkIn,
   checkOut,
-  getMemberSession,
   isDuplicateTap,
+  limitSentence,
+  tapStanding,
+  walkInAtKiosk,
+  walkInWindow,
 } from "../services/reservations/occupancy.js";
 import { ReservationError } from "../services/reservations/index.js";
+import { MINIMUM_MINUTES, dayFrom } from "../services/reservations/day.js";
 import { EntitlementError, assertWithinLimit, requireFeature } from "../services/entitlements.js";
 
 const router = Router();
@@ -56,8 +60,20 @@ async function registrationAvailability(organizationId) {
  * What the kiosk does with each outcome:
  *   unregistered -> launch registration (ID-1)
  *   pending      -> resume verification (ID-2)
- *   member       -> Sprint 2 hands off to the reservation/walk-in flow
+ *   member       -> the reservation/walk-in flow below (tapStanding)
  *   inactive     -> refer to staff
+ *
+ * A member's tap, in order (OCC-1..OCC-3):
+ *   checked in already             -> checked-out
+ *   a booking whose window is open -> checked-in
+ *   a booking later today          -> later-today: the kiosk asks whether to
+ *                                     check in now and cancel it, check in
+ *                                     now and keep it (leaving before it
+ *                                     starts), or not now
+ *   nothing (or another day's)     -> walk-in
+ *
+ * The kiosk only ever seats people from now on; bookings for later are
+ * made on the website.
  *
  * The kiosk is a plan feature: without `kiosk` this answers PLAN_FEATURE
  * before any credential is resolved, and a suspended organization is
@@ -94,7 +110,7 @@ router.post(
       return res.status(403).json({ ...base, next: "see-staff", error: "This account is deactivated." });
     }
 
-    const org = await Organization.findById(organizationId).select("terminology policy");
+    const org = await Organization.findById(organizationId).select("name status terminology policy entitlements");
 
     // OCC-6 — swallow an accidental double-tap rather than checking the
     // member straight back out again. Applied only once identity has
@@ -104,7 +120,8 @@ router.post(
     // The member is known. What happens next depends on what they
     // currently hold — this is OCC-1/OCC-2/OCC-3's branch point, and it
     // lives here rather than inside the check-in interface (spec §13).
-    const session = await getMemberSession(result.member._id);
+    const now = new Date();
+    const session = await tapStanding({ organizationId, memberId: result.member._id, org, now });
     const io = req.app.get("io");
 
     const memberPayload = {
@@ -138,7 +155,9 @@ router.post(
 
     // OCC-1 — holding a reservation: this tap activates it.
     if (session.kind === "held") {
-      const activated = await checkIn({ organizationId, memberId: result.member._id, io });
+      const activated = await checkIn({
+        organizationId, memberId: result.member._id, reservationId: session.reservation._id, io,
+      });
       const enriched = await describeResource(activated.resource, activated.unitLabel);
       return res.json({
         ...base,
@@ -153,37 +172,89 @@ router.post(
       });
     }
 
-    // OCC-2 — nothing held: offer the map so they can pick a free unit.
+    // Org-wide closures today bound every walk-in; a site's own closures
+    // are on its floors' day, which the kiosk reads for each unit.
+    const dayEnd = dayFrom(null, now);
+    dayEnd.setDate(dayEnd.getDate() + 1);
+    const closures = await Closure.find({
+      organization: organizationId, site: null, startTime: { $lt: dayEnd }, endTime: { $gt: now },
+    }).sort({ startTime: 1 });
+    const offer = (window) =>
+      window.available
+        ? { available: true, latestEnd: window.latestEnd, limit: window.limit, sentence: limitSentence(window.limit, window.latestEnd, org) }
+        : { available: false, code: window.code, reason: window.reason };
+
+    // A booking later today: the kiosk asks what to do with it. Both ways
+    // of checking in now are offered with what they would allow — keeping
+    // it ends the stay before it starts, and there must be time for that.
+    if (session.kind === "later-today") {
+      const later = session.reservation;
+      return res.json({
+        ...base,
+        next: "later-today",
+        member: memberPayload,
+        maxStayHours: org?.policy?.maxStayHours ?? 4,
+        minimumMinutes: MINIMUM_MINUTES,
+        upcoming: {
+          id: String(later._id),
+          startTime: later.startTime,
+          endTime: later.endTime,
+          label: later.targetLabel || null,
+          ...(await describeResource(later.resource, later.unitLabel)),
+        },
+        options: {
+          cancel: offer(walkInWindow({ org, now, closures })),
+          keep: offer(walkInWindow({ org, now, ownNext: later, closures })),
+        },
+      });
+    }
+
+    // OCC-2 — nothing held for today: offer the map so they can pick a free
+    // unit, with how long a stay could last before any unit is chosen.
     return res.json({
       ...base,
       next: "walk-in",
       member: memberPayload,
       maxStayHours: org?.policy?.maxStayHours ?? 4,
+      minimumMinutes: MINIMUM_MINUTES,
+      walkIn: offer(walkInWindow({ org, now, ownNext: session.standing.upcoming[0] || null, closures })),
     });
   })
 );
 
 /**
  * POST /api/checkin/walkin
- * Body: { organizationId, credential, resourceId, unitLabel }
+ * Body: { organizationId, credential, resourceId, unitLabel,
+ *         minutes?, untilLimit?, cancelReservationId? }
  *
  * OCC-2 — "Selected open resource assigned on the spot."
  *
  * The credential is re-presented rather than trusting a client-supplied
  * member id: the kiosk is an unauthenticated, physically-supervised
- * surface, so identity must come from the interface every time.
+ * surface, so identity must come from the interface every time. For the
+ * same reason the length is a request: the server works out every limit
+ * itself (walkInAtKiosk) and refuses a stay that would run past one.
+ *
+ * `cancelReservationId` is the member's booking later today, given up for
+ * this walk-in in the same transaction (the kiosk's option a).
  */
 router.post(
   "/walkin",
   tapRateLimit,
   requireFeature("kiosk"),
   asyncHandler(async (req, res) => {
-    const { organizationId, method = "rfid", credential, resourceId, unitLabel } = req.body || {};
+    const {
+      organizationId, method = "rfid", credential, resourceId, unitLabel, minutes = null, untilLimit = false,
+      cancelReservationId = null,
+    } = req.body || {};
     if (!organizationId || !mongoose.isValidObjectId(organizationId)) {
       return res.status(400).json({ error: "A valid organizationId is required" });
     }
     if (!resourceId || !mongoose.isValidObjectId(resourceId)) {
       return res.status(400).json({ error: "A valid resourceId is required" });
+    }
+    if (cancelReservationId !== null && !mongoose.isValidObjectId(cancelReservationId)) {
+      return res.status(400).json({ error: "That reservation id isn't valid." });
     }
 
     const result = await resolveCheckIn({ organizationId, method, credential });
@@ -191,11 +262,15 @@ router.post(
       return res.status(409).json({ error: "That card isn't a registered, verified member.", outcome: result.outcome });
     }
 
-    const assigned = await assignWalkIn({
+    const org = await Organization.findById(organizationId).select("policy terminology");
+    const { reservation: assigned, cancelled, limit, latestEnd } = await walkInAtKiosk({
       organizationId,
       memberId: result.member._id,
       resourceId,
       unitLabel,
+      minutes,
+      untilLimit: Boolean(untilLimit),
+      cancelReservationId,
       io: req.app.get("io"),
     });
 
@@ -208,6 +283,11 @@ router.post(
         endTime: assigned.endTime,
         ...enriched,
       },
+      // Why the stay ends when it does, when it ends at a limit.
+      limit: limit ? { limit, at: latestEnd, sentence: limitSentence(limit, latestEnd, org) } : null,
+      cancelled: cancelled
+        ? { id: String(cancelled._id), startTime: cancelled.startTime, endTime: cancelled.endTime, label: cancelled.targetLabel || null }
+        : null,
     });
   })
 );

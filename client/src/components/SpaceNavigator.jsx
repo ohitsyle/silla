@@ -18,6 +18,10 @@ import { Segmented } from "./ui/index.jsx";
  * building only when there is a choice to make, floors as tabs, and the
  * rooms on the chosen floor as a row you can scroll.
  *
+ * `when` is the map's When picker (WhenBar), placed in the row with the
+ * building and the floor: when you are looking is one more choice of what
+ * the map shows.
+ *
  * `focused` (a room is open) folds the choosing rows away below `lg`:
  * on a phone the panel needs the height, and the breadcrumb alone is
  * enough to step back out — tapping the floor returns to every row.
@@ -33,6 +37,7 @@ export default function SpaceNavigator({
   status = {},
   resourceNoun = "resource",
   actions = null,
+  when = null,
   focused = false,
   onFloor,
   onRoom,
@@ -65,6 +70,9 @@ export default function SpaceNavigator({
             <FloorTabs floors={building.floors} value={floorId} onChange={onFloor} />
           </Level>
         )}
+        {/* The map's When picker sits with the other "which part of the
+            map am I looking at" choices — a time is one of them. */}
+        {when}
       </div>
 
       {floor && rooms.length > 0 ? (

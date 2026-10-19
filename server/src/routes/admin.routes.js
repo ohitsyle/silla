@@ -21,7 +21,7 @@ import { ValidationError } from "../services/checkin/errors.js";
 import { sendEmail } from "../services/email/index.js";
 import { gracePeriodChangedEmail, staffOnboardingEmail } from "../services/email/templates.js";
 import { generateVerificationCode } from "../lib/identity.js";
-import { emitOrgNotice } from "../services/realtime.js";
+import { emitDayChanged, emitOrgNotice } from "../services/realtime.js";
 import { FEATURES, LIMITS } from "../lib/plans.js";
 import {
   assertFeature,
@@ -39,6 +39,18 @@ const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, ne
 
 // Spec §14: the admin surface is staff-and-above, desktop-only.
 router.use(requireAuth, requireRole("staff", "superadmin"));
+
+/**
+ * Tells every open map of the organization (or of one site) that its day
+ * has changed: opening hours moved, or a closure was added or taken away.
+ * Bookings announce themselves through the reservation engine; these do
+ * not touch a booking, so they have to say so here.
+ */
+async function announceDayChange(req, organizationId, siteId = null) {
+  const sites = siteId ? [siteId] : (await Site.find({ organization: organizationId }).select("_id")).map((s) => s._id);
+  const floors = await Floor.find({ site: { $in: sites } }).select("_id");
+  emitDayChanged(req.app.get("io"), floors.map((floor) => floor._id));
+}
 
 /* ═══════════════════════ Plan & usage ═══════════════════════ */
 
@@ -642,6 +654,7 @@ router.patch(
     }
 
     const previousGrace = org.policy?.gracePeriodMinutes;
+    const previousHours = JSON.stringify(org.policy?.operatingHours || {});
 
     if (policy) {
       for (const key of ["gracePeriodMinutes", "maxStayHours", "pinLockoutThreshold", "verificationCodeExpiryMinutes"]) {
@@ -674,6 +687,11 @@ router.patch(
     if (termsOfServiceText !== undefined) org.termsOfServiceText = String(termsOfServiceText);
 
     await org.save();
+
+    // New opening hours redraw every timeline: the day starts and ends elsewhere.
+    if (JSON.stringify(org.policy?.operatingHours || {}) !== previousHours || status) {
+      await announceDayChange(req, org._id);
+    }
 
     // RES-6 — a grace change is consequential for anyone booked today,
     // so post a notice and tell them (spec §11).
@@ -731,6 +749,9 @@ router.post(
       createdBy: req.user.id,
     });
 
+    // The closure shows on every timeline at once; the bookings inside it
+    // are cancelled (and announced) by the worker's next pass.
+    await announceDayChange(req, req.user.organizationId, closure.site);
     res.status(201).json({ closure: { id: closure._id.toString(), startTime, endTime, reason: closure.reason } });
   })
 );
@@ -740,7 +761,8 @@ router.delete(
   requireRole("superadmin"),
   asyncHandler(async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid closure id" });
-    await Closure.deleteOne({ _id: req.params.id, organization: req.user.organizationId });
+    const closure = await Closure.findOneAndDelete({ _id: req.params.id, organization: req.user.organizationId });
+    if (closure) await announceDayChange(req, req.user.organizationId, closure.site);
     res.json({ ok: true });
   })
 );

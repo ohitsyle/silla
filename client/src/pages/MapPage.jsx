@@ -4,12 +4,15 @@ import { CirclePause, RefreshCw } from "lucide-react";
 import { api } from "../lib/api.js";
 import { useOrg } from "../lib/OrgContext.jsx";
 import { useFloorSocket } from "../lib/useFloorSocket.js";
+import { useFloorDay } from "../lib/useFloorDay.js";
 import { useBookingWindow } from "../lib/bookingWindow.js";
+import { clockRange, countFree, dateKeyOf, entryFor, isFreeFor } from "../lib/dayView.js";
 import { effectiveStatus, levelName, listNames, roomMode } from "../lib/rooms.js";
 import { resolveStatePalette } from "../theme/applyOrgTheme.js";
 import SpaceNavigator from "../components/SpaceNavigator.jsx";
 import SpaceMap, { STATUS_ORDER } from "../components/SpaceMap.jsx";
 import MapLegend from "../components/MapLegend.jsx";
+import WhenBar from "../components/WhenBar.jsx";
 import Inspector from "../components/Inspector.jsx";
 import RoomPanel from "../components/RoomPanel.jsx";
 import ReservePanel, { MyReservation } from "../components/ReservePanel.jsx";
@@ -31,6 +34,12 @@ import { Button, Notice, Page, Skeleton } from "../components/ui/index.jsx";
  *
  * `layout` and `status` are held separately on purpose. Both arrive from
  * one REST read, but MAP-2's Socket.io stream only ever touches `status`.
+ *
+ * TIME is a third read, the floor's day (GET /api/floors/:id/day): today's,
+ * for the ring around each unit, and the chosen window's date, for the
+ * panel's timeline and for fading what is taken when the When picker looks
+ * ahead. The socket says when a day changed — a booking for later changes
+ * no colour — and the day is read again.
  */
 export default function MapPage() {
   const { org, organizationId, error: orgError, entitlements } = useOrg();
@@ -51,7 +60,8 @@ export default function MapPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
   const [live, setLive] = useState(false);
-  const [myReservation, setMyReservation] = useState(null);
+  /** What the member holds: their current session and their next booking, at most one of each (RES-3). */
+  const [holding, setHolding] = useState([]);
   /** What the member has picked to book: one unit, or a room as a whole. */
   const [selection, setSelection] = useState(null);
   const [hovered, setHovered] = useState(null);
@@ -145,11 +155,25 @@ export default function MapPage() {
     setStatusVersion((n) => n + 1);
     setLive(true);
   }, []);
-  useFloorSocket(floorId, applyStatus);
+  // A day changed: a booking for later, a cancellation, a closure.
+  const [dayVersion, setDayVersion] = useState(0);
+  const dayChanged = useCallback(() => setDayVersion((n) => n + 1), []);
+  useFloorSocket(floorId, applyStatus, dayChanged);
 
-  // RES-3: the member's one live reservation.
+  // Today's day draws the rings; the window's own date answers the panel
+  // and the When picker (the same read when the window is today).
+  const todayKey = dateKeyOf(new Date());
+  const windowKey = booking.iso ? dateKeyOf(booking.startTime) : todayKey;
+  const { day: today } = useFloorDay(floorId, todayKey, dayVersion);
+  const { day: otherDay } = useFloorDay(floorId, windowKey === todayKey ? null : windowKey, dayVersion);
+  const windowDay = windowKey === todayKey ? today : otherDay;
+
+  // RES-3: one current session and one upcoming booking at most.
   const loadMine = useCallback(() => {
-    api.myReservations().then((data) => setMyReservation(data.live)).catch(() => setMyReservation(null));
+    api
+      .myReservations()
+      .then((data) => setHolding(data.holding || (data.live ? [data.live] : [])))
+      .catch(() => setHolding([]));
   }, []);
   useEffect(loadMine, [loadMine]);
 
@@ -162,6 +186,30 @@ export default function MapPage() {
   const focusedRoom = rooms.find((room) => room.id === roomId) || null;
 
   const summary = useMemo(() => summarise(current, status), [current, status]);
+
+  /**
+   * Looking ahead (Later today / Another day): which units are free for
+   * the whole window. Null while the map shows now, so nothing fades.
+   */
+  const windowView = useMemo(() => {
+    if (booking.mode === "now" || !windowDay || !booking.iso) return null;
+    const { startTime: from, endTime: to } = booking;
+    return {
+      isFree: (resourceId, unitLabel) => {
+        const entry = entryFor(windowDay, resourceId, unitLabel);
+        return entry ? isFreeFor(entry, windowDay, from, to) : null;
+      },
+      freeWords: `Free ${clockRange(from, to)}`,
+      takenWords: `Not free ${clockRange(from, to)}`,
+    };
+  }, [booking.mode, booking.iso, windowDay]); // eslint-disable-line react-hooks/exhaustive-deps
+  const windowSummary = useMemo(
+    () => (windowView && current ? countFree(windowDay, current.layout, booking.startTime, booking.endTime) : null),
+    [windowView, current, windowDay] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  // Rings are about today; looking at another day, they would answer the wrong question.
+  const showRings = booking.mode !== "day";
+  const ringed = useMemo(() => (showRings ? countRinged(current, today) : 0), [showRings, current, today]);
 
   /* ───────────────────────────── moving around ───────────────────────────── */
 
@@ -232,9 +280,9 @@ export default function MapPage() {
     status: selection.kind === "unit" ? liveUnitStatus(current, status, selection) : status[selection.resourceId]?.[0],
   };
   const selectionRoom = selection?.roomId ? rooms.find((room) => room.id === selection.roomId) : null;
-  const panelOpen = !dismissed && Boolean(selection || focusedRoom || myReservation);
+  const panelOpen = !dismissed && Boolean(selection || focusedRoom || holding.length);
 
-  let title = "Your reservation";
+  let title = holding.length > 1 ? "Your reservations" : "Your reservation";
   let subtitle;
   if (selection?.kind === "room") {
     title = "Book the whole room";
@@ -271,6 +319,7 @@ export default function MapPage() {
           status={status}
           resourceNoun={resourceNoun}
           focused={panelOpen && Boolean(focusedRoom || selection)}
+          when={!paused && <WhenBar booking={booking} summary={windowSummary} resourceNoun={resourceNoun} />}
           onFloor={openFloor}
           onRoom={openRoom}
           onFloorView={showFloorPlan}
@@ -285,9 +334,9 @@ export default function MapPage() {
                   Live
                 </span>
               )}
-              {dismissed && (focusedRoom || myReservation) && (
+              {dismissed && (focusedRoom || holding.length > 0) && (
                 <Button size="sm" onClick={() => setDismissed(false)}>
-                  {focusedRoom ? "What can I book?" : "My reservation"}
+                  {focusedRoom ? "What can I book?" : holding.length > 1 ? "My reservations" : "My reservation"}
                 </Button>
               )}
               <Button
@@ -321,6 +370,9 @@ export default function MapPage() {
               status={status}
               resourceNoun={resourceNoun}
               showOverstay={current.viewerIsStaff}
+              day={today}
+              rings={showRings}
+              windowView={windowView}
               selectedUnit={selection?.kind === "unit" ? selection : null}
               highlight={hovered ? [hovered] : []}
               onSelectUnit={pickFromMap}
@@ -341,6 +393,7 @@ export default function MapPage() {
             resourceNoun={resourceNoun}
             showOverstay={current?.viewerIsStaff}
             loading={!current}
+            ringed={ringed}
           />
         </div>
       </div>
@@ -358,9 +411,10 @@ export default function MapPage() {
         defaultFolded={!selection && !focusedRoom}
       >
         <div className="space-y-5">
-          {myReservation && (
+          {holding.map((reservation) => (
             <MyReservation
-              reservation={myReservation}
+              key={reservation.id}
+              reservation={reservation}
               resourceNoun={resourceNoun}
               policy={org?.policy}
               compact={Boolean(selection || focusedRoom)}
@@ -368,9 +422,10 @@ export default function MapPage() {
               onCancelled={() => {
                 loadMine();
                 loadLayout(floorId, { silent: true });
+                dayChanged();
               }}
             />
-          )}
+          ))}
 
           {paused && (target || focusedRoom) ? (
             <BookingPaused orgName={org?.name} resourceNoun={resourceNoun} ended={entitlements.status === "cancelled"} />
@@ -381,11 +436,13 @@ export default function MapPage() {
               booking={booking}
               resourceNoun={resourceNoun}
               policy={org?.policy}
-              holding={Boolean(myReservation)}
+              day={windowDay}
+              roomName={selectionRoom?.name}
               onReserved={() => {
                 setSelection(null);
                 loadMine();
                 loadLayout(floorId, { silent: true });
+                dayChanged();
               }}
             />
           ) : focusedRoom ? (
@@ -394,8 +451,9 @@ export default function MapPage() {
               floors={building?.floors}
               floorId={floorId}
               booking={booking}
+              day={windowDay}
               resourceNoun={resourceNoun}
-              refreshKey={statusVersion}
+              refreshKey={statusVersion + dayVersion}
               onBookRoom={bookWholeRoom}
               onPickUnit={pickFromRoom}
               onHoverUnit={(unit) => setHovered(unit ? { resourceId: unit.resourceId, unitLabel: unit.unitLabel } : null)}
@@ -467,4 +525,17 @@ function summarise(current, status) {
     }
   }
   return { counts, total, overstays, outOfService, included, rooms: (current.layout.rooms || []).length };
+}
+
+/** Units on the floor whose ring shows today: something booked later, or nothing left. */
+function countRinged(current, today) {
+  if (!current || !today) return 0;
+  let ringed = 0;
+  for (const resource of current.layout.resources) {
+    for (const unit of resource.units) {
+      const entry = entryFor(today, resource.id, unit.label);
+      if (entry?.bookable && (entry.day === "partial" || entry.day === "full")) ringed += 1;
+    }
+  }
+  return ringed;
 }

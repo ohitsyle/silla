@@ -19,16 +19,23 @@
  * map the one before it left behind.
  */
 import assert from "node:assert/strict";
-import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
-import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
-import { MongoMemoryReplSet } from "mongodb-memory-server";
+import { LATE_EVENING, keepClear } from "./clock.mjs";
 
 process.env.JWT_SECRET = "isolated-space-tests-only";
 process.env.NODE_ENV = "test";
 
 const SERVE = process.argv.includes("--serve");
+
+// Its walk-ins need half an hour of the day left (tests/clock.mjs
+// LATE_EVENING). A browser preview keeps the real clock, as its browser
+// does. Before the database driver loads: it keeps the clock it finds.
+const movedClock = SERVE ? null : keepClear(LATE_EVENING);
+if (movedClock) console.log(`(clock moved to ${movedClock}: a walk-in needs half an hour of the day left)`);
+const { default: mongoose } = await import("mongoose");
+const { Server } = await import("socket.io");
+const { MongoMemoryReplSet } = await import("mongodb-memory-server");
 /** The preview API's port: 4010 unless --port=<n> says otherwise. */
 const PREVIEW_PORT = Number(process.argv.find((arg) => arg.startsWith("--port="))?.slice("--port=".length)) || 4010;
 /** The fixed id the browser preview's VITE_DEMO_ORG_ID points at. */
@@ -466,9 +473,10 @@ try {
   );
   const emissions = [];
   await syncUnitStatus(room.resourceId, "room", { io: recordingIo(emissions) });
+  const streamed = emissions.filter((emission) => emission.event === "resource:status");
   check(
     "whole-room occupancy streams to every room level",
-    emissions.length === 2 && emissions.every((emission) => emission.value.units[0].status === "occupied")
+    streamed.length === 2 && streamed.every((emission) => emission.value.units[0].status === "occupied")
   );
   const dashboard = await call("/api/admin/dashboard");
   check("room target never inflates the physical resource count", dashboard.metrics.total === 5 && dashboard.metrics.occupied === 5);
@@ -491,9 +499,10 @@ try {
   const dueEmissions = [];
   await refreshDueHolds({ io: recordingIo(dueEmissions) });
   check("scheduled room holds become reserved when their window starts", (await Resource.findById(room.resourceId)).units[0].status === "reserved");
+  const dueStreamed = dueEmissions.filter((emission) => emission.event === "resource:status");
   check(
     "scheduled room status reaches every level automatically",
-    dueEmissions.length === 2 && dueEmissions.every((emission) => emission.value.units[0].status === "reserved")
+    dueStreamed.length === 2 && dueStreamed.every((emission) => emission.value.units[0].status === "reserved")
   );
   await cancelReservation({ reservationId: due._id });
 
@@ -1024,6 +1033,23 @@ try {
     await claim(members[2], openPlan[1].id, "2", { startTime: previewNow, endTime: until(HOUR) });
     await refreshDueHolds({ io });
     await call(`/api/admin/resources/${openPlan[2].id}/units/1`, "PATCH", { status: "unavailable" }, 200, staff);
+
+    // Later today, for the rings, the timelines and the kiosk's paths: a
+    // booking in three hours (member4 taps in early and is asked what to do
+    // with it), one in ninety minutes (a walk-in at that desk is "free
+    // until"), and the Commons booked whole this evening (its desks on both
+    // levels are blocked then). Skipped when the day has too little left.
+    const laterToday = async (member, resourceId, unitLabel, fromMinutes, minutes) => {
+      const start = new Date(+previewNow + fromMinutes * MINUTE);
+      const end = new Date(+start + minutes * MINUTE);
+      if (end > endOfDay(previewNow)) return;
+      await claim(member, resourceId, unitLabel, { startTime: start, endTime: end });
+    };
+    await laterToday(members[4], openPlan[3].id, "1", 180, 60);
+    await laterToday(members[6], openPlan[4].id, "1", 90, 60);
+    const commons = (await call("/api/spaces?organizationId=" + org._id)).buildings
+      .flatMap((b) => b.floors).flatMap((f) => f.rooms).find((r) => r.name === "Commons");
+    if (commons) await laterToday(members[7], commons.resourceId, "room", 300, 60);
 
     // A plan to look at: whole-room booking withheld, and the building
     // and room limits already reached, so the editor shows its reasons.

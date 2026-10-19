@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -8,12 +8,12 @@ import {
 import { api } from "../lib/api.js";
 import { useOrg } from "../lib/OrgContext.jsx";
 import { useAuth } from "../lib/AuthContext.jsx";
-import { resolveStatePalette } from "../theme/applyOrgTheme.js";
 import { stepSwap } from "../lib/motion.js";
-import SpaceMap from "../components/SpaceMap.jsx";
+import { clock } from "../lib/dayView.js";
 import {
-  Button, Card, Field, Modal, Notice, PinField, Segmented, Spinner,
-} from "../components/ui/index.jsx";
+  DurationStep, LaterTodayStep, WalkInStep, useIdleReset,
+} from "../components/KioskWalkIn.jsx";
+import { Button, Field, Modal, Notice } from "../components/ui/index.jsx";
 
 /**
  * KioskPage — the physical surface (spec §4, §13; ID-1, ID-2, OCC-1..OCC-3, OCC-6).
@@ -24,11 +24,16 @@ import {
  *
  *   register      -> ID-1  collect details
  *   verify        -> ID-2  resume an unverified registration
- *   walk-in       -> OCC-2 show the map, assign the chosen resource
+ *   later-today   -> OCC-2 a booking later today: cancel it and sit now,
+ *                          keep it and sit until then, or not now
+ *   walk-in       -> OCC-2 what is free now on the map, then how long
  *   checked-in    -> OCC-1 confirm and say where to sit
  *   checked-out   -> OCC-3 confirm the resource is freed
  *   duplicate-tap -> OCC-6 absorb an accidental double-tap
  *   see-staff     ->       deactivated account
+ *
+ * The kiosk only ever seats people from now on; booking for later is the
+ * website's. The walk-in screens are in components/KioskWalkIn.jsx.
  *
  * The tap itself is captured through a focused hidden input, because the
  * INF-4 spike found USB RFID readers present as HID keyboard-wedge
@@ -40,12 +45,17 @@ const STEP = {
   TAP: "tap",
   DETAILS: "details",
   VERIFY: "verify",
+  PROMPT: "prompt",
   WALKIN: "walkin",
+  DURATION: "duration",
   RESULT: "result",
 };
 
 /** Kiosks are shared — a result screen must not sit there for the next person. */
 const AUTO_RESET_MS = 12_000;
+
+/** Nobody has touched a half-made choice for this long: back to the tap screen. */
+const IDLE_RESET_MS = 60_000;
 
 /**
  * What a member at the kiosk is told when the plan refuses something. The
@@ -71,6 +81,13 @@ export default function KioskPage() {
   const [result, setResult] = useState(null); // { kind, member, reservation }
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  /**
+   * A walk-in being chosen: { mode: "none"|"cancel"|"keep", member,
+   * allowance (how long the member may stay, from the tap), upcoming,
+   * unit, stay }.
+   */
+  const [walk, setWalk] = useState(null);
+  const [walkError, setWalkError] = useState(null);
 
   const memberNoun = requirements?.memberNoun || org?.terminology?.memberNoun || "member";
   const resourceNoun = org?.terminology?.resourceNoun || "resource";
@@ -90,7 +107,12 @@ export default function KioskPage() {
     setResult(null);
     setError(null);
     setBusy(false);
+    setWalk(null);
+    setWalkError(null);
   }, []);
+
+  // A choice nobody is making any more must not wait for the next person.
+  useIdleReset([STEP.PROMPT, STEP.WALKIN, STEP.DURATION].includes(step), IDLE_RESET_MS, reset);
 
   // Return the kiosk to the tap screen after a result, so the next
   // person doesn't walk up to someone else's confirmation.
@@ -128,9 +150,22 @@ export default function KioskPage() {
             setRegistration({ registrationId: r.registrationId, email: r.email });
             setStep(STEP.VERIFY);
             break;
+          case "later-today": // a booking later today: ask what to do with it
+            setResult({ kind: "later-today", member: r.member });
+            setWalk({ member: r.member, upcoming: r.upcoming, options: r.options, maxStayHours: r.maxStayHours, minimum: r.minimumMinutes });
+            setStep(STEP.PROMPT);
+            break;
           case "walk-in": // OCC-2
-            setResult({ kind: "walk-in", member: r.member, maxStayHours: r.maxStayHours });
-            setStep(STEP.WALKIN);
+            if (r.walkIn && !r.walkIn.available) {
+              // Closed, or too close to closing: say so rather than show a
+              // map with nothing on it that can be taken.
+              setResult({ kind: "no-walk-in", member: r.member, reason: r.walkIn.reason });
+              setStep(STEP.RESULT);
+            } else {
+              setResult({ kind: "walk-in", member: r.member });
+              setWalk({ mode: "none", member: r.member, allowance: r.walkIn, maxStayHours: r.maxStayHours, minimum: r.minimumMinutes });
+              setStep(STEP.WALKIN);
+            }
             break;
           case "checked-in": // OCC-1
             setResult({ kind: "checked-in", member: r.member, reservation: r.reservation });
@@ -186,9 +221,47 @@ export default function KioskPage() {
     );
   }
 
+  /** The member chose a unit on the map; ask how long. */
+  const choseUnit = (unit, stay) => {
+    setWalkError(null);
+    setWalk((w) => ({ ...w, unit, stay }));
+    setStep(STEP.DURATION);
+  };
+
+  /** Check in for the chosen length. The server decides every limit again. */
+  const confirmStay = async (choice) => {
+    setBusy(true);
+    setWalkError(null);
+    try {
+      const r = await api.assignWalkIn(organizationId, cardUid, walk.unit.resourceId, walk.unit.unitLabel, {
+        ...(choice.untilLimit ? { untilLimit: true } : { minutes: choice.minutes }),
+        ...(walk.mode === "cancel" ? { cancelReservationId: walk.upcoming.id } : {}),
+      });
+      setResult({
+        kind: "checked-in",
+        member: walk.member,
+        reservation: r.reservation,
+        cancelled: r.cancelled,
+        keptFor: walk.mode === "keep" ? walk.upcoming : null,
+      });
+      setStep(STEP.RESULT);
+    } catch (err) {
+      setWalkError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // The walk-in map wants the width — and the height — of a wall screen;
+  // the rest reads best narrow and centred.
+  const mapStep = step === STEP.WALKIN;
+
   return (
-    <div className="min-h-screen px-6 py-10 max-w-3xl mx-auto text-ink-primary flex flex-col justify-center">
-      <header className="flex items-center gap-3 mb-8">
+    <div
+      className={`min-h-screen px-6 mx-auto text-ink-primary flex flex-col justify-center
+        ${mapStep ? "max-w-5xl py-6" : "max-w-3xl py-10"}`}
+    >
+      <header className={`flex items-center gap-3 ${mapStep ? "mb-5" : "mb-8"}`}>
         <div
           className="w-11 h-11 rounded-xl flex items-center justify-center"
           style={{ background: "var(--color-accent)", color: "var(--color-accent-ink)" }}
@@ -200,8 +273,8 @@ export default function KioskPage() {
           <div className="text-sm text-ink-secondary">Tap in, tap out, or register</div>
         </div>
         {step !== STEP.TAP && (
-          <Button icon={RotateCcw} onClick={reset}>
-            Start over
+          <Button icon={RotateCcw} onClick={reset} aria-label="Start over">
+            <span className="hidden sm:inline">Start over</span>
           </Button>
         )}
       </header>
@@ -254,19 +327,53 @@ export default function KioskPage() {
           />
         )}
 
-        {step === STEP.WALKIN && (
+        {step === STEP.PROMPT && walk && (
+          <LaterTodayStep
+            key="prompt"
+            member={walk.member}
+            upcoming={walk.upcoming}
+            options={walk.options}
+            onCancelIt={() => {
+              setWalk((w) => ({ ...w, mode: "cancel", allowance: w.options.cancel }));
+              setStep(STEP.WALKIN);
+            }}
+            onKeepIt={() => {
+              setWalk((w) => ({ ...w, mode: "keep", allowance: w.options.keep }));
+              setStep(STEP.WALKIN);
+            }}
+            onNotNow={reset}
+          />
+        )}
+
+        {step === STEP.WALKIN && walk && (
           <WalkInStep
             key="walkin"
             organizationId={organizationId}
-            credential={cardUid}
-            member={result?.member}
-            maxStayHours={result?.maxStayHours}
+            member={walk.member}
+            mode={walk.mode}
+            allowance={walk.allowance}
+            upcoming={walk.upcoming}
+            minimum={walk.minimum || 30}
             resourceNoun={resourceNoun}
             org={org}
             onError={setError}
-            onAssigned={(reservation) => {
-              setResult((r) => ({ ...r, kind: "checked-in", reservation }));
-              setStep(STEP.RESULT);
+            onPick={choseUnit}
+          />
+        )}
+
+        {step === STEP.DURATION && walk?.unit && (
+          <DurationStep
+            key={`duration-${walk.unit.resourceId}-${walk.unit.unitLabel}`}
+            unit={walk.unit}
+            stay={walk.stay}
+            maxStayHours={walk.maxStayHours}
+            minimum={walk.minimum || 30}
+            busy={busy}
+            error={walkError}
+            onConfirm={confirmStay}
+            onBack={() => {
+              setWalkError(null);
+              setStep(STEP.WALKIN);
             }}
           />
         )}
@@ -301,9 +408,47 @@ export default function KioskPage() {
  */
 function KioskClosed({ org, notInPlan = false, ended = false, admin = false, resourceNoun = "resource" }) {
   const name = org?.name || "This organization";
+  /** The member chose a unit on the map; ask how long. */
+  const choseUnit = (unit, stay) => {
+    setWalkError(null);
+    setWalk((w) => ({ ...w, unit, stay }));
+    setStep(STEP.DURATION);
+  };
+
+  /** Check in for the chosen length. The server decides every limit again. */
+  const confirmStay = async (choice) => {
+    setBusy(true);
+    setWalkError(null);
+    try {
+      const r = await api.assignWalkIn(organizationId, cardUid, walk.unit.resourceId, walk.unit.unitLabel, {
+        ...(choice.untilLimit ? { untilLimit: true } : { minutes: choice.minutes }),
+        ...(walk.mode === "cancel" ? { cancelReservationId: walk.upcoming.id } : {}),
+      });
+      setResult({
+        kind: "checked-in",
+        member: walk.member,
+        reservation: r.reservation,
+        cancelled: r.cancelled,
+        keptFor: walk.mode === "keep" ? walk.upcoming : null,
+      });
+      setStep(STEP.RESULT);
+    } catch (err) {
+      setWalkError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // The walk-in map wants the width — and the height — of a wall screen;
+  // the rest reads best narrow and centred.
+  const mapStep = step === STEP.WALKIN;
+
   return (
-    <div className="min-h-screen px-6 py-10 max-w-3xl mx-auto text-ink-primary flex flex-col justify-center">
-      <header className="flex items-center gap-3 mb-8">
+    <div
+      className={`min-h-screen px-6 mx-auto text-ink-primary flex flex-col justify-center
+        ${mapStep ? "max-w-5xl py-6" : "max-w-3xl py-10"}`}
+    >
+      <header className={`flex items-center gap-3 ${mapStep ? "mb-5" : "mb-8"}`}>
         <div
           className="w-11 h-11 rounded-xl flex items-center justify-center"
           style={{ background: "var(--color-accent)", color: "var(--color-accent-ink)" }}
@@ -675,101 +820,6 @@ function VerifyStep({ registration, expiryMinutes, onVerified, onError }) {
   );
 }
 
-/**
- * OCC-2 — walk-in. "No reservation → map shown; Selected open resource
- * assigned on the spot."
- *
- * The credential is re-presented to the server rather than a member id:
- * the kiosk is unauthenticated, so identity must come from the check-in
- * interface every time.
- */
-function WalkInStep({ organizationId, credential, member, maxStayHours, resourceNoun, org, onError, onAssigned }) {
-  const [floors, setFloors] = useState([]);
-  const [floorId, setFloorId] = useState(null);
-  const [data, setData] = useState(null);
-  const [assigning, setAssigning] = useState(false);
-  const palette = useMemo(() => resolveStatePalette(org), [org]);
-
-  useEffect(() => {
-    api.getFloors(organizationId).then((d) => {
-      setFloors(d.floors);
-      if (d.floors.length) setFloorId((current) => current || d.floors[0].id);
-    }).catch((e) => onError(e.message));
-  }, [organizationId, onError]);
-
-  useEffect(() => {
-    if (!floorId) return;
-    api.getFloorLayout(floorId).then(setData).catch((e) => onError(e.message));
-  }, [floorId, onError]);
-
-  const pick = async (unit) => {
-    if (assigning) return;
-    if (unit.status?.status !== "available") {
-      onError(`That ${resourceNoun} isn't available — pick a green one.`);
-      return;
-    }
-    setAssigning(true);
-    onError(null);
-    try {
-      const r = await api.assignWalkIn(organizationId, credential, unit.resourceId, unit.unitLabel);
-      onAssigned(r.reservation);
-    } catch (err) {
-      onError(err.message);
-      setAssigning(false);
-      // Refresh so a seat someone else just took stops looking free.
-      api.getFloorLayout(floorId).then(setData).catch(() => {});
-    }
-  };
-
-  return (
-    <motion.div {...stepSwap()}>
-      <div className="rounded-lg border border-line/10 bg-bg-card shadow-raised p-5 mb-4">
-        <div className="text-lg font-semibold">
-          {member?.firstName ? `Hi ${member.firstName} — pick a ${resourceNoun}` : `Pick a ${resourceNoun}`}
-        </div>
-        <p className="text-sm text-ink-secondary mt-1">
-          Choose an open {resourceNoun} or a bookable room for up to {maxStayHours ?? 4} hours. A whole-room booking includes every level and its contents.
-        </p>
-      </div>
-
-      {floors.length > 1 && (
-        <div className="mb-3">
-          <Segmented
-            className="kioskfloors"
-            value={floorId}
-            onChange={setFloorId}
-            options={floors.map((f) => ({ value: f.id, label: f.name }))}
-          />
-        </div>
-      )}
-
-      <div className="rounded-lg border border-line/10 bg-bg-card shadow-raised overflow-hidden relative">
-        {assigning && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-bg-page/60 backdrop-blur-sm">
-            <Spinner size={28} />
-          </div>
-        )}
-        {data ? (
-          <SpaceMap
-            floor={data.floor}
-            layout={data.layout}
-            resourceTypes={data.resourceTypes}
-            status={data.status}
-            resourceNoun={resourceNoun}
-            palette={palette}
-            onSelectUnit={pick}
-          />
-        ) : (
-          <div className="h-[46vh] flex items-center justify-center text-ink-secondary">Loading map…</div>
-        )}
-      </div>
-      <p className="mt-3 text-xs text-ink-muted">
-        Tap a green {resourceNoun}, or a room's name to take the whole room. Drag to pan, pinch to zoom.
-      </p>
-    </motion.div>
-  );
-}
-
 /** The outcome screens: OCC-1, OCC-3, OCC-6, ID-2 success, and see-staff. */
 function ResultStep({ result, memberNoun, resourceNoun, onReset }) {
   const kind = result?.kind;
@@ -784,8 +834,19 @@ function ResultStep({ result, memberNoun, resourceNoun, onReset }) {
           (result.reservation.position ? ` at (${result.reservation.position.col}, ${result.reservation.position.row})` : "")
         : null,
       foot: result?.reservation?.endTime
-        ? `Until ${new Date(result.reservation.endTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. Tap again when you leave.`
+        ? `Until ${clock(result.reservation.endTime)}. Tap again when you leave.`
         : "Tap again when you leave.",
+      notes: [
+        result?.keptFor && `You'll need to leave by ${clock(result.keptFor.startTime)} for your reservation.`,
+        result?.cancelled && `Your ${clock(result.cancelled.startTime)} reservation is cancelled.`,
+      ].filter(Boolean),
+    },
+    "no-walk-in": {
+      Icon: CircleSlash,
+      tone: "occupied",
+      title: result?.member?.firstName ? `Sorry, ${result.member.firstName}.` : "Sorry.",
+      body: result?.reason || "There's nothing free to take right now.",
+      foot: "Please ask a member of staff if you need help.",
     },
     "checked-out": {
       Icon: DoorOpen,
@@ -834,7 +895,7 @@ function ResultStep({ result, memberNoun, resourceNoun, onReset }) {
     },
   }[kind] || {};
 
-  const { Icon = CircleCheck, tone = "available", title, body, foot } = config;
+  const { Icon = CircleCheck, tone = "available", title, body, foot, notes = [] } = config;
 
   return (
     <motion.div
@@ -857,7 +918,12 @@ function ResultStep({ result, memberNoun, resourceNoun, onReset }) {
           {memberNoun.slice(1)} ID: <span className="font-mono">{result.member.memberId}</span>
         </p>
       )}
-      {foot && <p className="text-xs text-ink-muted mt-4">{foot}</p>}
+      {notes.map((note) => (
+        <p key={note} className="mt-3 text-base font-medium" style={{ color: "var(--color-state-reserved)" }}>
+          {note}
+        </p>
+      ))}
+      {foot && <p className="text-sm text-ink-muted mt-4">{foot}</p>}
 
       <Button onClick={onReset} className="mt-6">
         Next person

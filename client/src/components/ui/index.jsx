@@ -71,6 +71,9 @@ export const Button = forwardRef(function Button(
  * One control for every "pick one of these" row in the product — admin
  * tabs, floor switchers, editor tools, report ranges. They were four
  * different-looking things before.
+ *
+ * An option may be `disabled` — the map's "Now" while closed — and then
+ * says why in its `title`.
  */
 export function Segmented({ options, value, onChange, size = "md", className }) {
   return (
@@ -84,10 +87,12 @@ export function Segmented({ options, value, onChange, size = "md", className }) 
             type="button"
             onClick={() => onChange(option.value)}
             title={option.title}
+            disabled={option.disabled}
             aria-pressed={selected}
             className={cx(
               "relative rounded-md font-medium transition-colors duration-fast ease-out flex items-center gap-2",
-              size === "sm" ? "h-7 px-2.5 text-xs" : "h-8 px-3 text-sm",
+              // lg: a wall screen's tabs, sized for a finger at arm's length.
+              size === "sm" ? "h-7 px-2.5 text-xs" : size === "lg" ? "h-11 px-4 text-base" : "h-8 px-3 text-sm",
               selected ? "" : "text-ink-secondary hover:text-ink-primary"
             )}
             style={selected ? { color: "var(--color-accent-ink)" } : undefined}
