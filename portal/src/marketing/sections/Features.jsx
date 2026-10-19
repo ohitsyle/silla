@@ -46,7 +46,7 @@ const FEATURES = [
   {
     icon: ShieldCheck,
     title: "Roles that hold",
-    body: "Staff run the space; admins define it. Enforced on the server, not just hidden in the interface.",
+    body: "Staff run the space; admins define it. The system itself refuses what a role can't do — it isn't just a hidden button.",
   },
   {
     icon: Bell,

@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { Layers, Plus, Sparkles, Trash2 } from "lucide-react";
 import { Badge, Button, Card, Field, Notice, Panel, Toggle } from "../components/ui.jsx";
 
@@ -28,6 +29,19 @@ export default function FloorsStep({ config, update, errors }) {
   const floors = config.floors || [];
   const demoLayout = config.demoLayout !== false;
 
+  // A new floor lands below the others, often off screen: bring it into
+  // view with its name selected, as the catalog does for a new type.
+  const added = useRef(null);
+  useEffect(() => {
+    if (added.current === null) return;
+    const field = document.querySelector(`[name="floor-${added.current}-name"]`);
+    added.current = null;
+    if (!field) return;
+    field.scrollIntoView({ block: "center", behavior: "smooth" });
+    field.focus({ preventScroll: true });
+    field.select?.();
+  }, [floors.length]);
+
   const writeFloors = (next) =>
     // `order` is what the floor switcher sorts by, so it is derived from
     // position rather than being a number anyone has to maintain.
@@ -36,8 +50,10 @@ export default function FloorsStep({ config, update, errors }) {
   const changeFloor = (index, patch) =>
     writeFloors(floors.map((floor, i) => (i === index ? { ...floor, ...patch } : floor)));
 
-  const addFloor = () =>
+  const addFloor = () => {
+    added.current = floors.length;
     writeFloors([...floors, { name: `Floor ${floors.length + 1}`, cols: 20, rows: 12 }]);
+  };
 
   const removeFloor = (index) => writeFloors(floors.filter((_, i) => i !== index));
 
@@ -53,15 +69,15 @@ export default function FloorsStep({ config, update, errors }) {
         }
       >
         <p className="text-sm text-ink-secondary">
-          Each floor is a grid of whole cells. Pick a size that mirrors the real room's proportions —
-          pieces are placed cell by cell in the map editor after provisioning, so a grid that is
-          roughly the right shape is worth more than one that is exactly the right area.
+          Each floor is a grid of squares. Pick a size with the same proportions as the real floor —
+          furniture is placed square by square in the map editor once your system is built, so a
+          grid that is roughly the right shape matters more than one that is exactly the right size.
         </p>
 
         {floors.length === 0 && (
           <Notice tone="error" className="mt-4">
             {errorFor(errors, "floors") ||
-              "A deployment needs at least one floor. There is nowhere to put anything otherwise."}
+              "Your system needs at least one floor. There is nowhere to put anything otherwise."}
           </Notice>
         )}
 
@@ -118,7 +134,7 @@ export default function FloorsStep({ config, update, errors }) {
                     onClick={() => removeFloor(index)}
                     title={
                       floors.length <= 1
-                        ? "A deployment needs at least one floor."
+                        ? "Your system needs at least one floor."
                         : "Removes this floor."
                     }
                   >
@@ -141,8 +157,8 @@ export default function FloorsStep({ config, update, errors }) {
         />
         <p className="text-xs text-ink-muted mt-3">
           {demoLayout
-            ? "Turn this off only if your own layout is going in on day one — a first boot onto an empty grid looks broken rather than new."
-            : "Every floor will be provisioned empty, so the first thing staff see is a blank grid waiting for the map editor."}
+            ? "Turn this off only if you will lay out your own floors before anyone uses the system — on the first day, an empty floor looks broken rather than new."
+            : "Every floor starts empty, ready for you to place your furniture in the map editor."}
         </p>
       </Panel>
     </div>
