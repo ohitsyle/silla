@@ -358,6 +358,14 @@ try {
     unitIn(nearClose, solos[2]).day === "full" && unitIn(nearClose, solos[2]).fraction < 1
   );
   check("a unit with forty-five minutes left free is partial", unitIn(nearClose, solos[3]).day === "partial");
+  // A booking for after closing — made before the hours changed — limits nobody today.
+  await Reservation.create({
+    organization: org._id, member: members[39]._id, resource: solos[4].id, unitLabel: "1", targetLabel: "Focus desk · 1",
+    startTime: new Date(+closing + 10 * MINUTE), endTime: new Date(+closing + 70 * MINUTE), status: "held",
+  });
+  const afterClosing = unitIn(await dayOf(ground, eli), solos[4]);
+  check("'free until' stops at closing: what comes after it limits nobody today", afterClosing.freeNow && afterClosing.freeUntil === null && afterClosing.day === "free");
+  await release(members[39]);
   await release(ben);
   await release(cai);
   await release(dee);

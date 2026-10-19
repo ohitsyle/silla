@@ -169,9 +169,10 @@ const minutesIn = (list) => list.reduce((sum, i) => sum + (i.end - i.start) / MI
  *   fraction   how much of the time left is booked, 0..1 — the ring's length
  *   freeNow    today only: nothing booked or closed at this moment
  *   freeUntil  when free now: the start of the next booking or closure, or
- *              null when nothing comes before closing
+ *              null when nothing comes before closing — a booking made for
+ *              after closing (the hours changed since) limits nobody today
  */
-function describeUnit({ blocks, open, now, isToday, closures }) {
+function describeUnit({ blocks, open, now, isToday, closures, closesAt }) {
   const busy = merge(blocks);
   const booked = intersect(busy, open);
   const free = subtract(open, busy);
@@ -198,8 +199,8 @@ function describeUnit({ blocks, open, now, isToday, closures }) {
     const busyNow = busy.some((i) => i.start <= now && now < i.end);
     if (openNow && !busyNow) {
       result.freeNow = true;
-      const nextBooking = busy.find((i) => i.start > now)?.start || null;
-      const nextClosure = closures.find((c) => c.start > now)?.start || null;
+      const nextBooking = busy.find((i) => i.start > now && i.start < closesAt)?.start || null;
+      const nextClosure = closures.find((c) => c.start > now && c.start < closesAt)?.start || null;
       if (nextBooking && (!nextClosure || nextBooking <= nextClosure)) {
         result.freeUntil = nextBooking;
         result.freeUntilReason = "booking";
@@ -336,7 +337,7 @@ export async function floorDay({ floorId, date, viewer = null, now = new Date() 
     bookable: !reason,
     ...(reason
       ? { reason, day: null, fraction: 0, bookedMinutes: 0, freeNow: false, freeUntil: null, freeUntilReason: null }
-      : describeUnit({ blocks, open, now, isToday, closures: closed })),
+      : describeUnit({ blocks, open, now, isToday, closures: closed, closesAt })),
     blocks: blocks.filter((b) => b.end > b.start).sort((a, b) => a.start - b.start),
   });
 
