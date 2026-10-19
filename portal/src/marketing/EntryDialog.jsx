@@ -172,8 +172,8 @@ export default function EntryDialog({ open, onClose, planKey, annual = true, onE
       </div>
 
       <p className="mt-4 text-xs leading-relaxed text-ink-muted">
-        Either way you end up with the same thing: a complete description of your system that we
-        build for you. Nothing is final until you place an order.
+        {isSignedIn ? "You end up with" : "Either way you end up with the same thing:"} a complete
+        description of your system that we build for you. Nothing is final until you place an order.
       </p>
     </Modal>
   );

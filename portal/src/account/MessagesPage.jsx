@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { ArrowLeft, Building2, ChevronDown, MessagesSquare, PenLine, Send } from "lucide-react";
 
-import { Button, EmptyState, Modal, Notice, Skeleton, Textarea } from "../components/ui.jsx";
+import { Button, EmptyState, LinkedText, Modal, Notice, Skeleton, Textarea } from "../components/ui.jsx";
 import { TextInput } from "./kit.jsx";
 import { AccountLayout, StatusBadge } from "./shared.jsx";
 import { staffApi } from "../lib/staffApi.js";
@@ -211,12 +211,12 @@ function Thread({ id, navigate, onRead }) {
                   <time title={dateTime(m.createdAt)}>{dateTime(m.createdAt)}</time>
                 </span>
                 <div
-                  className={`whitespace-pre-line rounded-2xl px-4 py-2.5 text-left text-[15px] leading-relaxed ${
+                  className={`whitespace-pre-line rounded-2xl px-4 py-2.5 text-left text-[15px] leading-relaxed [overflow-wrap:anywhere] ${
                     mine ? "rounded-tr-md border border-line/10 bg-bg-card" : "rounded-tl-md"
                   }`}
                   style={mine ? undefined : { background: "rgb(var(--c-accent) / 0.13)" }}
                 >
-                  {m.body}
+                  <LinkedText text={m.body} />
                 </div>
               </div>
             </motion.li>
@@ -337,7 +337,11 @@ export default function MessagesPage({ id, navigate }) {
 
       {rows.length > 0 && (
         <div className="grid items-start gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
-          <div className={`min-w-0 ${id ? "max-lg:hidden" : ""}`}>{list}</div>
+          {/* Held in view beside a long thread: it scrolled away with the
+              page and left an empty column beside the conversation. */}
+          <div className={`min-w-0 lg:sticky lg:top-[88px] lg:max-h-[calc(100vh-104px)] lg:overflow-y-auto ${id ? "max-lg:hidden" : ""}`}>
+            {list}
+          </div>
           <div className={`min-w-0 ${id ? "" : "max-lg:hidden"}`}>
             {id ? (
               <>

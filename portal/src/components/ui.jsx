@@ -948,3 +948,42 @@ export function Page({ children, width = "wide", className }) {
     </div>
   );
 }
+
+/* ───────────────────────────── linked text ───────────────────────────── */
+
+/** http(s) addresses only — the scheme is what makes a run of text a link worth following. */
+const URL_IN_TEXT = /\bhttps?:\/\/[^\s<>"]+/gi;
+
+/**
+ * Message text with its web addresses made clickable. "You're live — it's
+ * at https://…/bayview" arrived as plain text the buyer had to select and
+ * paste. Built from text nodes and anchors, never HTML, so a message can
+ * only ever add links, not markup. Punctuation that ends the sentence
+ * ("…/bayview.") stays out of the address, and a long address may break
+ * anywhere rather than push the bubble off the side of a phone.
+ */
+export function LinkedText({ text }) {
+  const source = String(text ?? "");
+  const out = [];
+  let last = 0;
+  for (const match of source.matchAll(URL_IN_TEXT)) {
+    let url = match[0];
+    // A closing bracket belongs to the address only if it opened one.
+    while (/[.,;:!?'\])]$/.test(url) && !(url.endsWith(")") && url.includes("("))) url = url.slice(0, -1);
+    if (match.index > last) out.push(source.slice(last, match.index));
+    out.push(
+      <a
+        key={match.index}
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="font-medium underline underline-offset-2 [overflow-wrap:anywhere]"
+      >
+        {url}
+      </a>
+    );
+    last = match.index + url.length;
+  }
+  if (last < source.length) out.push(source.slice(last));
+  return out;
+}

@@ -33,12 +33,20 @@ import { TermsModal } from "./Terms.jsx";
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const SUFFIXES = ["Jr.", "Sr.", "II", "III", "IV", "V"];
 
-/** Where someone goes after signing in, in order of what they were doing. */
-function destinationFor(account, redirectTo) {
+/**
+ * Where someone goes after signing in, in order of what they were doing.
+ *
+ * A buyer who has just created their account, with nothing configured
+ * yet, goes to their orders — empty, and saying what to do first —
+ * rather than back to the storefront they came from, where the only sign
+ * that anything had happened was a toast.
+ */
+function destinationFor(account, redirectTo, { newAccount = false } = {}) {
   if (hasPending() || peekIntent()) return ROUTES.configure;
   if (redirectTo) return redirectTo;
   // SILLA staff start at their work — the console — and everyone else goes home.
-  return account?.role === "silla" ? ROUTES.staff : ROUTES.home;
+  if (account?.role === "silla") return ROUTES.staff;
+  return newAccount ? ROUTES.orders : ROUTES.home;
 }
 
 /* ─────────────────────────────── sign in ─────────────────────────────── */
@@ -369,7 +377,8 @@ export default function AuthScreen({ mode: routeMode, navigate, redirectTo }) {
     if (!redirectTo) navigate(next === "signUp" ? ROUTES.signUp : ROUTES.signIn, { replace: true });
   };
 
-  const finish = (signedIn) => navigate(destinationFor(signedIn || account, redirectTo), { replace: true });
+  const finish = (signedIn, options) =>
+    navigate(destinationFor(signedIn || account, redirectTo, options), { replace: true });
 
   const pending = hasPending();
 
@@ -527,11 +536,11 @@ export default function AuthScreen({ mode: routeMode, navigate, redirectTo }) {
         onClose={() => {
           // "I'll verify later" — the account exists and is signed in.
           setVerifyOpen(false);
-          finish();
+          finish(undefined, { newAccount: true });
         }}
         onVerified={(verified) => {
           setVerifyOpen(false);
-          finish(verified);
+          finish(verified, { newAccount: true });
         }}
       />
     </div>
