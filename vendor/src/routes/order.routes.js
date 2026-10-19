@@ -28,7 +28,7 @@ const LEGACY_PLAN_NAMES = { room: "One Room", building: "Whole Building", campus
 export const planNameOf = (order) => order.planName || LEGACY_PLAN_NAMES[order.plan] || order.plan;
 
 /** A frozen quote's headline figures, for a list row — the whole quote is on the detail. */
-const totalsOf = (quote) =>
+export const totalsOf = (quote) =>
   quote?.totals
     ? {
         oneTime: quote.totals.oneTime,

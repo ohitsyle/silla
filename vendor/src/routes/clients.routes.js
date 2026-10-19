@@ -22,7 +22,7 @@ import Invoice from "../models/Invoice.js";
 import { requireAccount } from "../middleware/auth.js";
 import { can, requirePermission } from "../middleware/staff.js";
 import { eventShape } from "./audit.routes.js";
-import { planNameOf } from "./order.routes.js";
+import { planNameOf, totalsOf } from "./order.routes.js";
 
 const router = Router();
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -221,6 +221,10 @@ router.get(
         billingPeriod: o.billingPeriod,
         quotedAmount: o.quotedAmount,
         currency: o.currency,
+        // What the order costs a month with everything on it — the plan's
+        // own price (quotedAmount) left a client paying ₱13,000 a month
+        // reading "Building · ₱6,000/month".
+        totals: totalsOf(o.quote),
         status: o.status,
         deploymentUrl: o.deploymentUrl,
         createdAt: o.createdAt,
