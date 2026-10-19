@@ -4,7 +4,8 @@ import { ArrowRight, Check, Plus } from "lucide-react";
 
 import { EASE, prefersReducedMotion, reveal, revealChild, revealGroup } from "../motion.js";
 import {
-  formatMoney, moneyParts, monthlyPrice, periodPrice, usePlans, vatSentence, yearlySaving, yearlySavingOf,
+  formatMoney, moneyParts, monthlyPrice, periodPrice, usePlans, vatSentence, yearlyPercent, yearlySavingOf,
+  yearlySavingRange,
 } from "../../lib/plans.js";
 import { groupCatalogue, iconFor, minimumTag, monthlyOf, monthlyTag, oneTimeTag, tierName } from "../../lib/catalogue.js";
 
@@ -59,6 +60,10 @@ function Price({ plan, annual, featured }) {
 
   const { symbol, amount: figure } = moneyParts(amount, { currency: plan.currency });
   const saves = yearlySavingOf(plan);
+  // This plan's own percentage — the figure the configurator shows once
+  // the plan is chosen, so the two never disagree.
+  const percent = yearlyPercent(plan);
+  const share = percent > 0 ? ` (${percent}%)` : "";
   return (
     <div className="mt-6">
       <div className="flex items-baseline gap-1.5">
@@ -85,12 +90,12 @@ function Price({ plan, annual, featured }) {
             Billed yearly — {formatMoney(periodPrice(plan, true), { currency: plan.currency })} a year.
             {saves ? (
               <span className="font-semibold" style={{ color: featured ? "rgb(var(--m-accent))" : "rgb(var(--m-accent-deep))" }}>
-                {" "}You save {formatMoney(saves, { currency: plan.currency })}.
+                {" "}You save {formatMoney(saves, { currency: plan.currency })}{share}.
               </span>
             ) : null}
           </>
         ) : saves ? (
-          `Billed monthly. ${formatMoney(monthlyPrice(plan, true), { period: "month", currency: plan.currency })} billed yearly saves ${formatMoney(saves, { currency: plan.currency })} a year.`
+          `Billed monthly. ${formatMoney(monthlyPrice(plan, true), { period: "month", currency: plan.currency })} billed yearly saves ${formatMoney(saves, { currency: plan.currency })} a year${share}.`
         ) : (
           "Billed monthly."
         )}
@@ -167,7 +172,7 @@ function BuildingsBand({ item, annual, campus }) {
             )}
           </div>
           {item.note && (
-            <p className="mt-3 text-sm font-medium" style={{ color: "rgb(var(--m-accent-deep))" }}>
+            <p className="mt-3 text-sm font-medium" style={soft}>
               {item.note}
             </p>
           )}
@@ -278,8 +283,10 @@ function PriceList({ title, lead, items, annual }) {
                 <p className="mt-0.5 text-sm leading-relaxed" style={soft}>
                   {item.description}
                 </p>
+                {/* Neutral ink: a minimum order or a warranty is information,
+                    and the accent read as a warning here. */}
                 {(minimum || item.note || item.waivedOnYearly) && (
-                  <p className="mt-1 text-[13px] font-medium" style={{ color: "rgb(var(--m-accent-deep))" }}>
+                  <p className="mt-1 text-[13px] font-medium" style={soft}>
                     {[minimum, item.waivedOnYearly ? (annual ? "Waived on yearly billing." : "Free on yearly billing.") : null, item.note]
                       .filter(Boolean)
                       .join(" · ")}
@@ -333,7 +340,7 @@ export default function Pricing({ onConfigure }) {
   const [annual, setAnnual] = useState(true);
   const store = usePlans();
   const { plans, catalogue, trialDays } = store;
-  const saving = yearlySaving(plans);
+  const saving = yearlySavingRange(plans);
   const groups = groupCatalogue(catalogue);
   const campus = plans.find((p) => p.key === "campus");
   const featured = plans.find((p) => p.featured) || plans[0];
@@ -373,8 +380,10 @@ export default function Pricing({ onConfigure }) {
                 )}
                 <span className="relative flex items-center gap-2">
                   {label}
-                  {/* Worked out from the prices, so it can't drift from them. */}
-                  {value && saving > 0 && (
+                  {/* Worked out from the prices, so it can't drift from
+                      them. It speaks for every plan, so it says "up to"
+                      when they differ; each card says its own figure. */}
+                  {value && saving && (
                     <span
                       className="rounded-full px-2 py-0.5 text-[11px] font-bold"
                       style={{
@@ -382,7 +391,7 @@ export default function Pricing({ onConfigure }) {
                         color: annual ? "rgb(var(--m-accent-ink))" : "rgb(var(--m-accent-deep))",
                       }}
                     >
-                      −{saving}%
+                      {saving.min === saving.max ? `Save ${saving.max}%` : `Save up to ${saving.max}%`}
                     </span>
                   )}
                 </span>
