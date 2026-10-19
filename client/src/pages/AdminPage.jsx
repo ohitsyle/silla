@@ -6,6 +6,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { api } from "../lib/api.js";
+import { formatSpan } from "../lib/bookingWindow.js";
 import { DEFAULT_ADMIN_SECTION, sectionsFor } from "../lib/adminSections.js";
 import HourHistogram from "../components/HourHistogram.jsx";
 import PlanUsage from "../components/PlanUsage.jsx";
@@ -158,7 +159,10 @@ function Dashboard() {
       <div>
         <SectionLabel>Capacity</SectionLabel>
         <motion.div {...listContainer()} className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <Stat label="Open" value={m.open} sub={`of ${m.total}`} tone="available"
+          {/* Units in a whole-only room are said the way the map says
+              them, not counted as Unavailable. */}
+          <Stat label="Open" value={m.open}
+                sub={`of ${m.total}${m.withRoom ? ` · ${m.withRoom} come with their room` : ""}`} tone="available"
                 progress={m.total ? m.open / m.total : 0} />
           <Stat label="Occupied" value={m.occupied} tone="occupied"
                 progress={m.total ? m.occupied / m.total : 0} />
@@ -1017,7 +1021,7 @@ function Settings() {
                 <div className="mr-auto">
                   <div className="text-ink-primary">{c.reason}</div>
                   <div className="text-xs text-ink-muted">
-                    {new Date(c.startTime).toLocaleString()} — {new Date(c.endTime).toLocaleString()}
+                    {formatSpan(c.startTime, c.endTime)}
                     {c.appliedAt && " · applied"}
                   </div>
                 </div>

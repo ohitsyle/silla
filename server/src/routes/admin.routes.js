@@ -118,12 +118,17 @@ router.get(
     let total = 0;
     const counts = { available: 0, reserved: 0, occupied: 0, unavailable: 0 };
     let outOfService = 0;
+    // Units inside a free room that is booked only whole. They were
+    // counted as "Unavailable" (in red) while the map said "Comes with its
+    // room" — nothing is wrong with them; they are booked with the room.
+    let withRoom = 0;
     const overstays = [];
 
     for (const resource of resources) {
       for (const unit of resource.viewUnits || resource.units) {
         total += 1;
-        if (counts[unit.status] !== undefined) counts[unit.status] += 1;
+        if (unit.includedInRoom) withRoom += 1;
+        else if (counts[unit.status] !== undefined) counts[unit.status] += 1;
         if (unit.serviceStatus === "out_of_service") outOfService += 1;
         if (unit.overstay) {
           overstays.push({
@@ -151,6 +156,7 @@ router.get(
         occupied: counts.occupied,
         reserved: counts.reserved,
         unavailable: counts.unavailable,
+        withRoom,
         outOfService,
         overstays: overstays.length,
         activeSessions: activeNow,

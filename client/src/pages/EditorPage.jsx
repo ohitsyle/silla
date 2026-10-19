@@ -261,13 +261,25 @@ export default function EditorPage() {
     }
   };
 
+  /**
+   * A confirmation answers the action just taken; moving on to anything
+   * else retires it. "Outline saved." used to stay up while the next
+   * pieces were placed, as if it described them.
+   */
+  const clearMessages = () => {
+    setNotice(null);
+    setError(null);
+  };
+
   const openBuilding = (next) => {
+    clearMessages();
     setBuildingOverride(next.id);
     setDrawingRoom(null);
     setSelectedUnit(null);
     if (next.floors[0]) navigate(`/editor/${next.floors[0].id}`);
   };
   const openFloor = (id) => {
+    clearMessages();
     setSelectedUnit(null);
     navigate(`/editor/${id}`);
   };
@@ -290,6 +302,7 @@ export default function EditorPage() {
 
   /** The toolbar: picking a tool ends whatever reshape was under way. */
   const chooseTool = (value) => {
+    clearMessages();
     if (value === TOOL.ROOM) {
       drawRoom(null);
       return;

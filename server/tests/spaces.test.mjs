@@ -435,7 +435,14 @@ try {
 
   /* ───────────────────────────── room modes ───────────────────────────── */
 
+  const beforeWhole = await call("/api/admin/dashboard");
   await call("/api/spaces/rooms/" + room.id, "PATCH", { bookingMode: "whole" });
+  const wholeOnly = await call("/api/admin/dashboard");
+  check(
+    "a free whole-only room's contents count as coming with it, not as unavailable",
+    wholeOnly.metrics.withRoom > 0 && wholeOnly.metrics.unavailable === beforeWhole.metrics.unavailable &&
+      wholeOnly.metrics.open === beforeWhole.metrics.open - wholeOnly.metrics.withRoom
+  );
   await rejected(() => claim(members[0], desk.id), "ROOM_MODE");
   await call("/api/spaces/rooms/" + room.id, "PATCH", { bookingMode: "individual" });
   await rejected(() => claim(members[0], room.resourceId, "room"), "ROOM_MODE");

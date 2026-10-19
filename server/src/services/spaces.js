@@ -203,8 +203,11 @@ export function effectiveRoomState(unit, roomUnit, mode) {
   if (roomUnit && ["reserved", "occupied"].includes(roomUnit.status)) {
     return { ...unit, status: roomUnit.status, roomBlocked: true };
   }
-  // A room booked only as a whole: its contents are never booked one by one.
-  if (mode === "whole") return { ...unit, status: "unavailable", roomBlocked: true };
+  // A room booked only as a whole: its contents are never booked one by
+  // one. `includedInRoom` tells this apart from a unit someone switched
+  // off — the map calls it "Comes with its room" (client lib/rooms.js
+  // sets the same flag), and the dashboard must not count it as broken.
+  if (mode === "whole") return { ...unit, status: "unavailable", roomBlocked: true, includedInRoom: true };
   return unit;
 }
 

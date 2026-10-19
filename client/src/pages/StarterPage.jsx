@@ -34,7 +34,7 @@ const article = (word) => (/^[aeiou]/i.test(String(word).trim()) ? "an" : "a");
 
 /** Aggregates open/total across every floor, so the number means the building. */
 function useAvailability(organizationId) {
-  const [state, setState] = useState({ loading: true, open: 0, total: 0, breakdown: {}, preview: null });
+  const [state, setState] = useState({ loading: true, failed: false, open: 0, total: 0, breakdown: {}, preview: null });
 
   useEffect(() => {
     if (!organizationId) return undefined;
@@ -54,13 +54,19 @@ function useAvailability(organizationId) {
             for (const unit of units) {
               total += 1;
               const shown = effectiveStatus(resource, unit, layout.layout.rooms || [], layout.status);
-              const key = shown.serviceStatus === "out_of_service" ? "out_of_service" : shown.status;
+              // A unit that comes with a whole-only room is not "Unavailable".
+              const key = shown.includedInRoom
+                ? "withRoom"
+                : shown.serviceStatus === "out_of_service"
+                  ? "out_of_service"
+                  : shown.status;
               breakdown[key] = (breakdown[key] || 0) + 1;
             }
           }
         }
         setState({
           loading: false,
+          failed: false,
           open: breakdown.available || 0,
           total,
           breakdown,
@@ -71,7 +77,7 @@ function useAvailability(organizationId) {
       } catch {
         // A failed count is not worth an error screen — the page still
         // does its job as a way in. Fall back to hiding the figure.
-        if (!cancelled) setState({ loading: false, open: 0, total: 0, breakdown: {}, preview: null });
+        if (!cancelled) setState({ loading: false, failed: true, open: 0, total: 0, breakdown: {}, preview: null });
       }
     })();
 
@@ -152,7 +158,8 @@ export default function StarterPage() {
   const memberNoun = org.terminology?.memberNoun || "member";
   const hours = org.policy?.operatingHours;
   const isStaff = user?.role === "staff" || user?.role === "superadmin";
-  const { loading, open, total, breakdown, preview } = availability;
+  const facility = org.terminology?.facilityLabel || "space";
+  const { loading, failed, open, total, breakdown, preview } = availability;
   // Paused or ended: the map is still worth opening, booking is not.
   const paused = !entitlements.operational;
 
@@ -186,8 +193,15 @@ export default function StarterPage() {
                   {hours ? ` · open ${hours.open}–${hours.close}` : ""}
                 </p>
               </>
+            ) : failed ? (
+              <p className="text-ink-secondary">What's free can't be shown right now. The map may still open.</p>
             ) : (
-              <p className="text-ink-secondary">Live availability is unavailable right now.</p>
+              // A new system, before anything has been placed. It used to
+              // say "Live availability is unavailable right now" here too,
+              // which read as an outage on the first day.
+              <p className="text-ink-secondary">
+                This {facility} is still being set up — there are no {resourceNoun}s to book yet.
+              </p>
             )}
           </div>
 
