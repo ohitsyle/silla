@@ -547,8 +547,18 @@ Portal lessons from building it:
   is a tab switch and deliberately does not. Early returns in `Routed`
   would skip the panel mid-animation, which is why the gate screens live
   inside `view()`.
-- `Modal` autofocus prefers `[data-autofocus]` — without it the code
-  dialog focused its Close button and the first keystroke went nowhere.
+- `Modal` autofocus prefers `[data-autofocus]`, then the first field,
+  then the first button — without that the code dialog focused its Close
+  button and the first keystroke went nowhere. **It focuses ONCE, on
+  open**: the close handler is held in a ref. When `onClose` was an
+  effect dependency, every re-render with an inline handler (pages
+  refresh on 30–60 s timers) re-ran the effect and yanked focus
+  mid-sentence — a buyer's message ended half in its Subject box, and a
+  space typed into "Record payment" pressed Close and lost the note.
+- Toasts sit under the header, never at the foot of the screen, where
+  the composers, the configurator's action bar and their small print
+  live. Message text goes through `LinkedText` (components/ui.jsx):
+  addresses become links, built from text nodes, never HTML.
 - A dialog keeps its task as its title and lets the success panel carry
   the outcome; the toast fires after the dialog closes. Title, panel and
   toast all saying "Password changed" at once read as a stutter.
@@ -669,6 +679,11 @@ smallest free number. The layout serves each piece's `name`; a
 reservation keeps the name it was made under (`targetLabel`, its
 history), and anything showing a LIVE one — /mine, the kiosk, reminders,
 staff schedules and timelines — asks `unitLabels()` for today's name.
+A multi-unit piece whose type is named for the noun itself (a two-person
+"Desk" where a desk is what people book) would read "Desk 1 · Desk 2";
+its units are "Desk 1 · Place 2" instead. Room names are drawn ABOVE the
+furniture, with a halo (a desk in the room's corner used to cover its
+name); the room's second line stays under it.
 
 SpaceMap now resolves clicks BY CELL on the `<svg>` rather than per drawn
 element. Before, a room's or zone's fill sat over the grid and swallowed the
@@ -676,11 +691,11 @@ click, so the Place tool could not put a piece inside a room by clicking —
 reproduced against main's SpaceMap, not theorised. Pieces stop their own
 clicks so furniture is never mistaken for the cell beneath it.
 
-`npm run test:spaces` runs 60 geometry and naming checks
+`npm run test:spaces` runs 61 geometry and naming checks
 (`tests/cells.test.mjs`, alone as `npm run test:cells`), 78 day checks
-(`tests/day.test.mjs`, alone as `npm run test:day`) and then 120 named
+(`tests/day.test.mjs`, alone as `npm run test:day`) and then 121 named
 spatial checks, each in a temporary replica set; `npm run test:isolated`
-runs the system suites' 176 checks in another temporary database,
+runs the system suites' 177 checks in another temporary database,
 including literal-code checks with console email. None reads live credentials or touches Atlas. `test:spaces --
 --serve` keeps disposable fixture data on :4010 (`--port=<n>` when another
 worktree's preview holds it) for the :5175 browser preview documented there
@@ -777,7 +792,7 @@ account menu; `#/queue` redirects to `#/staff/orders`. Provisioning is a
 button (Orders → Provision): address check, then the owner's one-time
 PIN, then `billing.onProvisioned` starts the trial. Deploying needs
 `CONTROL_PLANE_SECRET` on BOTH services and `PRODUCT_URL` on the vendor.
-Vendor suite: 330 checks (`npm run test:isolated`); the billing and
+Vendor suite: 336 checks (`npm run test:isolated`); the billing and
 pricing suites run their database-moving parts only there, because they
 drive the billing job and edit prices.
 
@@ -1041,8 +1056,9 @@ worse than an error message.
   - **Tailwind only knows its own opacity steps.** `border-line/12` is not
     one (10 and 15 are), so the class generates nothing and the border
     falls back to preflight's light grey — a white outline on a dark
-    card. Use a step, or brackets: `border-line/[0.12]`. Inspector and
-    Modal still carry a `/12`.
+    card. Use a step, or brackets: `border-line/[0.12]`. (Inspector,
+    both Modals and a few portal panels carried a `/12` until the
+    dialog-focus fix replaced them.)
   - **Motion owns a `motion.*` element's style.** The selected unit's
     outline was a changed `stroke` on the chip's `motion.rect`, and it
     never reached the screen: the chosen seat looked like every other.
