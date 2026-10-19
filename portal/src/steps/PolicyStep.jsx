@@ -227,7 +227,7 @@ export default function PolicyStep({ config, update, errors }) {
               {meaning}
             </span>
           ))}
-          <span className="text-sm text-ink-secondary">Anything else is a literal character.</span>
+          <span className="text-sm text-ink-secondary">Anything else appears exactly as typed.</span>
         </div>
 
         {!formatError && placeholders === 0 && (
