@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { ArrowRight, LogIn, RotateCcw, Sparkles } from "lucide-react";
 
 import { Modal, Button } from "../components/ui.jsx";
+import { useAccount } from "../lib/AccountContext.jsx";
 import { PLAN_BY_KEY, formatMoney, priceFor } from "../lib/plans.js";
 
 /**
@@ -73,7 +74,8 @@ function Choice({ icon: Icon, title, children, onClick, primary, autoFocus }) {
   );
 }
 
-export default function EntryDialog({ open, onClose, planKey, annual = true, onExplore, onSignIn }) {
+export default function EntryDialog({ open, onClose, planKey, annual = true, onExplore, onStartNew, onSignIn }) {
+  const { account, isSignedIn } = useAccount();
   const draft = useMemo(() => (open ? readDraft() : null), [open]);
   const plan = planKey ? PLAN_BY_KEY[planKey] : null;
 
@@ -142,22 +144,31 @@ export default function EntryDialog({ open, onClose, planKey, annual = true, onE
         </div>
       )}
 
-      <div className="grid gap-3 sm:grid-cols-2">
+      {/* Signed in, there is nothing to choose between: "No account
+          needed" and "Sign in first" were offered to people who already
+          had one. "Start a new one" used to call the same handler as
+          "Pick up where you left off", so it opened the old draft; it
+          replaces it now, and says so. */}
+      <div className={isSignedIn ? "grid gap-3" : "grid gap-3 sm:grid-cols-2"}>
         <Choice
           icon={Sparkles}
-          title={draft ? "Start a new one" : "Just explore"}
+          title={draft ? "Start a new one" : isSignedIn ? "Start configuring" : "Just explore"}
           primary
           autoFocus={!draft}
-          onClick={onExplore}
+          onClick={draft ? onStartNew || onExplore : onExplore}
         >
-          No account needed. Your work stays in this browser, and you can save it to an account
-          whenever you like — including at the very end.
+          {draft && "Replaces the draft above. "}
+          {isSignedIn
+            ? `You're signed in${account?.firstName ? ` as ${account.firstName}` : ""}. Your work is kept in this browser as you go, and one click at the end saves it to your account.`
+            : "No account needed. Your work stays in this browser, and you can save it to an account whenever you like — including at the very end."}
         </Choice>
 
-        <Choice icon={LogIn} title="Sign in first" onClick={onSignIn}>
-          Your configuration saves to your account as you go, so you can leave it and pick it up
-          on another device.
-        </Choice>
+        {!isSignedIn && (
+          <Choice icon={LogIn} title="Sign in first" onClick={onSignIn}>
+            Your name and email are filled in for you, and at the end your configuration saves to
+            your account in one click — to pick up on any device.
+          </Choice>
+        )}
       </div>
 
       <p className="mt-4 text-xs leading-relaxed text-ink-muted">

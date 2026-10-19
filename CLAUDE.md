@@ -293,22 +293,34 @@ Flow decisions worth keeping:
   illustration. Its sticky offset is `lg:top-[88px]`, not `top-6` — the
   site header is sticky and 72px tall, and the old offset parked the
   preview underneath it.
-- **The Review step's download button only exists if `onDownload` is
-  passed.** The wizard rendered `<StepForm config update errors />` and
-  passed neither `onDownload` nor `preview`, so the button never
-  rendered — and the "That's your system" hand-off panel keys off
-  `downloaded`, which could therefore never become true. Both the button
-  and the panel were dead for as long as that prop was missing.
+- **The Review step's way forward is the account, not a file.** It
+  used to end in "Hand it over — Download profile… send it to SILLA",
+  "Copy JSON" and the raw profile beside "Save to my account", and then a
+  "That's your system" panel telling the buyer to email the file to an
+  address that did not exist — a buyer could fairly think they had to
+  email us a file. Now it says what happens next (save → submit as your
+  order, which sends the first invoice → we build it), and the download
+  is one quiet "Download your setup as a file" link at the very bottom,
+  for whoever needs a copy (`onDownload` must still be passed for it to
+  render).
+- **What still stops the order is listed at the TOP of Review**, each
+  with "Fix in <step>", and "Save to my account" is never disabled:
+  pressing it with something left scrolls to that list, the way Continue
+  reveals a step's errors. A "Complete — ready for the seeder" notice
+  used to show there whatever the state.
 - **The Review step no longer prints `npm run seed:file`.** That is
   SILLA's provisioning step, and it was being shown to the customer
   buying the result of it — a librarian should not have to think about a
   terminal. The command lives here and in `importProfile.js`, where the
   people who run it will look.
-- The download ends in a real hand-off ("send us the file → we
-  provision it → you get your keys"), not a one-line "downloaded"
-  notice that left a buyer holding an artefact with no next move.
-  **The address in that panel (`hello@silla.app`) is invented** —
-  replace it with the real SILLA address.
+- **Build-team words stay out of rendered strings.** The configurator
+  said "resolver (INF-3)", "provisioning script", "seeder", "worker",
+  "scheduler", "per-site timezone" and "emitted JSON" to buyers. Grep
+  what renders — a dump of each step's `innerText` is the quickest
+  check — not just the files someone names.
+- Signed in, "Who will run it" starts with the account's own name and
+  email (once, and only when all three are empty), and the doorway does
+  not offer "No account needed" or "Sign in first" to someone who has one.
 
 Things worth keeping about the storefront:
 - The seat tile (`marketing/Chair.jsx`) is the mascot, drawn the way the
@@ -332,8 +344,8 @@ plan, and any extra buildings), kiosks, cards, readers, services and a
 support tier, with a live quote beside it; the plan is chosen there now,
 and Review shows the same quote.
 Three starting presets (library, office, blank), then everything is
-editable. The Review step emits the profile as JSON and offers it as a
-download.
+editable. Saving to the account is the order; the Review step still
+offers the profile as a JSON download, quietly, for records.
 
 **`owner` is part of the profile contract**, and it is a security
 boundary rather than a nicety. `seed.js` used to plant the SAME three

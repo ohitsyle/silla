@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
-  ArrowLeft, ArrowRight, CircleCheck, Eye, EyeOff, Pencil, RotateCcw, Send, UserPlus,
+  ArrowLeft, ArrowRight, Eye, EyeOff, Pencil, RotateCcw, Send, UserPlus,
 } from "lucide-react";
 
-import { Button, Modal, Notice, Stepper, panelEnter } from "./components/ui.jsx";
+import { Button, Modal, Notice, Stepper } from "./components/ui.jsx";
 import Preview from "./components/Preview.jsx";
 import QuoteSummary from "./components/QuoteSummary.jsx";
 import { DEFAULT_CONFIG, buildProfile, validate } from "./lib/profile.js";
@@ -76,7 +76,7 @@ const STEPS = [
     key: "branding",
     label: "Branding",
     title: "Your colours",
-    blurb: "Colours are tokens, not literals, so these repaint the whole product — not just the accent.",
+    blurb: "These colours paint the whole product — every screen, the kiosk and your emails — not just the buttons.",
     Component: BrandingStep,
     fields: ["branding", "colorScheme"],
   },
@@ -118,7 +118,7 @@ const STEPS = [
     key: "review",
     label: "Review",
     title: "Your system and your quote",
-    blurb: "Everything you configured, what it costs, and the file SILLA's seeder builds it from.",
+    blurb: "Everything you chose and what it costs. Save it to your account, then send it to us as your order.",
     Component: ReviewStep,
     fields: null,
   },
@@ -185,7 +185,7 @@ function readDraft() {
 }
 
 export default function Wizard({ onExit, navigate }) {
-  const { isSignedIn } = useAccount();
+  const { account, isSignedIn, isSilla } = useAccount();
   const [restored] = useState(readDraft);
   const [config, setConfig] = useState(() => restored?.config || DEFAULT_CONFIG);
   const [stepIndex, setStepIndex] = useState(() => {
@@ -296,6 +296,23 @@ export default function Wizard({ onExit, navigate }) {
   useEffect(() => setDownloaded(false), [config]);
 
   /**
+   * Whoever is signed in is usually the person who will run the system,
+   * so an empty "Who will run it" starts with their details — it used to
+   * offer a stranger's name as a placeholder while the account held
+   * theirs. Once per visit, and only when all three fields are empty: an
+   * owner who is somebody else is typed over these, and clearing them is
+   * never undone behind the buyer's back.
+   */
+  const ownerPrefilled = useRef(false);
+  useEffect(() => {
+    if (ownerPrefilled.current || !account || isSilla) return;
+    ownerPrefilled.current = true;
+    const owner = config.owner || {};
+    if ([owner.firstName, owner.lastName, owner.email].some((value) => String(value || "").trim())) return;
+    update({ owner: { firstName: account.firstName || "", lastName: account.lastName || "", email: account.email || "" } });
+  }, [account, isSilla, config.owner, update]);
+
+  /**
    * Coming back from sign-up: restore what they had configured and put
    * them on the last step, so the account round trip costs them nothing.
    * Cleared immediately — a pending draft that outlived one trip would
@@ -348,6 +365,18 @@ export default function Wizard({ onExit, navigate }) {
   }, [errors, step]);
 
   const blocking = Object.entries(errors);
+  /**
+   * What still stops the order, for the Review step: each problem with the
+   * step that fixes it, so the list can take the buyer straight there.
+   */
+  const reviewProblems = useMemo(
+    () =>
+      Object.entries(errors).map(([path, message]) => {
+        const index = STEPS.findIndex((s) => s.fields?.some((field) => owns(field, path)));
+        return { path, message, step: index < 0 ? null : { index, label: STEPS[index].label } };
+      }),
+    [errors]
+  );
   const blocked = Object.keys(stepErrors).length > 0;
   const showErrors = Boolean(revealed[step.key]);
   const visibleErrors = showErrors ? stepErrors : {};
@@ -420,6 +449,15 @@ export default function Wizard({ onExit, navigate }) {
    * have anything worth saving is how you lose people on step one.
    */
   async function saveToAccount() {
+    // Never a dead button. It used to be disabled while anything was left
+    // to fix; now pressing it brings the list of what is left into view,
+    // the way Continue reveals a step's errors.
+    if (blocking.length > 0) {
+      const list = document.querySelector("[data-review-problems]");
+      list?.scrollIntoView({ block: "center", behavior: reduceMotion ? "auto" : "smooth" });
+      list?.focus({ preventScroll: true });
+      return;
+    }
     if (!isSignedIn) {
       savePending({ config, plan, annual, extras });
       navigate?.(ROUTES.signUp);
@@ -678,16 +716,20 @@ export default function Wizard({ onExit, navigate }) {
                   </div>
                 </div>
 
-                {/* onDownload is the Review step's; every other step
-                    ignores it. Without it that step rendered no download
-                    button at all, and the "that's your system" panel
-                    below — which waits on `downloaded` — could never
-                    appear. */}
+                {/* onDownload, problems, onJump, downloaded, signedIn and
+                    trialDays are the Review step's; every other step
+                    ignores them. Without onDownload that step rendered no
+                    download link at all. */}
                 <StepForm
                   config={config}
                   update={update}
                   errors={visibleErrors}
                   onDownload={download}
+                  downloaded={downloaded}
+                  problems={reviewProblems}
+                  onJump={goTo}
+                  signedIn={isSignedIn}
+                  trialDays={trialDays}
                   pricing={{
                     extras,
                     setExtras,
@@ -722,77 +764,12 @@ export default function Wizard({ onExit, navigate }) {
               </motion.div>
             </AnimatePresence>
 
-            {isLast && blocking.length > 0 && (
-              <Notice tone="error" className="mt-4">
-                <span className="font-medium">Not ready to provision.</span>
-                <ul className="mt-1.5 space-y-1">
-                  {blocking.map(([path, message]) => {
-                    const home = STEPS.find((s) => s.fields?.some((field) => owns(field, path)));
-                    return (
-                      <li key={path}>
-                        {message}
-                        {home && <span className="text-ink-muted"> — {home.title}</span>}
-                      </li>
-                    );
-                  })}
-                </ul>
-              </Notice>
-            )}
-
-            {/*
-              The end of the process, not just the end of the form.
-              "Profile downloaded" told a buyer the browser had saved a
-              file and nothing about what they were supposed to do with
-              it — so the last thing the configurator did was leave them
-              holding an artefact with no next move.
-            */}
-            {isLast && downloaded && blocking.length === 0 && (
-              <motion.div
-                {...panelEnter()}
-                className="mt-6 rounded-xl border-2 p-6"
-                style={{
-                  borderColor: "rgb(var(--c-state-available) / 0.35)",
-                  background: "rgb(var(--c-state-available) / 0.06)",
-                }}
-              >
-                <div className="flex items-center gap-2.5">
-                  <CircleCheck size={20} style={{ color: "rgb(var(--c-state-available))" }} />
-                  <h3 className="text-xl font-extrabold tracking-tight">That's your system.</h3>
-                </div>
-                <p className="mt-2 text-ink-secondary">
-                  The file is in your downloads. Here's what happens next.
-                </p>
-
-                <ol className="mt-5 space-y-4">
-                  {[
-                    ["Send us the file.", "Email it to hello@silla.app and say when you'd like to go live."],
-                    ["We provision it.", "Your deployment is built from exactly what you configured — same names, same colours, same floors. Usually same day."],
-                    ["You get your keys.", "A link, a superadmin login, and the card format for your readers. Everything after that is yours to change."],
-                  ].map(([title, body], i) => (
-                    <li key={title} className="flex gap-3.5">
-                      <span
-                        className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-[10px] text-xs font-bold"
-                        style={{
-                          background: "rgb(var(--c-state-available))",
-                          color: "rgb(var(--c-bg-card))",
-                        }}
-                      >
-                        {i + 1}
-                      </span>
-                      <span>
-                        <span className="font-bold">{title}</span>{" "}
-                        <span className="text-ink-secondary">{body}</span>
-                      </span>
-                    </li>
-                  ))}
-                </ol>
-
-                <p className="mt-5 text-sm text-ink-muted">
-                  Changed your mind about something? Step back, edit it, and download again — the file
-                  you send is the one that gets built.
-                </p>
-              </motion.div>
-            )}
+            {/* What still stops the order is listed at the top of the
+                Review step, with a way to each step that fixes it. It was
+                listed here too, as "Not ready to provision", and followed
+                by a "That's your system" panel that told the buyer to email
+                the downloaded file to an address that did not exist —
+                saving to the account is the order now. */}
 
             {/* Below lg the quote follows the questions, above the floating
                 bar's resting place, so it is read before Continue. */}
@@ -876,7 +853,6 @@ export default function Wizard({ onExit, navigate }) {
                       icon={isSignedIn ? Send : UserPlus}
                       loading={saving}
                       onClick={saveToAccount}
-                      disabled={blocking.length > 0}
                     >
                       {isSignedIn ? "Save to my account" : "Create an account to save"}
                     </Button>
