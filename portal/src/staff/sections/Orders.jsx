@@ -506,6 +506,11 @@ function FloorThumb({ floor, branding }) {
   const card = hexOr(branding?.surface?.card, "#1B232D");
   const accent = hexOr(branding?.primaryColor, "#E07A5F");
   const pad = 0.6;
+  // A floor with nothing on it yet (the buyer turned the starter layout
+  // off) was a solid dark block. Its grid is drawn instead, as dots, and
+  // it says it is empty.
+  const empty = !(floor.resources || []).length && !(floor.zones || []).length;
+  const dots = `dots-${String(floor.name || "floor").replace(/[^a-z0-9]/gi, "")}-${cols}x${rows}`;
   return (
     <svg
       viewBox={`${-pad} ${-pad} ${cols + pad * 2} ${rows + pad * 2}`}
@@ -515,6 +520,28 @@ function FloorThumb({ floor, branding }) {
       role="img"
       aria-label={`${floor.name}: a ${cols} by ${rows} grid with ${(floor.resources || []).length} pieces`}
     >
+      {empty && (
+        <>
+          <defs>
+            <pattern id={dots} width={1} height={1} patternUnits="userSpaceOnUse">
+              <circle cx={0.5} cy={0.5} r={0.07} fill={accent} fillOpacity={0.45} />
+            </pattern>
+          </defs>
+          <rect x={0} y={0} width={cols} height={rows} rx={0.3} fill={card} />
+          <rect x={0} y={0} width={cols} height={rows} rx={0.3} fill={`url(#${dots})`} />
+          <text
+            x={cols / 2}
+            y={rows / 2}
+            textAnchor="middle"
+            dominantBaseline="middle"
+            fontSize={Math.max(0.8, Math.min(cols, rows) / 9)}
+            fontWeight={600}
+            fill={accent}
+          >
+            No furniture yet
+          </text>
+        </>
+      )}
       {(floor.zones || []).map((z, i) => (
         <rect key={`z${i}`} x={z.bounds.col} y={z.bounds.row} width={z.bounds.w} height={z.bounds.h} rx={0.35} fill={card} />
       ))}
@@ -842,10 +869,14 @@ function HistoryPanel({ order }) {
               <StatusBadge status={h.status} />
               <span className="text-xs text-ink-muted">{dateTime(h.at)}</span>
             </div>
-            <p className="mt-1 text-sm text-ink-secondary">
-              {h.note || "—"}
-              {h.by?.name ? <span className="text-ink-muted"> · {h.by.name}</span> : null}
-            </p>
+            {/* A step with no note read "— · Ops Demo": a bare dash
+                standing in for nothing. */}
+            {(h.note || h.by?.name) && (
+              <p className="mt-1 text-sm text-ink-secondary">
+                {h.note}
+                {h.by?.name ? <span className="text-ink-muted">{h.note ? ` · ${h.by.name}` : `By ${h.by.name}`}</span> : null}
+              </p>
+            )}
           </li>
         ))}
       </ol>

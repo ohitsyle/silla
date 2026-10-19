@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { Activity, ArrowRight, ArrowUpRight, Inbox, MessagesSquare, Receipt, Server, ShoppingBag } from "lucide-react";
+import { Activity, ArrowRight, ArrowUpRight, Banknote, Inbox, MessagesSquare, Receipt, Server, ShoppingBag } from "lucide-react";
 
 import { Notice, Panel, Skeleton } from "../../components/ui.jsx";
 import { StatusBadge, planLabel } from "../../account/shared.jsx";
@@ -92,6 +92,7 @@ export default function Overview({ navigate, me, can, refreshBadges }) {
     conversations.unread ? `${count(conversations.unread, "customer")} waiting on a reply` : null,
     deployments.syncErrors ? `${count(deployments.syncErrors, "system")} not hearing their plan` : null,
     billing?.overdueInvoices ? `${count(billing.overdueInvoices, "invoice")} overdue` : null,
+    billing?.claimsToCheck ? `${count(billing.claimsToCheck, "payment")} to check` : null,
   ].filter(Boolean);
 
   const subscriptionRows = billing
@@ -110,6 +111,28 @@ export default function Overview({ navigate, me, can, refreshBadges }) {
           {headline.length ? `${headline.join(", ")}.` : "Nothing is waiting on anyone. Everything submitted is built, and every customer has an answer."}
         </p>
       </div>
+
+      {/* A buyer's "I've paid" waits for someone to find the money. It
+          used to be visible only on the Invoices section's own tab. */}
+      {billing?.claimsToCheck > 0 && (
+        <a
+          href={withQuery(`${ROUTES.staff}/invoices`, { tab: "claimed" })}
+          onClick={go(navigate, withQuery(`${ROUTES.staff}/invoices`, { tab: "claimed" }))}
+          className="flex items-center gap-3 rounded-xl border px-4 py-3 transition-colors hover:border-line/25"
+          style={{ borderColor: "rgb(var(--c-accent) / 0.35)", background: "rgb(var(--c-accent) / 0.07)" }}
+        >
+          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-[10px]" style={{ background: "var(--color-accent)", color: "var(--color-accent-ink)" }}>
+            <Banknote size={16} strokeWidth={2.4} />
+          </span>
+          <span className="min-w-0 flex-1 text-sm">
+            <span className="font-semibold">
+              {billing.claimsToCheck === 1 ? "A buyer says they've paid" : `${billing.claimsToCheck} buyers say they've paid`}
+            </span>
+            <span className="text-ink-secondary"> — check it against your statement, then record the payment.</span>
+          </span>
+          <ArrowRight size={16} className="shrink-0 text-ink-muted" />
+        </a>
+      )}
 
       <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
         <Tile

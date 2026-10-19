@@ -33,6 +33,7 @@ import AuditEvent from "../models/AuditEvent.js";
 // Read for display only — billing owns these (services/billing.js).
 import Subscription from "../models/Subscription.js";
 import Invoice from "../models/Invoice.js";
+import { NUMBERED } from "../services/billing.js";
 import { requireAccount } from "../middleware/auth.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 import { STAFF_ROLES, can, permissionsOf, requirePermission, staffRoleOf } from "../middleware/staff.js";
@@ -209,18 +210,23 @@ router.get(
 
     let billing = null;
     if (can(req.account, "billing.read")) {
-      const [subs, overdue] = await Promise.all([
+      const [subs, overdue, claimsToCheck] = await Promise.all([
         Subscription.aggregate([{ $group: { _id: "$status", n: { $sum: 1 } } }]),
         // `overdue` is computed from the clock, never stored (models/Invoice.js).
         Invoice.aggregate([
           { $match: { status: "open", dueAt: { $lt: now } } },
           { $group: { _id: "$currency", n: { $sum: 1 }, total: { $sum: "$total" } } },
         ]),
+        // A buyer's "I've paid", waiting for someone to find the money — the
+        // same filter as the Invoices section's "Claims to check" tab. It was
+        // only on that tab, so a claim sat unseen behind a quiet overview.
+        Invoice.countDocuments({ status: "open", "claimedPayment.submittedAt": { $ne: null }, "claimedPayment.dismissedAt": null, ...NUMBERED }),
       ]);
       billing = {
         subscriptions: Object.fromEntries(subs.map((r) => [r._id, r.n])),
         overdueInvoices: overdue.reduce((sum, r) => sum + r.n, 0),
         overdueByCurrency: overdue.map((r) => ({ currency: r._id, count: r.n, total: r.total })),
+        claimsToCheck,
       };
     }
 

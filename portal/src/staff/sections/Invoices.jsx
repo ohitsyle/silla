@@ -397,10 +397,24 @@ function InvoiceDetail({ id, navigate, can }) {
           <Panel icon={BellRing} title="Emails sent">
             <div className="divide-y divide-line/[0.07]">
               <Row label="Invoice">{inv.reminders?.issuedEmailAt ? dateTime(inv.reminders.issuedEmailAt) : "—"}</Row>
-              <Row label="Due soon">{inv.reminders?.dueSoonAt ? dateTime(inv.reminders.dueSoonAt) : "Not yet"}</Row>
-              <Row label="Overdue">{inv.reminders?.overdueAt ? dateTime(inv.reminders.overdueAt) : "Not yet"}</Row>
+              {inv.status !== "paid" && (
+                <>
+                  <Row label="Due soon">{inv.reminders?.dueSoonAt ? dateTime(inv.reminders.dueSoonAt) : "Not yet"}</Row>
+                  <Row label="Overdue">{inv.reminders?.overdueAt ? dateTime(inv.reminders.overdueAt) : "Not yet"}</Row>
+                </>
+              )}
+              {/* The receipt the "receipt emailed" toast promised was not
+                  listed anywhere. Invoices paid before it was recorded show
+                  a dash. */}
+              {inv.status === "paid" && (
+                <Row label="Receipt">{inv.reminders?.receiptEmailAt ? dateTime(inv.reminders.receiptEmailAt) : "—"}</Row>
+              )}
             </div>
-            <p className="mt-2 text-xs text-ink-muted">Each goes out once. The billing job decides when.</p>
+            <p className="mt-2 text-xs text-ink-muted">
+              {/^TEST-/.test(inv.number || "")
+                ? "A test account: these are recorded, but nothing is delivered to its address."
+                : "Each goes out once. The billing job decides when."}
+            </p>
           </Panel>
         </div>
       </div>

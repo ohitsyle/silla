@@ -228,6 +228,9 @@ export async function run(check) {
       invAfterClaim?.status === "open" && afterClaim?.status === "pending", `${invAfterClaim?.status} / ${afterClaim?.status}`);
     const waiting = await get("/api/vendor/billing/invoices?claimed=1", OWNER);
     check("BIL-5", "Staff see it among the claims waiting", (waiting.body?.invoices || []).some((i) => i.id === String(firstA?._id)));
+    const overviewWithClaim = await get("/api/vendor/staff/overview", OWNER);
+    check("BIL-5", "…and the console's overview counts it among the payments to check",
+      overviewWithClaim.body?.billing?.claimsToCheck >= 1, JSON.stringify(overviewWithClaim.body?.billing?.claimsToCheck));
 
     /* ── provisioning: trial, and a sync that cannot reach anyone ── */
     let provisioned = null;
@@ -271,6 +274,9 @@ export async function run(check) {
       byBilling.body?.invoice?.payment?.note === paymentNote && paidForStaff.body?.invoice?.payment?.note === paymentNote,
       paidForStaff.body?.invoice?.payment?.note);
     check("BIL-8", "…and never reaches the buyer", paidForBuyer.status === 200 && !JSON.stringify(paidForBuyer.body).includes(paymentNote));
+    check("BIL-8", "The receipt is listed among the emails sent for the invoice",
+      Boolean(byBilling.body?.invoice?.reminders?.receiptEmailAt) && Boolean(paidForStaff.body?.invoice?.reminders?.receiptEmailAt),
+      JSON.stringify(paidForStaff.body?.invoice?.reminders));
 
     const paid = await Subscription.findById(subA._id);
     check("BIL-9", "Recording the payment activates the subscription", paid?.status === "active", paid?.status);
