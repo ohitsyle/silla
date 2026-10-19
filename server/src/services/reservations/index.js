@@ -424,8 +424,17 @@ export async function reservationAvailability({ organizationId, resourceId, unit
  * An option the room does not have is left out rather than refused:
  * `whole` is null for a room booked one unit at a time, and `units` is
  * empty for a room booked only whole.
+ *
+ * Asked by a signed-in member (`memberId`), the answer also carries `you`:
+ * null when they may take this window, else why not — they already hold
+ * a session now or a booking ahead, or it overlaps their own (RES-3). The
+ * panel used to answer for the SPACE only, so a member holding a booking
+ * for later read "Free for this time · Book it" and was refused one
+ * screen on. Their limit is the same for everything in the room, so it is
+ * said once, beside the space's own answers, which stay true: the room IS
+ * free, they just can't take it as well.
  */
-export async function roomBookingOptions({ organizationId, roomId, startTime, endTime }) {
+export async function roomBookingOptions({ organizationId, roomId, startTime, endTime, memberId = null }) {
   const org = await Organization.findById(organizationId);
   if (!org) throw new ReservationError("Organization not found", 404);
   const room = await Room.findOne({ _id: roomId, organization: organizationId });
@@ -444,7 +453,7 @@ export async function roomBookingOptions({ organizationId, roomId, startTime, en
     whole: room.bookingMode === "individual" ? null : refusal(err),
     units: candidates.map((candidate) => ({ ...describe(candidate), ...refusal(err) })),
   });
-  const shaped = (whole, units) => ({ roomId: String(room._id), bookingMode: room.bookingMode, whole, units });
+  const shaped = (whole, units, you = null) => ({ roomId: String(room._id), bookingMode: room.bookingMode, whole, units, you });
 
   // ── Rules that apply to everything in the room alike ──
   let window;
@@ -510,7 +519,20 @@ export async function roomBookingOptions({ organizationId, roomId, startTime, en
     return { ...describe(candidate), ...(problem ? refusal(problem) : { bookable: true }) };
   });
 
-  return shaped(whole, units);
+  // ── What the member asking may hold, the same for everything here ──
+  let you = null;
+  if (memberId) {
+    const now = new Date();
+    const standing = await memberStanding(memberId, { organizationId, now, graceMinutes: graceOf(org) });
+    try {
+      assertMayHold(standing, { ...window, now, graceMinutes: graceOf(org), noun: nounOf(org) });
+    } catch (err) {
+      if (!(err instanceof ReservationError)) throw err;
+      you = refusal(err);
+    }
+  }
+
+  return shaped(whole, units, you);
 }
 
 /** One unit inside a room, as the room panel lists it. */

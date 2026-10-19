@@ -98,15 +98,17 @@ router.get("/availability", requireAuth, asyncHandler(async (req, res) => {
  * What one room offers for a window, for the member's room panel: the
  * room as a whole (null when it is only booked unit by unit) and every
  * bookable unit inside it on every level, each with whether it is free
- * and, if not, why. One request instead of one per unit — a room of
- * twenty desks must not cost twenty round trips. Guidance only, like
- * /availability above.
+ * and, if not, why — and `you`, whether the CALLER may take that window on
+ * top of what they already hold (RES-3), so the panel never offers "Book
+ * it" to someone the claim will refuse. One request instead of one per
+ * unit — a room of twenty desks must not cost twenty round trips.
+ * Guidance only, like /availability above.
  */
 router.get("/rooms/:roomId/options", requireAuth, asyncHandler(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.roomId)) return res.status(400).json({ error: "Invalid room id" });
   const { startTime, endTime } = req.query;
   res.json(await roomBookingOptions({
-    organizationId: req.user.organizationId, roomId: req.params.roomId, startTime, endTime,
+    organizationId: req.user.organizationId, roomId: req.params.roomId, startTime, endTime, memberId: req.user.id,
   }));
 }));
 

@@ -27,6 +27,12 @@ import WhenFields from "./WhenFields.jsx";
  * the floor's day for the window's date): when the room itself is booked,
  * and when something inside it is — either way it cannot be taken whole
  * then. Tapping its free time sets the window for everything below.
+ *
+ * The answer also says whether the MEMBER may take that time (`you`): one
+ * session now and one booking ahead, never overlapping (RES-3). When they
+ * may not, the panel says why once and offers nothing to press — it used
+ * to show "Free for this time · Book it" and let the next screen refuse.
+ * What is free stays visible, because it still is.
  */
 export default function RoomPanel({
   room,
@@ -74,6 +80,9 @@ export default function RoomPanel({
 
   const allowsWhole = room.bookingMode !== "individual";
   const allowsUnits = room.bookingMode !== "whole";
+  const busy = loading || (!options && Boolean(booking.iso));
+  // The member's own limit for this time — the same for every option here.
+  const you = booking.iso && !busy ? options?.you || null : null;
   const levelNames = room.levels.map((level) => levelName(level, floors));
   const wholeDay = allowsWhole ? entryFor(day, room.resourceId, "room") : null;
 
@@ -106,13 +115,15 @@ export default function RoomPanel({
         </h3>
 
         {error && <Notice tone="error">{error}</Notice>}
+        {you && <Notice>{memberReason(you)}</Notice>}
 
         {allowsWhole && (
           <WholeRoomOption
             room={room}
             answer={options?.whole}
-            loading={loading || (!options && Boolean(booking.iso))}
+            loading={busy}
             waitingForTime={!booking.iso}
+            blocked={Boolean(you)}
             onChoose={onBookRoom}
           />
         )}
@@ -122,8 +133,9 @@ export default function RoomPanel({
             room={room}
             levelNames={levelNames}
             units={options?.units}
-            loading={loading || (!options && Boolean(booking.iso))}
+            loading={busy}
             waitingForTime={!booking.iso}
+            blocked={Boolean(you)}
             resourceNoun={resourceNoun}
             onPick={onPickUnit}
             onHover={onHoverUnit}
@@ -181,7 +193,7 @@ function OptionCard({ icon: Icon, title, body, children }) {
   );
 }
 
-function WholeRoomOption({ room, answer, loading, waitingForTime, onChoose }) {
+function WholeRoomOption({ room, answer, loading, waitingForTime, blocked, onChoose }) {
   const levels = room.levels.length;
   return (
     <OptionCard
@@ -193,6 +205,11 @@ function WholeRoomOption({ room, answer, loading, waitingForTime, onChoose }) {
         <p className="text-sm text-ink-muted">Choose a time above to see if it's free.</p>
       ) : loading ? (
         <Skeleton className="h-10 w-full" />
+      ) : answer?.bookable && blocked ? (
+        <p className="flex items-start gap-1.5 text-sm text-ink-secondary">
+          <Check size={15} className="mt-0.5 shrink-0 text-state-available" />
+          <span>Free for this time — see above for why you can't book it.</span>
+        </p>
       ) : answer?.bookable ? (
         <button
           type="button"
@@ -223,7 +240,7 @@ function WholeRoomOption({ room, answer, loading, waitingForTime, onChoose }) {
  * ambiguous. Hovering or focusing one outlines it on the map, which is
  * what tells two identical rows apart.
  */
-function UnitsOption({ room, levelNames, units, loading, waitingForTime, resourceNoun, onPick, onHover }) {
+function UnitsOption({ room, levelNames, units, loading, waitingForTime, blocked, resourceNoun, onPick, onHover }) {
   const pieces = useMemo(() => groupByPiece(room, units || []), [room, units]);
   const free = (units || []).filter((unit) => unit.bookable).length;
   const multiLevel = room.levels.length > 1;
@@ -256,7 +273,14 @@ function UnitsOption({ room, levelNames, units, loading, waitingForTime, resourc
               </span>
               <span className="flex flex-wrap gap-1.5">
                 {piece.units.map((unit) => (
-                  <UnitChip key={unit.unitLabel} unit={unit} resourceNoun={resourceNoun} onPick={onPick} onHover={onHover} />
+                  <UnitChip
+                    key={unit.unitLabel}
+                    unit={unit}
+                    blocked={blocked}
+                    resourceNoun={resourceNoun}
+                    onPick={onPick}
+                    onHover={onHover}
+                  />
                 ))}
               </span>
             </li>
@@ -267,10 +291,28 @@ function UnitsOption({ room, levelNames, units, loading, waitingForTime, resourc
   );
 }
 
-/** A unit inside the room: a button when it is free, a struck-through label when it is not. */
-function UnitChip({ unit, resourceNoun, onPick, onHover }) {
+/**
+ * A unit inside the room: a button when it is free, a struck-through label
+ * when it is not — and, when it is free but the member can't take another
+ * booking for this time (`blocked`), a plain label that still says free.
+ */
+function UnitChip({ unit, blocked, resourceNoun, onPick, onHover }) {
   const name = `${unit.typeLabel} · ${unit.unitLabel}`;
   const hover = () => onHover?.(unit);
+  if (unit.bookable && blocked) {
+    return (
+      <span
+        aria-label={`${name}: free for this time, but you can't book it right now`}
+        onMouseEnter={hover}
+        className="inline-flex h-8 min-w-[2.5rem] items-center justify-center gap-1 rounded-md border px-2 text-xs
+                   text-ink-secondary"
+        style={{ borderColor: "rgb(var(--c-state-available) / 0.3)" }}
+      >
+        <Check size={12} className="shrink-0 text-state-available" />
+        {unit.unitLabel}
+      </span>
+    );
+  }
   if (!unit.bookable) {
     return (
       <span

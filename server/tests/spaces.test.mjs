@@ -340,6 +340,26 @@ try {
       withSeat.units.find((unit) => unit.resourceId === desk.id && unit.unitLabel === "1")?.code === "CONFLICT"
   );
 
+  // The member who holds that desk asks about the same room later that day:
+  // the room is free then, but they already hold their one booking ahead.
+  // The panel must say so before "Book it", in the claim's own words, not
+  // offer the room and let the next screen refuse (RES-3).
+  const afternoon = { startTime: new Date(+when + 4 * HOUR), endTime: new Date(+when + 5 * HOUR) };
+  const theirs = await roomBookingOptions({ organizationId: org._id, roomId: room.id, ...afternoon, memberId: members[0]._id });
+  const theirsAlone = await reservationAvailability({
+    organizationId: org._id, resourceId: room.resourceId, unitLabel: "room", ...afternoon, memberId: members[0]._id,
+  });
+  check(
+    "the room panel tells a member holding a booking ahead that they can't take another, before Book it",
+    theirs.whole?.bookable === true && theirs.you?.bookable === false && theirs.you?.code === "ALREADY_HOLDING" &&
+      theirsAlone.code === "ALREADY_HOLDING" && theirs.you.error === theirsAlone.error
+  );
+  const someoneElse = await roomBookingOptions({ organizationId: org._id, roomId: room.id, ...afternoon, memberId: members[1]._id });
+  check("…while a member holding nothing is offered the room as before", someoneElse.whole?.bookable === true && someoneElse.you === null);
+  const afternoonQuery = `startTime=${afternoon.startTime.toISOString()}&endTime=${afternoon.endTime.toISOString()}`;
+  const theirsOverHttp = await call(`/api/reservations/rooms/${room.id}/options?${afternoonQuery}`, "GET", null, 200, members[0]);
+  check("…and the panel's request answers for the member who asks", theirsOverHttp.you?.code === "ALREADY_HOLDING");
+
   const schedule = await call("/api/admin/resources/" + room.resourceId + "/history", "GET", null, 200, staff);
   check(
     "room schedule includes individual resource reservations",
