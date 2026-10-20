@@ -195,9 +195,10 @@ export function MyReservation({ reservation, resourceNoun = "resource", policy, 
   const upcoming = reservation.phase === "upcoming";
   const heading = !held ? "You're checked in" : upcoming ? "Coming up" : "Your reservation now";
   const badge = !held ? "Checked in" : upcoming ? "Booked" : "Now";
-  const title = reservation.roomId
-    ? reservation.resourceLabel
-    : `${reservation.resourceLabel || resourceNoun} · ${reservation.unitLabel}`;
+  // The name the map uses for it now — "Long Table 2 · Seat 3", or the room.
+  const title =
+    reservation.label ||
+    (reservation.roomId ? reservation.resourceLabel : `${reservation.resourceLabel || resourceNoun} · ${reservation.unitLabel}`);
 
   const cancel = async () => {
     setBusy(true);
@@ -238,8 +239,11 @@ export function MyReservation({ reservation, resourceNoun = "resource", policy, 
         style={{ borderColor: "rgb(var(--c-accent) / 0.3)", background: "rgb(var(--c-accent) / 0.05)" }}
       >
         <div className="flex items-center gap-2.5">
-          <CalendarCheck size={16} className="shrink-0" style={{ color: "var(--color-accent)" }} />
-          <p className="min-w-0 flex-1 truncate text-sm">
+          <CalendarCheck size={16} className="mt-0.5 shrink-0 self-start" style={{ color: "var(--color-accent)" }} />
+          {/* Wraps rather than truncates: one line cut "You hold Long
+              Table · 3 · Mon 07:00 AM – 0…" at the time, the part that
+              says when. */}
+          <p className="min-w-0 flex-1 text-sm leading-snug">
             <span className="text-ink-muted">{!held ? "Checked in at " : upcoming ? "Coming up: " : "Now: "}</span>
             <span className="font-medium">{title}</span>
             <span className="text-ink-muted"> · {formatSpan(reservation.startTime, reservation.endTime)}</span>
@@ -270,7 +274,7 @@ export function MyReservation({ reservation, resourceNoun = "resource", policy, 
         </span>
         <div className="min-w-0 flex-1">
           <p className="text-xs font-medium uppercase tracking-wide text-ink-muted">{heading}</p>
-          <p className="mt-0.5 truncate font-semibold">{title}</p>
+          <p className="mt-0.5 break-words font-semibold">{title}</p>
           <p className="mt-1 flex items-center gap-1.5 text-sm text-ink-secondary">
             <Clock size={13} className="shrink-0" />
             {formatSpan(reservation.startTime, reservation.endTime)}

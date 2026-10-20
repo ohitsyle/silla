@@ -150,24 +150,50 @@ async function drain() {
 }
 
 /**
+ * Addresses that must never be handed to a real mail provider.
+ *
+ * The suites create accounts at @test.silla on every run, and every
+ * seeded demo organization holds admin@demo.test, staff@demo.test and
+ * member@demo.test. Once a live provider is configured those become real
+ * send attempts — three retries each, against a finite daily quota,
+ * every one of them bouncing and every bounce counting against the
+ * sender's reputation. Dropping them here rather than in each caller
+ * means a new test or a new seed cannot forget.
+ *
+ * RFC 2606 reserves the top-level domains .test, .example, .invalid and
+ * .localhost, and the second-level example.com, example.net and
+ * example.org, so that no real inbox can ever be behind them. Every one
+ * is refused, subdomains included (`ops@silla.test`, `a@mail.example.org`),
+ * along with our own @test.silla. Matching only `@example.com` and
+ * `@test.silla` let `admin@demo.test` through.
+ */
+const RESERVED_TLDS = new Set(["test", "example", "invalid", "localhost"]);
+const RESERVED_DOMAINS = ["test.silla", "example.com", "example.net", "example.org"];
+
+/** The domain of an address, lowercased — `"Ana" <ana@x.test>` included. */
+function domainOf(address) {
+  let value = String(address || "").trim();
+  const angled = /<([^<>]*)>\s*$/.exec(value);
+  if (angled) value = angled[1].trim();
+  const at = value.lastIndexOf("@");
+  return at < 0 ? "" : value.slice(at + 1).toLowerCase().replace(/\.+$/, "");
+}
+
+/** True for an address on a reserved test domain, which the transport drops. */
+export function isUndeliverable(address) {
+  const domain = domainOf(address);
+  if (!domain) return false;
+  if (RESERVED_TLDS.has(domain.split(".").pop())) return true;
+  return RESERVED_DOMAINS.some((reserved) => domain === reserved || domain.endsWith("." + reserved));
+}
+
+/**
  * Fire-and-forget. Returns void by design: a caller that awaits delivery
  * has reintroduced exactly the coupling spec §15 forbids.
  */
-/**
- * Addresses that must never be handed to a real mail provider.
- *
- * The suites create accounts at @test.silla on every run. Once a live
- * provider is configured those become real send attempts — three
- * retries each, against a finite daily quota, every one of them
- * bouncing and every bounce counting against the sender's reputation.
- * Dropping them here rather than in each caller means a new test cannot
- * forget.
- */
-const UNDELIVERABLE = /@test\.silla$|@example\.(com|org|net)$/i;
-
 export function sendEmail({ to, subject, text, html, fromName }) {
   if (!to) return;
-  if (UNDELIVERABLE.test(to)) return;
+  if (isUndeliverable(to)) return;
   queue.push({ to, subject, text, html, fromName, attempts: 0 });
   // Detached on purpose — drain() swallows its own errors.
   drain();

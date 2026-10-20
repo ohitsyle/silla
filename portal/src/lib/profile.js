@@ -438,7 +438,7 @@ export function validate(config) {
   const add = (field, message) => problems.push({ field, message });
 
   if (!text(config?.organizationName)) {
-    add("organizationName", "Enter the organization's name — it brands the whole deployment.");
+    add("organizationName", "Enter the organization's name — it appears on every screen and email.");
   }
 
   // The founding superadmin. Required, because the alternative is not
@@ -450,7 +450,7 @@ export function validate(config) {
   if (!text(owner.lastName)) add("owner.lastName", "Enter their last name.");
   const ownerEmail = text(owner.email);
   if (!ownerEmail) {
-    add("owner.email", "Enter their email — the founding sign-in details are sent there.");
+    add("owner.email", "Enter their email — their sign-in details are sent there.");
   } else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ownerEmail)) {
     add("owner.email", "That does not look like an email address.");
   }
@@ -490,8 +490,8 @@ export function validate(config) {
 
   const open = text(policy.openTime ?? policy.operatingHours?.open);
   const close = text(policy.closeTime ?? policy.operatingHours?.close);
-  if (!TIME_RE.test(open)) add("policy.openTime", "Opening time must be a 24-hour HH:mm value, e.g. 08:00.");
-  if (!TIME_RE.test(close)) add("policy.closeTime", "Closing time must be a 24-hour HH:mm value, e.g. 19:00.");
+  if (!TIME_RE.test(open)) add("policy.openTime", "Enter an opening time, such as 08:00.");
+  if (!TIME_RE.test(close)) add("policy.closeTime", "Enter a closing time, such as 19:00.");
   if (TIME_RE.test(open) && TIME_RE.test(close) && minutesOf(open) >= minutesOf(close)) {
     // Overnight hours would need a per-site timezone and a day-rollover
     // rule that the reservation engine does not have yet.
@@ -505,19 +505,22 @@ export function validate(config) {
   const seenKeys = new Map();
   catalog.forEach((type, index) => {
     const key = text(type?.key);
+    // The key is derived from the label (CatalogStep), and its problems
+    // are shown on the label field — so they are said in terms of the
+    // name the buyer typed, never the key they cannot see.
     if (!key) {
-      add(`catalog.${index}.key`, "Every resource type needs a key.");
+      add(`catalog.${index}.key`, "Give this type a name.");
     } else if (!CATALOG_KEY_RE.test(key)) {
-      add(`catalog.${index}.key`, "Use lowercase letters, digits and underscores, starting with a letter (e.g. hot_desk).");
+      add(`catalog.${index}.key`, "Start the name with a letter.");
     } else if (seenKeys.has(key)) {
       // The catalog is uniquely indexed per organization server-side, so
       // a duplicate here fails the seed rather than the wizard.
-      add(`catalog.${index}.key`, `"${key}" is already used by another resource type.`);
+      add(`catalog.${index}.key`, "Another type already has this name.");
     } else {
       seenKeys.set(key, index);
     }
 
-    if (!text(type?.label)) add(`catalog.${index}.label`, "Every resource type needs a display name.");
+    if (!text(type?.label)) add(`catalog.${index}.label`, "Give this type a name.");
 
     const { w, h } = footprintOf(type);
     for (const [axis, value] of [["w", w], ["h", h]]) {
@@ -553,7 +556,7 @@ export function validate(config) {
     const { cols, rows } = gridOf(floor);
     for (const [axis, value] of [["cols", cols], ["rows", rows]]) {
       if (!Number.isInteger(value) || value < GRID_MIN || value > GRID_MAX) {
-        add(`floors.${index}.${axis}`, `Grid ${axis} must be a whole number between ${GRID_MIN} and ${GRID_MAX}.`);
+        add(`floors.${index}.${axis}`, `${axis === "cols" ? "Columns" : "Rows"} must be a whole number from ${GRID_MIN} to ${GRID_MAX}.`);
       }
     }
   });
@@ -751,12 +754,10 @@ function defaultTermsText(config) {
     `${facility} — terms of use.`,
     "",
     `1. Your account is personal. Each ${member} reserves a ${resource} for their own use; reservations may not be made on behalf of anyone else.`,
-    `2. One active reservation at a time. Tap your card within ${plural(grace, "minute")} of the reservation starting, or the ${resource} is released for someone else.`,
+    `2. You may hold one reservation for now and one booked ahead, never overlapping. Tap your card within ${plural(grace, "minute")} of the reservation starting, or the ${resource} is released for someone else.`,
     `3. A session ends after ${plural(maxStay, "hour")} or at closing (${close}), whichever comes first. Tap out when you leave so the ${resource} frees up.`,
     `4. Your card is your credential. Report a lost card to staff immediately so it can be reissued and the old one invalidated.`,
     `5. Misuse — holding a ${resource} you are not using, sharing credentials, or repeated no-shows — may result in your access being suspended.`,
-    "",
-    "This text is configured per organization and can be edited by a superadmin in Settings.",
   ].join("\n");
 }
 

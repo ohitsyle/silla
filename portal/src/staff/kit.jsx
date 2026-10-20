@@ -330,7 +330,7 @@ export function OneTimePin({ open, onClose, title, subtitle, email, pin, deploym
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: 0.06 * i, duration: 0.25 }}
-                  className="grid h-14 w-11 place-items-center rounded-[12px] border-2 border-line/12 bg-bg-card font-mono text-2xl font-bold sm:h-16 sm:w-12"
+                  className="grid h-14 w-11 place-items-center rounded-[12px] border-2 border-line/[0.12] bg-bg-card font-mono text-2xl font-bold sm:h-16 sm:w-12"
                 >
                   {digit}
                 </motion.span>

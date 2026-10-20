@@ -47,7 +47,7 @@ export default function TerminologyStep({ config, update, errors }) {
     <Panel title="What things are called" icon={Type}>
       <div className="grid sm:grid-cols-3 gap-4">
         <Field
-          label="Resource noun"
+          label="A bookable thing is a…"
           name="resourceNoun"
           value={terminology.resourceNoun || ""}
           onChange={setTerm("resourceNoun")}
@@ -56,7 +56,7 @@ export default function TerminologyStep({ config, update, errors }) {
           hint="One bookable thing. Lowercase — the product capitalises it where it needs to."
         />
         <Field
-          label="Member noun"
+          label="A person who books is a…"
           name="memberNoun"
           value={terminology.memberNoun || ""}
           onChange={setTerm("memberNoun")}
@@ -65,7 +65,7 @@ export default function TerminologyStep({ config, update, errors }) {
           hint="One person who books. Also the word staff see in the console."
         />
         <Field
-          label="Facility label"
+          label="The place is called"
           name="facilityLabel"
           value={terminology.facilityLabel || ""}
           onChange={setTerm("facilityLabel")}
@@ -88,9 +88,8 @@ export default function TerminologyStep({ config, update, errors }) {
       </div>
 
       <p className="text-xs text-ink-muted mt-4">
-        These three words are the only place a vertical is named. Nothing in the product hardcodes
-        “seat” or “student”, which is what lets one deployment be a reading room and the next a
-        workplace without a branch.
+        Every screen, email and kiosk prompt takes its words from these three, so the same product
+        can be a reading room for one organization and an office for the next.
       </p>
     </Panel>
   );

@@ -147,6 +147,12 @@ const invoiceSchema = new mongoose.Schema(
       issuedEmailAt: { type: Date, default: null },
       dueSoonAt: { type: Date, default: null },
       overdueAt: { type: Date, default: null },
+      /**
+       * The payment receipt, stamped when it is handed to the mail queue —
+       * so staff can see it beside the invoice email instead of taking the
+       * "receipt emailed" toast on trust.
+       */
+      receiptEmailAt: { type: Date, default: null },
     },
   },
   { timestamps: true }

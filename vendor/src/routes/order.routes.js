@@ -28,7 +28,7 @@ const LEGACY_PLAN_NAMES = { room: "One Room", building: "Whole Building", campus
 export const planNameOf = (order) => order.planName || LEGACY_PLAN_NAMES[order.plan] || order.plan;
 
 /** A frozen quote's headline figures, for a list row — the whole quote is on the detail. */
-const totalsOf = (quote) =>
+export const totalsOf = (quote) =>
   quote?.totals
     ? {
         oneTime: quote.totals.oneTime,
@@ -315,7 +315,7 @@ router.post(
 
     // Both directions: the buyer gets a receipt, and we get told rather
     // than finding out when somebody refreshes the queue. Not for test
-    // buyers: the @test.silla guard in the transport checks only the
+    // buyers: the transport's reserved-domain guard checks only the
     // RECIPIENT, and this one goes to a real inbox.
     sendEmail(orderSubmittedEmail({ account: req.account, order }));
     if (process.env.SILLA_ORDERS_EMAIL && !isUndeliverable(req.account.email)) {

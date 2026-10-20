@@ -4,11 +4,22 @@ import {
   SquareMinus, SquarePlus, Trash2,
 } from "lucide-react";
 import { api } from "../lib/api.js";
+import { formatSpan } from "../lib/bookingWindow.js";
 import { regionAreas } from "../lib/cells.js";
 import { ROOM_MODE_ORDER, levelName, plural, roomMode } from "../lib/rooms.js";
 import { shapeSize } from "../lib/shapeWords.js";
 import ShapeGlyph from "./ShapeGlyph.jsx";
 import { Badge, Button, EmptyState, Field, Modal, Notice, Panel, Select } from "./ui/index.jsx";
+
+/** A reservation's state, said the way staff would say it — not the stored key. */
+const RESERVATION_WORDS = {
+  held: "Booked",
+  active: "Checked in",
+  completed: "Finished",
+  expired: "No-show",
+  released: "Released",
+  cancelled: "Cancelled",
+};
 
 /**
  * Rooms in the editor: the panel listing a floor's rooms, the dialog that
@@ -173,16 +184,17 @@ function ScheduleDialog({ room, onClose, onChanged, onError }) {
             const live = ["held", "active"].includes(reservation.status);
             return (
               <li key={reservation.id} className="rounded-md border border-line/10 p-3">
+                {/* "Today, 10:00 AM – 12:00 PM", not two raw timestamps
+                    ("10/19/2026, 10:00:00 AM" and "Until …"). */}
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm">{new Date(reservation.startTime).toLocaleString()}</span>
+                  <span className="text-sm font-medium">{formatSpan(reservation.startTime, reservation.endTime)}</span>
                   <Badge tone={reservation.status === "active" ? "occupied" : reservation.status === "held" ? "reserved" : undefined}>
-                    {reservation.status}
+                    {RESERVATION_WORDS[reservation.status] || reservation.status}
                   </Badge>
                 </div>
                 <p className="mt-1 text-sm text-ink-secondary">
                   {reservation.resourceLabel} · {reservation.member?.name || "Member"}
                 </p>
-                <p className="mt-1 text-xs text-ink-muted">Until {new Date(reservation.endTime).toLocaleString()}</p>
                 {live && (
                   <Button size="sm" variant="danger" className="mt-2" onClick={() => cancel(reservation)}>
                     Cancel reservation

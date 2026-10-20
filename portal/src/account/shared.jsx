@@ -76,7 +76,7 @@ export function BackLink({ onClick, children = "Back" }) {
 const STATUS_TONE = {
   draft: { bg: "var(--c-ink-muted)", label: "Draft" },
   submitted: { bg: "var(--c-state-reserved)", label: "Submitted" },
-  provisioning: { bg: "var(--c-state-reserved)", label: "Provisioning" },
+  provisioning: { bg: "var(--c-state-reserved)", label: "Being built" },
   live: { bg: "var(--c-state-available)", label: "Live" },
   cancelled: { bg: "var(--c-state-unavailable)", label: "Cancelled" },
 };
@@ -102,11 +102,20 @@ export const planLabel = (order) => order?.planName || PLAN_LABEL[order?.plan] |
 
 /**
  * What an order was quoted, per month — minor units, through the ONE
- * money formatter (lib/plans.js): "₱6,900/month", or "Priced with you".
+ * money formatter (lib/plans.js): "₱13,000/month", or "Priced with you".
  * This used to be its own formatter that assumed dollars, so every peso
  * order read "PHP 6900/month".
+ *
+ * The whole recurring cost when the order carries its frozen quote's
+ * totals (add-ons, rentals and support included); the plan's own price
+ * (`quotedAmount`) only for orders from before quotes were frozen. Shown
+ * the plan's price alone, a client paying ₱13,000 a month read
+ * "Building · ₱6,000/month" on their own client page.
  */
-export const quoteOf = (order) => formatMoney(order?.quotedAmount ?? null, { currency: order?.currency, period: "month" });
+export const quoteOf = (order) => {
+  const perMonth = Number.isInteger(order?.totals?.perMonth) && order?.totals?.perMonth > 0 ? order.totals.perMonth : null;
+  return formatMoney(perMonth ?? order?.quotedAmount ?? null, { currency: order?.currency, period: "month" });
+};
 
 export const when = (iso) =>
   iso ? new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "";

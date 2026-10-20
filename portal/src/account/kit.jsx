@@ -284,7 +284,7 @@ export function OtpInput({ value, onChange, onComplete, disabled, error, autoFoc
               ? "border-state-unavailable/70"
               : d
                 ? "border-line/30"
-                : "border-line/12 focus:border-[color:var(--color-accent)]"
+                : "border-line/[0.12] focus:border-[color:var(--color-accent)]"
           )}
         />
       ))}
@@ -391,6 +391,25 @@ export function AgreeToTerms({ checked, onChange, onOpenTerms, error }) {
  * avatar, because that's the one thing standing between them and
  * placing an order.
  */
+/**
+ * Where an account can go from its menu — staff work from the console;
+ * the buyer's pages are for buyers. Shared by the account menu and the
+ * storefront's phone menu, so the two can never offer different places.
+ */
+export function accountLinks({ isSilla, unread = 0 }) {
+  return isSilla
+    ? [
+        { icon: LayoutDashboard, label: "Staff console", to: ROUTES.staff },
+        { icon: UserRound, label: "Profile", to: ROUTES.account },
+      ]
+    : [
+        { icon: UserRound, label: "Profile", to: ROUTES.account },
+        { icon: Receipt, label: "My orders", to: ROUTES.orders },
+        { icon: CreditCard, label: "Billing", to: ROUTES.billing },
+        { icon: MessagesSquare, label: "Messages", to: ROUTES.messages, count: unread },
+      ];
+}
+
 export function AccountMenu({ navigate, tone = "light" }) {
   const { account, isSilla, isVerified, signOut } = useAccount();
   const { unread } = useUnreadMessages();
@@ -416,20 +435,7 @@ export function AccountMenu({ navigate, tone = "light" }) {
     navigate(to);
   };
 
-  // Staff work from the console; the buyer's pages are for buyers.
-  const items = (
-    isSilla
-      ? [
-          { icon: LayoutDashboard, label: "Staff console", to: ROUTES.staff },
-          { icon: UserRound, label: "Profile", to: ROUTES.account },
-        ]
-      : [
-          { icon: UserRound, label: "Profile", to: ROUTES.account },
-          { icon: Receipt, label: "My orders", to: ROUTES.orders },
-          { icon: CreditCard, label: "Billing", to: ROUTES.billing },
-          { icon: MessagesSquare, label: "Messages", to: ROUTES.messages, count: unread },
-        ]
-  ).filter(Boolean);
+  const items = accountLinks({ isSilla, unread });
 
   return (
     <div ref={ref} className="relative">

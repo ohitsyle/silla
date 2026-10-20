@@ -228,6 +228,9 @@ export async function run(check) {
       invAfterClaim?.status === "open" && afterClaim?.status === "pending", `${invAfterClaim?.status} / ${afterClaim?.status}`);
     const waiting = await get("/api/vendor/billing/invoices?claimed=1", OWNER);
     check("BIL-5", "Staff see it among the claims waiting", (waiting.body?.invoices || []).some((i) => i.id === String(firstA?._id)));
+    const overviewWithClaim = await get("/api/vendor/staff/overview", OWNER);
+    check("BIL-5", "…and the console's overview counts it among the payments to check",
+      overviewWithClaim.body?.billing?.claimsToCheck >= 1, JSON.stringify(overviewWithClaim.body?.billing?.claimsToCheck));
 
     /* ── provisioning: trial, and a sync that cannot reach anyone ── */
     let provisioned = null;
@@ -253,7 +256,8 @@ export async function run(check) {
     check("BIL-7", "The trial-ending reminder goes out once, however often the job runs", Boolean(warned) && +warned === +warnedAgain);
 
     /* ── who may record money ── */
-    const paymentBody = { method: "gcash", amount: firstA?.total, reference: "9012345678901", receivedAt: new Date().toISOString() };
+    const paymentNote = `Matched against the GCash statement ${tag}`;
+    const paymentBody = { method: "gcash", amount: firstA?.total, reference: "9012345678901", receivedAt: new Date().toISOString(), note: paymentNote };
     const bySupport = await post(`/api/vendor/billing/invoices/${firstA?._id}/payment`, paymentBody, SUPPORT);
     check("BIL-8", "Support staff cannot record a payment", bySupport.status === 403 && bySupport.body?.code === "STAFF_PERMISSION", `status ${bySupport.status}`);
     const supportList = await get("/api/vendor/billing/subscriptions", SUPPORT);
@@ -262,6 +266,17 @@ export async function run(check) {
     check("BIL-8", "Billing staff can", byBilling.status === 200 && byBilling.body?.invoice?.status === "paid", byBilling.body?.error);
     const twice = await post(`/api/vendor/billing/invoices/${firstA?._id}/payment`, paymentBody, BILLING);
     check("BIL-8", "The same invoice cannot be paid twice", twice.status === 409, `status ${twice.status}`);
+    // The internal note typed into "Record payment": kept, read back by
+    // staff on the invoice, and never part of what the buyer is sent.
+    const paidForStaff = await get(`/api/vendor/billing/invoices/${firstA?._id}`, OWNER);
+    const paidForBuyer = await get(`/api/vendor/billing/invoices/${firstA?._id}`, A);
+    check("BIL-8", "The payment's internal note is saved and shown to staff",
+      byBilling.body?.invoice?.payment?.note === paymentNote && paidForStaff.body?.invoice?.payment?.note === paymentNote,
+      paidForStaff.body?.invoice?.payment?.note);
+    check("BIL-8", "…and never reaches the buyer", paidForBuyer.status === 200 && !JSON.stringify(paidForBuyer.body).includes(paymentNote));
+    check("BIL-8", "The receipt is listed among the emails sent for the invoice",
+      Boolean(byBilling.body?.invoice?.reminders?.receiptEmailAt) && Boolean(paidForStaff.body?.invoice?.reminders?.receiptEmailAt),
+      JSON.stringify(paidForStaff.body?.invoice?.reminders));
 
     const paid = await Subscription.findById(subA._id);
     check("BIL-9", "Recording the payment activates the subscription", paid?.status === "active", paid?.status);

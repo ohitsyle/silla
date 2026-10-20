@@ -19,22 +19,8 @@ const PRESET_SKIP = new Set(["key", "label", "description", "organizationName", 
 /** App keys errors by the dotted field path validate() reports. */
 const errorFor = (errors, field) => errors?.[field];
 
-/**
- * The same slug rule `buildProfile` applies, so the key shown here is the
- * key the emitted profile will carry. It is displayed rather than edited
- * because the profile has no key field of its own to store an override
- * in — the organization name is the single source of it.
- */
-const slugify = (value) =>
-  String(value || "")
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 40)
-    .replace(/-+$/g, "");
+/** "1 starter floor", "2 starter floors". */
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 export default function DetailsStep({ config, update, errors }) {
   const applyPreset = (preset) => {
@@ -69,20 +55,13 @@ export default function DetailsStep({ config, update, errors }) {
             onChange={(e) => update({ siteName: e.target.value })}
             placeholder="Main Site"
             error={errorFor(errors, "siteName")}
-            hint="The building this deployment covers. Floors belong to it."
+            hint="Where your space is — a campus, a branch, an office. Your floors belong to it."
           />
         </div>
-
-        <div className="mt-4 rounded-md border border-line/10 bg-bg-panel px-4 py-3">
-          <span className="text-sm text-ink-secondary">Profile key</span>
-          <div className="font-mono text-sm text-ink-primary mt-0.5">
-            {slugify(config.organizationName) || "deployment"}
-          </div>
-          <span className="text-xs mt-1 block text-ink-muted">
-            How the provisioning script refers to this profile. Derived from the organization name so
-            the two can never disagree.
-          </span>
-        </div>
+        {/* The profile key used to be shown here as "how the provisioning
+            script refers to this profile" — SILLA's own bookkeeping, read
+            by the person buying. buildProfile still derives it from the
+            organization name; nobody buying needs to see it. */}
       </Panel>
 
       {/*
@@ -97,7 +76,7 @@ export default function DetailsStep({ config, update, errors }) {
       <Panel
         title="Who will run it"
         icon={UserCog}
-        subtitle="They become the first superadmin, and the only account your deployment starts with."
+        subtitle="They become your system's first administrator — the only account it starts with — and can add your staff from there."
       >
         <div className="grid gap-4 sm:grid-cols-2">
           <Field
@@ -133,9 +112,9 @@ export default function DetailsStep({ config, update, errors }) {
 
       <Panel title="Starting point" icon={Wand2}>
         <Notice>
-          A preset fills in terminology, identity, policy, the resource catalog and a starter
-          layout for that kind of space. Nothing it sets is locked — the steps after this one edit
-          all of it — and your organization and site names are left as you typed them.
+          A starting point fills in the words, the ID format, the rules, the furniture and a starter
+          layout for that kind of space. Nothing it sets is locked — the steps after this one change
+          any of it — and the names you typed above stay as they are.
         </Notice>
 
         <div className="grid sm:grid-cols-2 gap-3 mt-4">
@@ -145,8 +124,8 @@ export default function DetailsStep({ config, update, errors }) {
             const swatches = [branding.primaryColor, branding.surface?.card, branding.ink?.primary].filter(Boolean);
             const facts = [
               preset.terminology && `${preset.terminology.memberNoun} · ${preset.terminology.resourceNoun}`,
-              preset.catalog && `${preset.catalog.length} resource types`,
-              preset.floors && `${preset.floors.length} starter floors`,
+              preset.catalog && plural(preset.catalog.length, "resource type"),
+              preset.floors && plural(preset.floors.length, "starter floor"),
             ].filter(Boolean);
 
             return (

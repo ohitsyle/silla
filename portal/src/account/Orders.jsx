@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { ArrowRight, ExternalLink, MailWarning, MessagesSquare, PenLine, Plus, Send } from "lucide-react";
+import { ArrowRight, CreditCard, ExternalLink, MailWarning, MessagesSquare, PenLine, Plus, Send } from "lucide-react";
 
 import { Button, Card, Notice, Skeleton } from "../components/ui.jsx";
 import QuoteSummary from "../components/QuoteSummary.jsx";
@@ -136,6 +136,31 @@ function OrderDetail({ id, navigate }) {
         </Card>
       )}
 
+      {/* Where the money side lives. A submitted order used to say only
+          "With SILLA" — nothing about the invoice it had just issued, or
+          how to pay it, and no way to Billing from here. */}
+      {["submitted", "provisioning", "live"].includes(order.status) && (
+        <Card className="mt-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="mr-auto min-w-0">
+              <div className="font-semibold">
+                {order.status === "live" ? "Invoices and payment" : firstInvoice != null ? "Your first invoice" : "Your invoice"}
+              </div>
+              <p className="mt-0.5 text-sm text-ink-secondary">
+                {order.status === "live"
+                  ? "Every invoice for this system, and how to pay it, is on Billing."
+                  : firstInvoice != null
+                    ? `${formatMoney(firstInvoice, { currency: order.quote.currency, exact: true })} — it's on Billing, with how to pay it.`
+                    : "We'll send it once we've agreed the price with you, and it will appear on Billing."}
+              </p>
+            </div>
+            <Button icon={CreditCard} onClick={() => navigate(ROUTES.billing)}>
+              Go to Billing
+            </Button>
+          </div>
+        </Card>
+      )}
+
       {order.status === "draft" && (
         <Card className="mt-4">
           <div className="flex flex-wrap items-center gap-3">
@@ -205,7 +230,7 @@ function OrderDetail({ id, navigate }) {
               `${profile.terminology.resourceNoun} / ${profile.terminology.memberNoun}`],
             ["Member ID", profile.identity?.memberIdFormat],
             ["Floors", profile.floors?.length],
-            ["Catalog", profile.catalog?.length && `${profile.catalog.length} types`],
+            ["Catalog", profile.catalog?.length && `${profile.catalog.length} type${profile.catalog.length === 1 ? "" : "s"}`],
           ]
             .filter(([, v]) => v)
             .map(([label, value]) => (
@@ -347,11 +372,12 @@ export default function Orders({ id, navigate }) {
       {orders?.length === 0 && (
         <Card className="text-center">
           <p className="text-lg font-semibold">Nothing here yet.</p>
-          <p className="mt-2 text-ink-secondary">
-            Configure a system and it'll be saved here as a draft.
+          <p className="mx-auto mt-2 max-w-md text-ink-secondary">
+            Start by building your system in the configurator — about five minutes. Save it and it
+            appears here; nothing is charged until you submit it as an order.
           </p>
           <Button variant="primary" className="mt-6" onClick={() => navigate(ROUTES.configure)}>
-            Build one
+            Build your system
             <ArrowRight size={16} />
           </Button>
         </Card>

@@ -230,7 +230,7 @@ export default function WhiteLabel() {
           <motion.div {...reveal(0.1)}>
             <Mock brand={brand} />
             <p className="mt-5 text-center text-sm" style={{ color: "rgb(var(--m-ink-faint))" }}>
-              Same code, same database, same everything. Only the configuration differs.
+              Same product, same features, same everything. Only the settings differ.
             </p>
           </motion.div>
         </div>

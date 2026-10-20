@@ -5,7 +5,7 @@ import {
   UserRound,
 } from "lucide-react";
 
-import { Button, EmptyState, Modal, Notice, Skeleton, Textarea } from "../../components/ui.jsx";
+import { Button, EmptyState, LinkedText, Modal, Notice, Skeleton, Textarea } from "../../components/ui.jsx";
 import { SelectInput, TextInput } from "../../account/kit.jsx";
 import { StatusBadge } from "../../account/shared.jsx";
 import { staffApi } from "../../lib/staffApi.js";
@@ -202,7 +202,9 @@ function Message({ m, customer }) {
           <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.1em]" style={{ color: "rgb(var(--m-accent-deep, 192 92 68))" }}>
             <Lock size={12} strokeWidth={2.6} /> Internal note · only staff see this
           </div>
-          <p className="mt-1.5 whitespace-pre-line text-[15px] leading-relaxed">{m.body}</p>
+          <p className="mt-1.5 whitespace-pre-line text-[15px] leading-relaxed [overflow-wrap:anywhere]">
+            <LinkedText text={m.body} />
+          </p>
           <p className="mt-1.5 text-xs text-ink-muted">
             {m.authorName} · <time title={dateTime(m.createdAt)}>{dateTime(m.createdAt)}</time>
           </p>
@@ -219,11 +221,13 @@ function Message({ m, customer }) {
           <span className="font-semibold text-ink-secondary">{staff ? m.authorName : customer?.name || m.authorName}</span>
           {staff ? " · SILLA" : ""} · <time title={dateTime(m.createdAt)}>{dateTime(m.createdAt)}</time>
         </span>
+        {/* overflow-wrap: an unbroken address used to stretch a staff
+            bubble past the left edge of a phone (it grows leftwards). */}
         <div
-          className={`whitespace-pre-line rounded-2xl px-4 py-2.5 text-left text-[15px] leading-relaxed ${staff ? "rounded-tr-md" : "rounded-tl-md border border-line/10 bg-bg-card"}`}
+          className={`whitespace-pre-line rounded-2xl px-4 py-2.5 text-left text-[15px] leading-relaxed [overflow-wrap:anywhere] ${staff ? "rounded-tr-md" : "rounded-tl-md border border-line/10 bg-bg-card"}`}
           style={staff ? { background: "rgb(var(--c-accent) / 0.13)" } : undefined}
         >
-          {m.body}
+          <LinkedText text={m.body} />
         </div>
       </div>
     </motion.li>
@@ -560,6 +564,8 @@ export function ComposeDialog({ open, onClose, customer: fixedCustomer = null, o
   const [body, setBody] = useState("");
   const [fields, setFields] = useState({});
   const [busy, setBusy] = useState(false);
+  const subjectRef = useRef(null);
+  const searchRef = useRef(null);
 
   useEffect(() => {
     if (!open) return;
@@ -643,6 +649,7 @@ export function ComposeDialog({ open, onClose, customer: fixedCustomer = null, o
           <div>
             <TextInput
               label="Customer"
+              inputRef={searchRef}
               placeholder="Name, email or organization"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -656,7 +663,14 @@ export function ComposeDialog({ open, onClose, customer: fixedCustomer = null, o
                   <li key={c.id} className="border-b border-line/[0.07] last:border-0">
                     <button
                       type="button"
-                      onClick={() => setCustomer(c)}
+                      onClick={() => {
+                        setCustomer(c);
+                        // The list this button sits in goes away with the
+                        // choice, which would drop focus on the page behind.
+                        // The dialog focuses once, on opening, so it moves on
+                        // to the next thing to fill in here.
+                        requestAnimationFrame(() => subjectRef.current?.focus());
+                      }}
                       className="flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors hover:bg-line/[0.04]"
                     >
                       <Avatar name={c.name} email={c.email} size={30} />
@@ -675,7 +689,14 @@ export function ComposeDialog({ open, onClose, customer: fixedCustomer = null, o
           </div>
         )}
         {customer && !fixedCustomer && (
-          <button type="button" className="text-sm font-semibold text-ink-secondary underline underline-offset-2" onClick={() => setCustomer(null)}>
+          <button
+            type="button"
+            className="text-sm font-semibold text-ink-secondary underline underline-offset-2"
+            onClick={() => {
+              setCustomer(null);
+              requestAnimationFrame(() => searchRef.current?.focus());
+            }}
+          >
             Someone else
           </button>
         )}
@@ -689,7 +710,7 @@ export function ComposeDialog({ open, onClose, customer: fixedCustomer = null, o
             ))}
           </SelectInput>
         )}
-        <TextInput label="Subject" value={subject} onChange={(e) => setSubject(e.target.value)} error={fields.subject} maxLength={160} {...(customer ? { "data-autofocus": true } : {})} />
+        <TextInput label="Subject" inputRef={subjectRef} value={subject} onChange={(e) => setSubject(e.target.value)} error={fields.subject} maxLength={160} {...(customer ? { "data-autofocus": true } : {})} />
         <Textarea label="Message" rows={5} value={body} onChange={(e) => setBody(e.target.value)} error={fields.body} />
         <p className="text-xs text-ink-muted">
           It appears in their account under Messages, and they're emailed if they haven't read it within {QUIET_MINUTES} minutes. You'll be
@@ -715,7 +736,9 @@ export default function Conversations({ navigate, id, can, query = {}, refreshBa
   return (
     <div>
       <div className="grid items-start gap-5 lg:grid-cols-[minmax(320px,400px)_minmax(0,1fr)]">
-        <div className={`min-w-0 ${id ? "max-lg:hidden" : ""}`}>
+        {/* Held in view beside a long thread, which used to scroll it away
+            and leave an empty column. */}
+        <div className={`min-w-0 lg:sticky lg:top-[88px] lg:max-h-[calc(100vh-104px)] lg:overflow-y-auto ${id ? "max-lg:hidden" : ""}`}>
           <InboxList
             navigate={navigate}
             query={query}

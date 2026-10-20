@@ -23,6 +23,7 @@ import { gracePeriodChangedEmail, staffOnboardingEmail } from "../services/email
 import { generateVerificationCode } from "../lib/identity.js";
 import { emitDayChanged, emitOrgNotice } from "../services/realtime.js";
 import { FEATURES, LIMITS } from "../lib/plans.js";
+import { floorNames, labelOf, unitLabels } from "../services/pieceNames.js";
 import {
   assertFeature,
   assertWithinLimit,
@@ -117,12 +118,17 @@ router.get(
     let total = 0;
     const counts = { available: 0, reserved: 0, occupied: 0, unavailable: 0 };
     let outOfService = 0;
+    // Units inside a free room that is booked only whole. They were
+    // counted as "Unavailable" (in red) while the map said "Comes with its
+    // room" — nothing is wrong with them; they are booked with the room.
+    let withRoom = 0;
     const overstays = [];
 
     for (const resource of resources) {
       for (const unit of resource.viewUnits || resource.units) {
         total += 1;
-        if (counts[unit.status] !== undefined) counts[unit.status] += 1;
+        if (unit.includedInRoom) withRoom += 1;
+        else if (counts[unit.status] !== undefined) counts[unit.status] += 1;
         if (unit.serviceStatus === "out_of_service") outOfService += 1;
         if (unit.overstay) {
           overstays.push({
@@ -135,6 +141,10 @@ router.get(
       }
     }
 
+    // Each by name — "Long Table 2 · Seat 3" — not by grid position.
+    const overstayLabels = await unitLabels(overstays.map((o) => ({ resource: o.resourceId, unitLabel: o.unitLabel })));
+    for (const o of overstays) o.label = overstayLabels.get(`${o.resourceId}:${o.unitLabel}`) || null;
+
     const activeNow = await Reservation.countDocuments({ organization: orgId, status: "active" });
     const heldNow = await Reservation.countDocuments({ organization: orgId, status: "held" });
 
@@ -146,6 +156,7 @@ router.get(
         occupied: counts.occupied,
         reserved: counts.reserved,
         unavailable: counts.unavailable,
+        withRoom,
         outOfService,
         overstays: overstays.length,
         activeSessions: activeNow,
@@ -177,6 +188,8 @@ router.get(
     ]);
     await applyRoomStates(resources);
     const typeById = new Map(types.map((t) => [t._id.toString(), t]));
+    // "Long Table 2", the name the map gives each piece (lib/names.js).
+    const names = await floorNames(resources.map((resource) => resource.floor));
 
     // Wholly inside the zone's shape: every cell of the footprint is one of
     // the zone's cells, so a piece in either arm of an L-shaped zone counts.
@@ -192,6 +205,7 @@ router.get(
       }
       grouped.get(key).resources.push({
         id: resource._id.toString(),
+        name: names.get(resource._id.toString())?.name || type?.label || null,
         typeLabel: type?.label || null,
         typeKey: type?.key || null,
         hasServiceStatus: Boolean(type?.hasServiceStatus),
@@ -231,10 +245,12 @@ router.get(
       .limit(50)
       .populate("member", "firstName lastName memberId email");
 
-    const shape = (r) => ({
+    // Upcoming bookings by the names the map uses now; history as booked.
+    const labels = await unitLabels(upcoming);
+    const shape = (r, live = false) => ({
       id: r._id.toString(),
       unitLabel: r.unitLabel,
-      resourceLabel: r.targetLabel || r.unitLabel,
+      resourceLabel: live ? labelOf(r, labels) : r.targetLabel || r.unitLabel,
       startTime: r.startTime,
       endTime: r.endTime,
       status: r.status,
@@ -244,7 +260,7 @@ router.get(
         : null,
     });
 
-    res.json({ schedule: upcoming.map(shape), history: past.map(shape) });
+    res.json({ schedule: upcoming.map((r) => shape(r, true)), history: past.map((r) => shape(r)) });
   })
 );
 

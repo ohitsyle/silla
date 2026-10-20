@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Ban, Check, Clock, DoorOpen, Maximize, TriangleAlert, User, Wrench, ZoomIn, ZoomOut } from "lucide-react";
 import { effectiveStatus, roomMode, roomUnit } from "../lib/rooms.js";
+import { unitName } from "../lib/names.js";
 import { describeDay, entryFor } from "../lib/dayView.js";
 import {
   boundingBox, cellKey, cellsOf, difference, floorAreas, isRectangle, largestRect, regionAreas, union,
@@ -855,6 +856,15 @@ export default function SpaceMap({
                   const locked = faded && selectableOnly;
                   const daySentence = entry && day ? describeDay(entry, day, { noun: resourceNoun, roomName: ownRoom?.name }).headline : null;
                   const hit = touchTargets ? hitArea(r, type.footprint) : null;
+                  // "Long Table 2 · Seat 3" — which table, not only which
+                  // seat at one (lib/names.js). Said to screen readers, shown
+                  // on hover, and handed to whatever opens for this unit.
+                  const unitTitle = unitName({
+                    piece: resource.name || type.label,
+                    unitLabel: unit.label,
+                    units: resource.units.length,
+                    noun: resourceNoun,
+                  });
                   // A unit blocked by its room opens the room: that is where
                   // the booking that matters is made (or why it can't be).
                   // Without a room handler (the kiosk), it chooses the room
@@ -869,6 +879,8 @@ export default function SpaceMap({
                       resourceId: resource.id,
                       unitIndex,
                       unitLabel: unit.label,
+                      label: unitTitle,
+                      pieceName: resource.name || type.label,
                       type,
                       position: resource.position,
                       roomId: resource.roomId || null,
@@ -894,7 +906,7 @@ export default function SpaceMap({
                   // with the room's door — rather than as a row of red
                   // "unavailable" seats that make a free room look broken.
                   if (unitStatus?.includedInRoom && !management) {
-                    const description = `${type.label} · ${unit.label} — comes with ${room?.name || "its room"}`;
+                    const description = `${unitTitle} — comes with ${room?.name || "its room"}`;
                     const iconSize = clamp(Math.min(r.w, r.h) * 0.45, 8, 16);
                     return (
                       <g
@@ -948,7 +960,7 @@ export default function SpaceMap({
                   const isHighlighted = highlighted.has(`${resource.id}:${unit.label}`);
 
                   const description =
-                    `${type.label} · ${resourceNoun} ${unit.label} — ${appearance.statusLabel} now` +
+                    `${unitTitle} — ${appearance.statusLabel} now` +
                     (overstayed ? ` · ${OVERSTAY_META.label}` : "") +
                     (room ? ` (${room.name})` : "") +
                     (daySentence && rings ? `. ${daySentence}` : "") +
@@ -1043,6 +1055,22 @@ export default function SpaceMap({
               </motion.g>
             );
           })}
+        </g>
+
+        {/* ---- Layer: room names ---- above the furniture, so a piece
+             in the room's corner can never hide what the room is called. */}
+        <g pointerEvents="none">
+          {roomsHere.map(({ room, cells }) =>
+            shapeEdit?.target === "room" && shapeEdit.id === room.id ? null : (
+              <RoomName
+                key={room.id}
+                room={room}
+                cells={cells}
+                pxPerUnit={pxPerUnit}
+                faded={Boolean(windowView && room.bookingMode === "whole" && windowView.isFree(room.resourceId, "room") === false)}
+              />
+            )
+          )}
         </g>
 
         {/* ---- Layer: labels (spec §12) ---- */}
@@ -1166,27 +1194,38 @@ export default function SpaceMap({
  * Clicks are not handled here: the map resolves them by cell, so a click
  * anywhere in the room's cells chooses it. The keyboard is.
  */
-function RoomShape({ room, cells, state, palette, focused, flagged, pxPerUnit, resourceNoun, interactive, onSelect, faded = false }) {
-  const outline = useMemo(() => outlinePath(cells, { cell: CELL, inset: 1, radius: ROOM_RADIUS }), [cells]);
-  const spot = useMemo(() => labelSpot(cells), [cells]);
+/**
+ * Where a room's words go and how big: its largest rectangle, type sized
+ * to hold about 13px on screen at any zoom, and cut to the width it sits
+ * in. Shared by the outline (the second line) and the name above the
+ * furniture, so the two always line up.
+ */
+function roomLabelMetrics(cells, pxPerUnit) {
+  const spot = labelSpot(cells);
   const x = spot.col * CELL;
   const y = spot.row * CELL;
   const w = spot.w * CELL;
   const h = spot.h * CELL;
-
-  const busy = ROOM_STATE[state] ? state : null;
-  const tone = busy ? palette[busy] || palette.unavailable : null;
-
   const font = clamp(13 / pxPerUnit, 10, 52);
   const small = font * 0.84;
   const inset = clamp(font * 0.75, 8, 24);
   const fit = (size) => Math.max(1, Math.floor((w - inset * 2) / (size * GLYPH)));
-  const name = truncate(room.name, fit(font));
+  return { x, y, w, h, font, small, inset, fit };
+}
+
+function RoomShape({ room, cells, state, palette, focused, flagged, pxPerUnit, resourceNoun, interactive, onSelect, faded = false }) {
+  const outline = useMemo(() => outlinePath(cells, { cell: CELL, inset: 1, radius: ROOM_RADIUS }), [cells]);
+  const { x, y, h, font, small, inset, fit } = useMemo(() => roomLabelMetrics(cells, pxPerUnit), [cells, pxPerUnit]);
+
+  const busy = ROOM_STATE[state] ? state : null;
+  const tone = busy ? palette[busy] || palette.unavailable : null;
 
   // The second line only at roughly natural size. When the labels are
   // being enlarged to stay readable — a whole floor on a phone — two lines
   // run into the furniture, and the room row above the map already says
-  // what each room offers.
+  // what each room offers. It stays UNDER the furniture (the name is
+  // drawn above it, in RoomName): a piece may cover what the room offers,
+  // which the room row also says, but never what the room is called.
   const enlarged = font > 16;
   const showDetail = !enlarged && h >= font * 3.6 + inset;
   const detail = busy ? ROOM_STATE[busy].label : roomMode(room.bookingMode, resourceNoun).short;
@@ -1233,15 +1272,6 @@ function RoomShape({ room, cells, state, palette, focused, flagged, pxPerUnit, r
           strokeLinejoin: "round",
         }}
       />
-      <text
-        x={x + inset}
-        y={y + inset + font * 0.9}
-        fontSize={font}
-        fontWeight="650"
-        style={{ fill: "var(--color-ink-primary)", pointerEvents: "none" }}
-      >
-        {name}
-      </text>
       {showDetail &&
         (busy ? (
           <RoomStatePill
@@ -1264,6 +1294,38 @@ function RoomShape({ room, cells, state, palette, focused, flagged, pxPerUnit, r
           </text>
         ))}
     </g>
+  );
+}
+
+/**
+ * A room's name, in its own layer ABOVE the furniture. It was drawn with
+ * the outline, under the pieces, so a desk placed in the room's corner
+ * covered it ("Quiet Study" under its first desk). A halo in the card
+ * colour keeps it legible where it crosses a piece, and it takes no
+ * pointer events, so the furniture under it stays clickable.
+ */
+function RoomName({ room, cells, pxPerUnit, faded = false }) {
+  const { x, y, font, inset, fit } = useMemo(() => roomLabelMetrics(cells, pxPerUnit), [cells, pxPerUnit]);
+  return (
+    <text
+      aria-hidden="true"
+      x={x + inset}
+      y={y + inset + font * 0.9}
+      fontSize={font}
+      fontWeight="650"
+      style={{
+        fill: "var(--color-ink-primary)",
+        paintOrder: "stroke",
+        stroke: "var(--color-bg-card)",
+        strokeWidth: font * 0.32,
+        strokeLinejoin: "round",
+        pointerEvents: "none",
+        opacity: faded ? 0.45 : 1,
+        transition: "opacity var(--dur-base) var(--ease-out)",
+      }}
+    >
+      {truncate(room.name, fit(font))}
+    </text>
   );
 }
 

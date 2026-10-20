@@ -431,16 +431,6 @@ function MiniMap({ floor, pieces, palette, emptyHint }) {
               strokeDasharray="4 3"
               rx="5"
             />
-            <text
-              x={zone.bounds.col * CELL + 5}
-              y={zone.bounds.row * CELL + 11}
-              style={{ fill: "var(--color-ink-muted)", textTransform: "uppercase" }}
-              fontSize="7"
-              fontWeight="600"
-              letterSpacing="0.8"
-            >
-              {zone.name}
-            </text>
           </g>
         ))}
 
@@ -510,6 +500,31 @@ function MiniMap({ floor, pieces, palette, emptyHint }) {
             </g>
           );
         })}
+
+        {/* ---- Zone names: above the pieces, with a halo in the map's own
+             surface colour. Drawn with the zone, under the furniture, the
+             first and last letters were covered ("LE UNI" for "Single unit
+             area"). */}
+        {(floor?.zones || []).filter((zone) => zone?.bounds).map((zone, i) => (
+          <text
+            key={`zone-name-${i}`}
+            x={zone.bounds.col * CELL + 5}
+            y={zone.bounds.row * CELL + 11}
+            style={{
+              fill: "var(--color-ink-muted)",
+              textTransform: "uppercase",
+              paintOrder: "stroke",
+              stroke: "var(--color-bg-card)",
+              strokeWidth: 3,
+              strokeLinejoin: "round",
+            }}
+            fontSize="7"
+            fontWeight="600"
+            letterSpacing="0.8"
+          >
+            {zone.name}
+          </text>
+        ))}
 
         {/* ---- Labels: free orientation text, not reservable ---- */}
         {(floor?.labels || []).filter((label) => label?.position).map((label, i) => (

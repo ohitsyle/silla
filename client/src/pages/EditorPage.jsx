@@ -261,13 +261,25 @@ export default function EditorPage() {
     }
   };
 
+  /**
+   * A confirmation answers the action just taken; moving on to anything
+   * else retires it. "Outline saved." used to stay up while the next
+   * pieces were placed, as if it described them.
+   */
+  const clearMessages = () => {
+    setNotice(null);
+    setError(null);
+  };
+
   const openBuilding = (next) => {
+    clearMessages();
     setBuildingOverride(next.id);
     setDrawingRoom(null);
     setSelectedUnit(null);
     if (next.floors[0]) navigate(`/editor/${next.floors[0].id}`);
   };
   const openFloor = (id) => {
+    clearMessages();
     setSelectedUnit(null);
     navigate(`/editor/${id}`);
   };
@@ -290,6 +302,7 @@ export default function EditorPage() {
 
   /** The toolbar: picking a tool ends whatever reshape was under way. */
   const chooseTool = (value) => {
+    clearMessages();
     if (value === TOOL.ROOM) {
       drawRoom(null);
       return;
@@ -792,8 +805,8 @@ export default function EditorPage() {
       )}
 
       <p className="mt-4 text-xs text-ink-muted">
-        Fixed footprints, whole cells, no rotation — that constraint is what keeps the editor simple. Overlaps and
-        bounds are checked on the server.
+        Pieces keep their size and sit on whole squares; they can't be rotated. Anything that would overlap another
+        piece or fall outside the floor is refused, with the reason.
       </p>
 
       {/* ── Dialogs ── */}
@@ -896,7 +909,7 @@ function AvailabilityPanel({ unit, resourceNoun, busy, onClose, onSet }) {
   return (
     <Panel
       className="mt-4"
-      title={`${unit.type.label} · ${resourceNoun} ${unit.unitLabel}`}
+      title={unit.label || `${unit.type.label} · ${resourceNoun} ${unit.unitLabel}`}
       action={
         <Button size="sm" variant="ghost" onClick={onClose}>
           Close

@@ -21,8 +21,9 @@
  * found with { internal: false } in the query.
  *
  * Never to test addresses: the buyer's email goes through sendEmail, whose
- * transport drops @test.silla and @example.* (services/email/index.js —
- * enforced there so no caller can forget), and the outcome says it was
+ * transport drops every reserved test domain — @test.silla, .test,
+ * .example, example.com (services/email/index.js — enforced there so no
+ * caller can forget), and the outcome says it was
  * dropped. The staff-side email goes to a REAL inbox, so it is skipped
  * outright when the CUSTOMER is a test account, as order submission does.
  *

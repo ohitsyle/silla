@@ -109,7 +109,7 @@ export default function PolicyStep({ config, update, errors }) {
             onChange={setPolicy("gracePeriodMinutes")}
             error={errorFor(errors, "policy.gracePeriodMinutes")}
             hint={`How long a ${resourceNoun} is held after the reservation starts. Tap in before it
-                   runs out or the worker releases the ${resourceNoun} as a no-show.`}
+                   runs out, or the ${resourceNoun} is released for someone else and counted as a no-show.`}
           />
           <PolicyNumber
             label="Maximum stay"
@@ -177,21 +177,19 @@ export default function PolicyStep({ config, update, errors }) {
             value={policy.closeTime || ""}
             onChange={setHours("closeTime")}
             error={errorFor(errors, "policy.closeTime")}
-            hint="Sessions still running at closing are ended by the scheduler."
+            hint="Anyone still checked in at closing is checked out automatically."
           />
         </div>
 
         {hoursInverted && (
           <Notice tone="error" className="mt-4">
-            Closing is not after opening, so there would be no bookable window at all. Overnight
-            operation is not supported — a site that runs past midnight needs two sites.
+            Closing has to be after opening, or there is no time left to book. Opening hours can't
+            run past midnight.
           </Notice>
         )}
 
         <p className="text-xs text-ink-muted mt-3">
-          Read against the server's own clock, which is correct for a single-site deployment. A
-          buyer running sites in different timezones needs a per-site timezone before these hours
-          mean what they expect.
+          These hours apply to every building in your system, in Philippine time.
         </p>
       </Panel>
 
@@ -229,7 +227,7 @@ export default function PolicyStep({ config, update, errors }) {
               {meaning}
             </span>
           ))}
-          <span className="text-sm text-ink-secondary">Anything else is a literal character.</span>
+          <span className="text-sm text-ink-secondary">Anything else appears exactly as typed.</span>
         </div>
 
         {!formatError && placeholders === 0 && (
@@ -240,9 +238,8 @@ export default function PolicyStep({ config, update, errors }) {
         )}
 
         <p className="text-xs text-ink-muted mt-4">
-          Check-in is by RFID card. It is the only resolver implemented today (INF-3) — QR is a
-          later addition to the same interface, not a change to this profile — so the wizard does
-          not offer a choice it could not honour.
+          People check in by tapping an RFID card at the kiosk. It is the only way to check in for
+          now, so there is nothing to choose here.
         </p>
       </Panel>
 
@@ -262,8 +259,8 @@ export default function PolicyStep({ config, update, errors }) {
         </div>
         <p className="text-sm text-ink-secondary mt-3">
           {identity.selfServiceRegistration === false
-            ? `The kiosk refuses an unknown card. A ${memberNoun} has to be created by staff before
-               their card works, which suits a deployment where the card is issued centrally.`
+            ? `The kiosk turns away a card it doesn't know. Staff add each ${memberNoun} before their
+               card works, which suits a place where cards are handed out by an office.`
             : `An unknown card at the kiosk starts enrolment: the ${memberNoun} types their details,
                receives a code by email and confirms it there and then. Nobody has to be at a desk.`}
         </p>

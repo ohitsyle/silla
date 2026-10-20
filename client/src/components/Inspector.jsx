@@ -62,7 +62,7 @@ export default function Inspector({
           key="inspector"
           aria-label={typeof title === "string" ? title : "Details"}
           className="
-            relative z-10 flex max-h-[60vh] shrink-0 flex-col overflow-hidden rounded-t-xl border-t border-line/12
+            relative z-10 flex max-h-[60vh] shrink-0 flex-col overflow-hidden rounded-t-xl border-t border-line/[0.12]
             bg-bg-card shadow-lg
             lg:h-full lg:max-h-none lg:w-[380px] lg:rounded-none lg:border-l lg:border-t-0 lg:shadow-none
           "

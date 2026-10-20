@@ -1797,7 +1797,7 @@ export async function recordPayment(invoiceOrId, input = {}, by = null) {
   if (applied.length) await syncDeployment(sub);
 
   // The period stamp may have landed after the invoice was read.
-  const receiptInvoice = (await Invoice.findById(invoice._id)) || invoice;
+  let receiptInvoice = (await Invoice.findById(invoice._id)) || invoice;
   const account = await Account.findById(invoice.account);
   if (account) {
     sendEmail(
@@ -1808,6 +1808,9 @@ export async function recordPayment(invoiceOrId, input = {}, by = null) {
         reactivated: from === "suspended" && sub?.status === "active",
       })
     );
+    receiptInvoice =
+      (await Invoice.findOneAndUpdate({ _id: invoice._id }, { $set: { "reminders.receiptEmailAt": new Date() } }, { new: true })) ||
+      receiptInvoice;
   }
   return { invoice: receiptInvoice, subscription: sub };
 }

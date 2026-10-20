@@ -316,7 +316,7 @@ try {
   await call(`/api/reservations/rooms/${room.id}/options?${optionsQuery}`, "GET", null, 404, foreignAdmin);
 
   const equipmentBooking = await claim(members[0], equipment.id);
-  check("equipment can be booked individually inside a room", equipmentBooking.targetLabel === "Projector · 1");
+  check("equipment can be booked individually inside a room", equipmentBooking.targetLabel === "Projector 1");
   await rejected(() => claim(members[1], room.resourceId, "room"), "CONFLICT");
   await cancelReservation({ reservationId: equipmentBooking._id });
   await call(`/api/admin/resources/${equipment.id}/units/1`, "PATCH", { serviceStatus: "out_of_service" }, 200, staff);
@@ -339,6 +339,26 @@ try {
       withSeat.units.filter((unit) => !unit.bookable).length === 1 &&
       withSeat.units.find((unit) => unit.resourceId === desk.id && unit.unitLabel === "1")?.code === "CONFLICT"
   );
+
+  // The member who holds that desk asks about the same room later that day:
+  // the room is free then, but they already hold their one booking ahead.
+  // The panel must say so before "Book it", in the claim's own words, not
+  // offer the room and let the next screen refuse (RES-3).
+  const afternoon = { startTime: new Date(+when + 4 * HOUR), endTime: new Date(+when + 5 * HOUR) };
+  const theirs = await roomBookingOptions({ organizationId: org._id, roomId: room.id, ...afternoon, memberId: members[0]._id });
+  const theirsAlone = await reservationAvailability({
+    organizationId: org._id, resourceId: room.resourceId, unitLabel: "room", ...afternoon, memberId: members[0]._id,
+  });
+  check(
+    "the room panel tells a member holding a booking ahead that they can't take another, before Book it",
+    theirs.whole?.bookable === true && theirs.you?.bookable === false && theirs.you?.code === "ALREADY_HOLDING" &&
+      theirsAlone.code === "ALREADY_HOLDING" && theirs.you.error === theirsAlone.error
+  );
+  const someoneElse = await roomBookingOptions({ organizationId: org._id, roomId: room.id, ...afternoon, memberId: members[1]._id });
+  check("…while a member holding nothing is offered the room as before", someoneElse.whole?.bookable === true && someoneElse.you === null);
+  const afternoonQuery = `startTime=${afternoon.startTime.toISOString()}&endTime=${afternoon.endTime.toISOString()}`;
+  const theirsOverHttp = await call(`/api/reservations/rooms/${room.id}/options?${afternoonQuery}`, "GET", null, 200, members[0]);
+  check("…and the panel's request answers for the member who asks", theirsOverHttp.you?.code === "ALREADY_HOLDING");
 
   const schedule = await call("/api/admin/resources/" + room.resourceId + "/history", "GET", null, 200, staff);
   check(
@@ -415,7 +435,14 @@ try {
 
   /* ───────────────────────────── room modes ───────────────────────────── */
 
+  const beforeWhole = await call("/api/admin/dashboard");
   await call("/api/spaces/rooms/" + room.id, "PATCH", { bookingMode: "whole" });
+  const wholeOnly = await call("/api/admin/dashboard");
+  check(
+    "a free whole-only room's contents count as coming with it, not as unavailable",
+    wholeOnly.metrics.withRoom > 0 && wholeOnly.metrics.unavailable === beforeWhole.metrics.unavailable &&
+      wholeOnly.metrics.open === beforeWhole.metrics.open - wholeOnly.metrics.withRoom
+  );
   await rejected(() => claim(members[0], desk.id), "ROOM_MODE");
   await call("/api/spaces/rooms/" + room.id, "PATCH", { bookingMode: "individual" });
   await rejected(() => claim(members[0], room.resourceId, "room"), "ROOM_MODE");
@@ -975,6 +1002,66 @@ try {
     "an old floor still resizes as a plain grid",
     (await call("/api/floors/" + legacyFloor.id, "PATCH", { grid: { cols: 12, rows: 9 } })).floor.shape.areas.length === 0
   );
+
+  /* ─────────────────────────── names on a floor ─────────────────────────── */
+
+  // Four long tables of five and two solo desks, written as pieces were
+  // before numbering existed (no `number`) and out of reading order — the
+  // walkthrough's reading room, where every table read "Long Table · 3".
+  await ResourceType.create({ organization: org._id, key: "long", label: "Long Table", footprint: { w: 5, h: 1 }, seatCount: 5 });
+  await ResourceType.create({ organization: org._id, key: "single", label: "Solo Desk", footprint: { w: 1, h: 1 }, seatCount: 1 });
+  const longType = await ResourceType.findOne({ organization: org._id, key: "long" });
+  const soloType = await ResourceType.findOne({ organization: org._id, key: "single" });
+  const namesFloor = (await newFloor("Reading floor", { cols: 20, rows: 12 })).body.floor;
+  const unnumbered = (type, col, row, units) => Resource.create({
+    organization: org._id, floor: namesFloor.id, resourceType: type._id, position: { col, row },
+    units: Array.from({ length: units }, (_, i) => ({ label: String(i + 1) })),
+  });
+  const tableTopRight = await unnumbered(longType, 12, 1, 5);
+  const tableTopLeft = await unnumbered(longType, 1, 1, 5);
+  const tableBottom = await unnumbered(longType, 1, 5, 5);
+  const soloRight = await unnumbered(soloType, 15, 9, 1);
+  const soloLeft = await unnumbered(soloType, 3, 9, 1);
+  // As they were stored then: no `number` field at all, not even null.
+  await Resource.collection.updateMany({ floor: new mongoose.Types.ObjectId(namesFloor.id) }, { $unset: { number: "" } });
+  const nameOf = (layout, piece) => layout.layout.resources.find((r) => r.id === String(piece._id))?.name;
+  const named = await call("/api/floors/" + namesFloor.id + "/layout");
+  check(
+    "pieces placed before numbering are named per type in reading order, without being migrated",
+    nameOf(named, tableTopLeft) === "Long Table 1" && nameOf(named, tableTopRight) === "Long Table 2" &&
+      nameOf(named, tableBottom) === "Long Table 3" && nameOf(named, soloLeft) === "Solo Desk 1" && nameOf(named, soloRight) === "Solo Desk 2" &&
+      !("number" in (await Resource.collection.findOne({ _id: tableTopLeft._id })))
+  );
+  check("…so no two pieces on the floor share a name", new Set(named.layout.resources.map((r) => r.name)).size === named.layout.resources.length);
+
+  const placedTable = (await call("/api/resources", "POST", { floorId: namesFloor.id, resourceTypeKey: "long", col: 12, row: 5 }, 201)).resource;
+  const afterPlacing = await call("/api/floors/" + namesFloor.id + "/layout");
+  check(
+    "a new piece takes the next free number, and the floor keeps the names it had",
+    placedTable.name === "Long Table 4" && nameOf(afterPlacing, tableTopLeft) === "Long Table 1" &&
+      nameOf(afterPlacing, tableTopRight) === "Long Table 2" && nameOf(afterPlacing, tableBottom) === "Long Table 3" &&
+      (await Resource.findById(tableTopRight._id)).number === 2
+  );
+  await call("/api/resources/" + tableTopLeft._id, "DELETE");
+  const afterRemoving = await call("/api/floors/" + namesFloor.id + "/layout");
+  check(
+    "removing a piece renames none of its neighbours",
+    nameOf(afterRemoving, tableTopRight) === "Long Table 2" && nameOf(afterRemoving, tableBottom) === "Long Table 3" &&
+      afterRemoving.layout.resources.find((r) => r.id === placedTable.id)?.name === "Long Table 4"
+  );
+  const refill = (await call("/api/resources", "POST", { floorId: namesFloor.id, resourceTypeKey: "long", col: 1, row: 1 }, 201)).resource;
+  check("…and the number it freed is the next one used", refill.name === "Long Table 1");
+
+  const atTable = await claim(reader, String(tableBottom._id), "3");
+  const atSolo = await claim(other, String(soloRight._id), "1");
+  check(
+    "a booking is named by its piece and the organization's noun",
+    atTable.targetLabel === "Long Table 3 · Desk 3" && atSolo.targetLabel === "Solo Desk 2"
+  );
+  const readersOwn = await call("/api/reservations/mine", "GET", null, 200, reader);
+  check("…and a member's own reservation reads the same", readersOwn.holding[0]?.label === "Long Table 3 · Desk 3");
+  await cancelReservation({ reservationId: atTable._id });
+  await cancelReservation({ reservationId: atSolo._id });
 
   console.log(`\n${passed} spatial checks passed; ${SERVE ? "isolated database kept for preview." : "isolated database discarded."}`);
 

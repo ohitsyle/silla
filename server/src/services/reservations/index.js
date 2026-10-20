@@ -45,6 +45,8 @@ import {
 } from "./availability.js";
 import { ReservationError } from "./errors.js";
 import { assertMayHold, graceOf, memberStanding } from "./standing.js";
+import { floorNames } from "../pieceNames.js";
+import { unitName } from "../../lib/names.js";
 
 export { ReservationError };
 
@@ -187,8 +189,8 @@ async function floorsShowing(resource) {
  * Whether `unitLabel` on `resourceId` can be held from `start` to `end`.
  *
  * Throws a ReservationError for the first rule the window breaks, and
- * returns the label the reservation will carry ("Long Table · 3", or the
- * room's name). The order is deliberate: the organization's policy, then
+ * returns the label the reservation will carry ("Long Table 2 · Seat 3",
+ * or the room's name). The order is deliberate: the organization's policy, then
  * the unit itself, then its room, then closures, then other bookings — so
  * the reason given is the most fundamental one.
  *
@@ -250,7 +252,22 @@ async function resolveTarget({ organizationId, resourceId, unitLabel, org, sessi
     : { resource: resource._id, unitLabel: String(unitLabel) };
 
   const floor = await Floor.findById(resource.floor).session(session);
-  return { resource, room, scope, floor, label: resource.kind === "room" ? room.name : `${type.label} · ${unitLabel}` };
+  return { resource, room, scope, floor, label: resource.kind === "room" ? room.name : await unitNameOf(resource, unitLabel, org, session) };
+}
+
+/**
+ * "Long Table 2 · Seat 3": the unit's name as the map shows it, which the
+ * reservation keeps as its `targetLabel` (lib/names.js). It used to be
+ * "Long Table · 3" — the same words for that seat at every long table.
+ */
+async function unitNameOf(resource, unitLabel, org, session = null) {
+  const names = await floorNames([resource.floor], { session });
+  return unitName({
+    piece: names.get(String(resource._id))?.name,
+    unitLabel,
+    units: resource.units.length,
+    noun: nounOf(org),
+  });
 }
 
 /**
@@ -424,8 +441,17 @@ export async function reservationAvailability({ organizationId, resourceId, unit
  * An option the room does not have is left out rather than refused:
  * `whole` is null for a room booked one unit at a time, and `units` is
  * empty for a room booked only whole.
+ *
+ * Asked by a signed-in member (`memberId`), the answer also carries `you`:
+ * null when they may take this window, else why not — they already hold
+ * a session now or a booking ahead, or it overlaps their own (RES-3). The
+ * panel used to answer for the SPACE only, so a member holding a booking
+ * for later read "Free for this time · Book it" and was refused one
+ * screen on. Their limit is the same for everything in the room, so it is
+ * said once, beside the space's own answers, which stay true: the room IS
+ * free, they just can't take it as well.
  */
-export async function roomBookingOptions({ organizationId, roomId, startTime, endTime }) {
+export async function roomBookingOptions({ organizationId, roomId, startTime, endTime, memberId = null }) {
   const org = await Organization.findById(organizationId);
   if (!org) throw new ReservationError("Organization not found", 404);
   const room = await Room.findOne({ _id: roomId, organization: organizationId });
@@ -439,12 +465,17 @@ export async function roomBookingOptions({ organizationId, roomId, startTime, en
     return type?.reservable ? piece.units.map((unit) => ({ piece, unit, type })) : [];
   });
 
+  // Each piece's name on its own floor — "Long Table 2" — so a room of
+  // identical tables lists four different ones (lib/names.js).
+  const names = await floorNames(room.levels.map((level) => level.floor));
+  const describe = (candidate) => describeUnit(candidate, names, nounOf(org));
+
   const refusal = (err) => ({ bookable: false, error: err.message, code: err.code || null });
   const refuseAll = (err) => ({
     whole: room.bookingMode === "individual" ? null : refusal(err),
     units: candidates.map((candidate) => ({ ...describe(candidate), ...refusal(err) })),
   });
-  const shaped = (whole, units) => ({ roomId: String(room._id), bookingMode: room.bookingMode, whole, units });
+  const shaped = (whole, units, you = null) => ({ roomId: String(room._id), bookingMode: room.bookingMode, whole, units, you });
 
   // ── Rules that apply to everything in the room alike ──
   let window;
@@ -510,16 +541,32 @@ export async function roomBookingOptions({ organizationId, roomId, startTime, en
     return { ...describe(candidate), ...(problem ? refusal(problem) : { bookable: true }) };
   });
 
-  return shaped(whole, units);
+  // ── What the member asking may hold, the same for everything here ──
+  let you = null;
+  if (memberId) {
+    const now = new Date();
+    const standing = await memberStanding(memberId, { organizationId, now, graceMinutes: graceOf(org) });
+    try {
+      assertMayHold(standing, { ...window, now, graceMinutes: graceOf(org), noun: nounOf(org) });
+    } catch (err) {
+      if (!(err instanceof ReservationError)) throw err;
+      you = refusal(err);
+    }
+  }
+
+  return shaped(whole, units, you);
 }
 
-/** One unit inside a room, as the room panel lists it. */
-function describe({ piece, unit, type }) {
+/** One unit inside a room, as the room panel lists it: its piece's name and its own. */
+function describeUnit({ piece, unit, type }, names, noun) {
+  const name = names.get(String(piece._id))?.name || type.label;
   return {
     resourceId: String(piece._id),
     unitLabel: unit.label,
     floorId: String(piece.floor),
     typeLabel: type.label,
+    pieceName: name,
+    label: unitName({ piece: name, unitLabel: unit.label, units: piece.units.length, noun }),
     position: piece.position,
   };
 }

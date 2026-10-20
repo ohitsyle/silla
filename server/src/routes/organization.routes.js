@@ -52,6 +52,24 @@ router.get("/:id/config", async (req, res, next) => {
   }
 });
 
+/**
+ * The line every seeded profile used to end its terms with — a note to the
+ * superadmin about where the text is edited, which every member then read
+ * at the bottom of what they were asked to accept. New profiles no longer
+ * carry it; organizations provisioned before still hold it in their stored
+ * text. It is left out of what members are SHOWN rather than migrated, so
+ * no read rewrites live data and nothing an administrator wrote is touched:
+ * only this exact sentence, on a line of its own, is dropped.
+ */
+export const LEGACY_TERMS_NOTE =
+  "This text is configured per organization and can be edited by a superadmin in Settings.";
+
+export function termsForMembers(text) {
+  const lines = String(text || "").split("\n");
+  if (!lines.some((line) => line.trim() === LEGACY_TERMS_NOTE)) return String(text || "");
+  return lines.filter((line) => line.trim() !== LEGACY_TERMS_NOTE).join("\n").trimEnd();
+}
+
 router.get("/:id/terms", async (req, res, next) => {
   try {
     // A malformed id is "not found", not a cast error surfacing as a 500.
@@ -60,7 +78,7 @@ router.get("/:id/terms", async (req, res, next) => {
     if (!org) return res.status(404).json({ error: "Organization not found" });
     res.json({
       organizationName: org.name,
-      termsOfServiceText: org.termsOfServiceText || "",
+      termsOfServiceText: termsForMembers(org.termsOfServiceText),
     });
   } catch (err) {
     next(err);

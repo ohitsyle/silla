@@ -37,7 +37,8 @@ for (const [key, profile] of Object.entries(VERTICAL_PROFILES)) {
     terminology: profile.terminology,
     policy: profile.policy,
   };
-  const label = key === "library" ? "A-12" : "D-204";
+  // Named as the map names a unit (lib/names.js): its piece, then its place at it.
+  const label = key === "library" ? "Long Table 2 · Seat 3" : "Hot Desk 14";
 
   const samples = {
     "01-verification": t.verificationCodeEmail({ org, user, code: "482913", expiryMinutes: 10 }),

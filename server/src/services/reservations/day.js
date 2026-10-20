@@ -39,6 +39,7 @@ import { hasFeature } from "../entitlements.js";
 import { roomHolds } from "../spaces.js";
 import { LIVE_STATUSES } from "./availability.js";
 import { ReservationError } from "./errors.js";
+import { labelOf, unitLabels } from "../pieceNames.js";
 
 const MINUTE = 60_000;
 
@@ -275,6 +276,8 @@ export async function floorDay({ floorId, date, viewer = null, now = new Date() 
   // Names are read only for staff; a member's answer never carries them.
   if (staffView) query.populate("member", "firstName lastName");
   const reservations = await query;
+  // Staff read what each block is by the name the map uses now.
+  const labels = staffView ? await unitLabels(reservations) : new Map();
 
   const closureDocs = await Closure.find({
     organization: org._id,
@@ -307,7 +310,7 @@ export async function floorDay({ floorId, date, viewer = null, now = new Date() 
     if (staffView) {
       const who = reservation.member;
       block.holder = who?.firstName ? `${who.firstName} ${who.lastName}`.trim() : null;
-      block.what = reservation.targetLabel || null;
+      block.what = labelOf(reservation, labels) || null;
       if (overstay) block.overstay = true;
     }
     return block;

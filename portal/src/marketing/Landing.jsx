@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from "react";
-import { motion, useScroll, useTransform } from "framer-motion";
-import { ArrowRight, ArrowUpRight } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
+import { AnimatePresence, motion, useScroll, useTransform } from "framer-motion";
+import { ArrowRight, ArrowUpRight, LogIn, LogOut, Menu, UserPlus, X } from "lucide-react";
 
 import Chair, { ChairRow } from "./Chair.jsx";
 import { useAccount } from "../lib/AccountContext.jsx";
-import { AccountMenu } from "../account/kit.jsx";
+import { useUnreadMessages } from "../lib/useUnreadMessages.js";
+import { ROUTES } from "../lib/useHashRoute.js";
+import { AccountMenu, accountLinks } from "../account/kit.jsx";
 import { EASE, prefersReducedMotion, reveal, wordChild, wordsIn } from "./motion.js";
 import HowItWorks from "./sections/HowItWorks.jsx";
 import WhiteLabel from "./sections/WhiteLabel.jsx";
@@ -139,6 +141,167 @@ function HeroPlan() {
   );
 }
 
+/** The page's own sections, in the order they appear. */
+const SECTIONS = [
+  ["How it works", "#how"],
+  ["Make it yours", "#yours"],
+  ["What's inside", "#inside"],
+  ["Pricing", "#pricing"],
+];
+
+/**
+ * The header's menu below md.
+ *
+ * At phone width the section links and "Sign in" were hidden and nothing
+ * replaced them, so the header held only "Build yours": a returning buyer
+ * had to scroll to the footer to sign in, and Pricing was a long thumb
+ * away. This holds both — the sections, then signing in or the account's
+ * own pages (the same list as the account menu, which it stands in for
+ * here). Escape, a tap outside, or choosing anything closes it.
+ */
+function MobileMenu({ navigate }) {
+  const { account, isSignedIn, isSilla, isVerified, signOut } = useAccount();
+  const { unread } = useUnreadMessages();
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  const button = useRef(null);
+  const panelId = useId();
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const away = (e) => !ref.current?.contains(e.target) && setOpen(false);
+    const esc = (e) => {
+      if (e.key !== "Escape") return;
+      setOpen(false);
+      button.current?.focus();
+    };
+    document.addEventListener("mousedown", away);
+    document.addEventListener("keydown", esc);
+    // Into the menu, so a keyboard can walk it from the top.
+    const frame = requestAnimationFrame(() => ref.current?.querySelector("[data-menu-item]")?.focus());
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener("mousedown", away);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [open]);
+
+  const go = (to) => {
+    setOpen(false);
+    navigate?.(to);
+  };
+  // Something waiting for a signed-in buyer: a reply, or an unverified email.
+  const flag = isSignedIn && !isSilla && (unread > 0 || !isVerified);
+  const item =
+    "flex w-full items-center gap-2.5 rounded-xl px-3.5 py-3 text-left text-[15px] font-semibold " +
+    "transition-colors hover:bg-[rgb(var(--m-ink)/0.06)] focus-visible:outline-none " +
+    "focus-visible:bg-[rgb(var(--m-ink)/0.06)]";
+
+  return (
+    <div ref={ref} className="md:hidden">
+      <button
+        ref={button}
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-controls={panelId}
+        aria-label={open ? "Close menu" : flag ? "Menu — something needs your attention" : "Menu"}
+        className="relative grid h-10 w-10 place-items-center rounded-full transition-colors
+                   hover:bg-[rgb(var(--m-ink)/0.06)]"
+        style={{ color: "rgb(var(--m-ink))" }}
+      >
+        {open ? <X size={20} /> : <Menu size={20} />}
+        {flag && !open && (
+          <span
+            aria-hidden
+            className="absolute right-1.5 top-1.5 h-2.5 w-2.5 rounded-full border-2"
+            style={{ background: "rgb(var(--m-accent))", borderColor: "rgb(var(--m-paper))" }}
+          />
+        )}
+      </button>
+
+      <AnimatePresence>
+        {open && (
+          <motion.nav
+            id={panelId}
+            aria-label="Menu"
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.18, ease: EASE }}
+            className="absolute inset-x-4 top-[calc(100%+6px)] z-[60] max-h-[calc(100vh-96px)] overflow-y-auto
+                       rounded-2xl p-2"
+            style={{
+              background: "rgb(var(--m-card))",
+              border: "1px solid rgb(var(--m-ink) / 0.08)",
+              boxShadow: "0 24px 48px -24px rgb(var(--m-ink) / 0.35)",
+            }}
+          >
+            {SECTIONS.map(([label, href]) => (
+              <a key={href} href={href} data-menu-item onClick={() => setOpen(false)} className={item}>
+                {label}
+              </a>
+            ))}
+
+            <div className="my-2 h-px" style={{ background: "rgb(var(--m-ink) / 0.08)" }} />
+
+            {isSignedIn ? (
+              <>
+                <div className="px-3.5 pb-1 pt-1.5">
+                  <div className="truncate text-sm font-bold">{account?.name}</div>
+                  <div className="truncate text-[13px]" style={{ color: "rgb(var(--m-ink-faint))" }}>
+                    {account?.email}
+                    {!isSilla && !isVerified ? " · email not verified" : ""}
+                  </div>
+                </div>
+                {accountLinks({ isSilla, unread }).map(({ icon: Icon, label, to, count }) => (
+                  <button key={label} type="button" data-menu-item onClick={() => go(to)} className={item}>
+                    <Icon size={17} style={{ color: "rgb(var(--m-ink-faint))" }} />
+                    {label}
+                    {count > 0 && (
+                      <span
+                        className="ml-auto min-w-[1.5rem] rounded-full px-1.5 py-0.5 text-center text-xs font-bold tabular-nums"
+                        style={{ background: "rgb(var(--m-accent))", color: "rgb(var(--m-accent-ink))" }}
+                        aria-label={`${count} unread`}
+                      >
+                        {count}
+                      </span>
+                    )}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  data-menu-item
+                  onClick={() => {
+                    setOpen(false);
+                    signOut();
+                    navigate?.(ROUTES.home);
+                  }}
+                  className={item}
+                >
+                  <LogOut size={17} style={{ color: "rgb(var(--m-ink-faint))" }} />
+                  Sign out
+                </button>
+              </>
+            ) : (
+              <>
+                <button type="button" data-menu-item onClick={() => go(ROUTES.signIn)} className={item}>
+                  <LogIn size={17} style={{ color: "rgb(var(--m-ink-faint))" }} />
+                  Sign in
+                </button>
+                <button type="button" data-menu-item onClick={() => go(ROUTES.signUp)} className={item}>
+                  <UserPlus size={17} style={{ color: "rgb(var(--m-ink-faint))" }} />
+                  Create an account
+                </button>
+              </>
+            )}
+          </motion.nav>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 function Nav({ onConfigure, navigate }) {
   const { isSignedIn, booting } = useAccount();
   const [solid, setSolid] = useState(false);
@@ -170,12 +333,7 @@ function Nav({ onConfigure, navigate }) {
         </a>
 
         <nav className="ml-auto hidden md:flex items-center gap-7 text-[15px] font-medium">
-          {[
-            ["How it works", "#how"],
-            ["Make it yours", "#yours"],
-            ["What's inside", "#inside"],
-            ["Pricing", "#pricing"],
-          ].map(([label, href]) => (
+          {SECTIONS.map(([label, href]) => (
             <a
               key={href}
               href={href}
@@ -187,21 +345,24 @@ function Nav({ onConfigure, navigate }) {
           ))}
         </nav>
 
-        <div className="ml-auto md:ml-0 flex items-center gap-4">
+        <div className="ml-auto md:ml-0 flex items-center gap-2 sm:gap-4">
           {/* Signed in, the account menu is the way back to what you
               already have — profile, orders — so a returning customer
               isn't made to start over. Signed out, one quiet link.
               Held back until the session check finishes, or a returning
-              customer sees "Sign in" flash before their name appears. */}
+              customer sees "Sign in" flash before their name appears.
+              Below md both live in the phone menu instead. */}
           {booting ? (
-            <span className="hidden h-8 w-20 sm:block" aria-hidden />
+            <span className="hidden h-8 w-20 md:block" aria-hidden />
           ) : isSignedIn ? (
-            <AccountMenu navigate={navigate} />
+            <div className="hidden md:block">
+              <AccountMenu navigate={navigate} />
+            </div>
           ) : (
             <button
               type="button"
               onClick={() => navigate?.("#/sign-in")}
-              className="hidden sm:inline text-[15px] font-medium transition-opacity hover:opacity-60"
+              className="hidden md:inline text-[15px] font-medium transition-opacity hover:opacity-60"
               style={{ color: "rgb(var(--m-ink-soft))" }}
             >
               Sign in
@@ -210,13 +371,14 @@ function Nav({ onConfigure, navigate }) {
           <button
             type="button"
             onClick={onConfigure}
-            className="inline-flex items-center gap-1.5 rounded-full px-5 py-2.5 text-[15px] font-semibold
+            className="inline-flex items-center gap-1.5 rounded-full px-4 sm:px-5 py-2.5 text-[15px] font-semibold
                        transition-transform duration-200 active:scale-95"
             style={{ background: "rgb(var(--m-ink))", color: "rgb(var(--m-paper))" }}
           >
             Build yours
-            <ArrowRight size={16} />
+            <ArrowRight size={16} className="hidden sm:block" />
           </button>
+          {!booting && <MobileMenu navigate={navigate} />}
         </div>
       </div>
     </header>
@@ -319,8 +481,8 @@ export default function Landing({ onConfigure, navigate }) {
             className="mx-auto mt-6 max-w-xl text-lg"
             style={{ color: "rgb(var(--m-ink-soft))" }}
           >
-            Name it, colour it, lay out your floors, and walk away with a file that builds the whole
-            system. No call required.
+            Name it, colour it, lay out your floors and place your order — we build the whole system
+            from it. No call required.
           </motion.p>
           <motion.div {...reveal(0.2)} className="mt-10">
             <Cta onClick={onConfigure}>

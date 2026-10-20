@@ -212,10 +212,20 @@ export function yearlyPercent(plan) {
   return Math.max(0, Math.floor(((monthly - annual) * 100) / monthly));
 }
 
-/** The yearly saving to advertise, as a whole percentage — the smallest across priced plans, so it is never overstated. */
-export function yearlySaving(plans) {
-  const savings = plans.map(yearlyPercent).filter((n) => n != null);
-  return savings.length ? Math.min(...savings) : 0;
+/**
+ * The yearly saving across the plans on sale, as whole percentages —
+ * `{ min, max }`, or null when no plan is cheaper billed yearly.
+ *
+ * The storefront's toggle used to show the SMALLEST of them as a bare
+ * "−16%", while the configurator showed the chosen plan's own "−20%": one
+ * discount, stated two ways on the way to one order. Now a statement
+ * about one plan always uses that plan's figure (yearlyPercent, from its
+ * own prices), and the toggle, which speaks for all of them, says "up to"
+ * the largest — or just the figure, when every plan saves the same.
+ */
+export function yearlySavingRange(plans) {
+  const savings = plans.map(yearlyPercent).filter((n) => n != null && n > 0);
+  return savings.length ? { min: Math.min(...savings), max: Math.max(...savings) } : null;
 }
 
 /**

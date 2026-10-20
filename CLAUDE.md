@@ -111,17 +111,25 @@ verified, and there is no silla.app to verify — Gmail with an App
 Password (not the account password; needs 2-Step Verification) sends as
 a real address today. Swapping to a provider later is a .env change.
 
-`npm run email:test -- you@example.com` sends one message through the
-configured transport and reports the actual failure. It calls the
+`npm run email:test -- you@yourdomain.com` sends one message through the
+configured transport and reports the actual failure (it refuses a
+reserved test address, below, rather than spend quota on a bounce). It calls the
 provider DIRECTLY rather than through `sendEmail`, because that queue is
 fire-and-forget by design (spec §15) — a broken provider is silently
 swallowed there, which is exactly what you do not want from a test.
 
-**Both transports refuse to send to `@test.silla` and `@example.*`.**
-The suites create accounts at that domain on every run; without the
-guard each run became dozens of real delivery attempts, three retries
-each, against a 500/day quota, every one bouncing against the sender's
-reputation. It is enforced in the transport so a new test cannot forget.
+**Both transports refuse every reserved test address** — RFC 2606's
+TLDs `.test`, `.example`, `.invalid` and `.localhost`, the second-level
+`example.com/.net/.org` (subdomains included), and our own `@test.silla`
+(`isUndeliverable()` in each `services/email/index.js`). The suites
+create accounts at those domains on every run, and every seeded demo
+organization holds `admin@demo.test`; without the guard each run became
+dozens of real delivery attempts, three retries each, against a 500/day
+quota, every one bouncing against the sender's reputation. It is
+enforced in the transport so a new test cannot forget, and both suites
+assert the list (NOT-1 in the server's, MAIL-1 in the vendor's). It used
+to match only `@test.silla` and `@example.com/org/net`, which let
+`admin@demo.test` through.
 
 `vendor/` has its own COPY of this service, not an import — see the
 no-cross-imports rule in the portal section. It sends the buyer a
@@ -285,22 +293,34 @@ Flow decisions worth keeping:
   illustration. Its sticky offset is `lg:top-[88px]`, not `top-6` — the
   site header is sticky and 72px tall, and the old offset parked the
   preview underneath it.
-- **The Review step's download button only exists if `onDownload` is
-  passed.** The wizard rendered `<StepForm config update errors />` and
-  passed neither `onDownload` nor `preview`, so the button never
-  rendered — and the "That's your system" hand-off panel keys off
-  `downloaded`, which could therefore never become true. Both the button
-  and the panel were dead for as long as that prop was missing.
+- **The Review step's way forward is the account, not a file.** It
+  used to end in "Hand it over — Download profile… send it to SILLA",
+  "Copy JSON" and the raw profile beside "Save to my account", and then a
+  "That's your system" panel telling the buyer to email the file to an
+  address that did not exist — a buyer could fairly think they had to
+  email us a file. Now it says what happens next (save → submit as your
+  order, which sends the first invoice → we build it), and the download
+  is one quiet "Download your setup as a file" link at the very bottom,
+  for whoever needs a copy (`onDownload` must still be passed for it to
+  render).
+- **What still stops the order is listed at the TOP of Review**, each
+  with "Fix in <step>", and "Save to my account" is never disabled:
+  pressing it with something left scrolls to that list, the way Continue
+  reveals a step's errors. A "Complete — ready for the seeder" notice
+  used to show there whatever the state.
 - **The Review step no longer prints `npm run seed:file`.** That is
   SILLA's provisioning step, and it was being shown to the customer
   buying the result of it — a librarian should not have to think about a
   terminal. The command lives here and in `importProfile.js`, where the
   people who run it will look.
-- The download ends in a real hand-off ("send us the file → we
-  provision it → you get your keys"), not a one-line "downloaded"
-  notice that left a buyer holding an artefact with no next move.
-  **The address in that panel (`hello@silla.app`) is invented** —
-  replace it with the real SILLA address.
+- **Build-team words stay out of rendered strings.** The configurator
+  said "resolver (INF-3)", "provisioning script", "seeder", "worker",
+  "scheduler", "per-site timezone" and "emitted JSON" to buyers. Grep
+  what renders — a dump of each step's `innerText` is the quickest
+  check — not just the files someone names.
+- Signed in, "Who will run it" starts with the account's own name and
+  email (once, and only when all three are empty), and the doorway does
+  not offer "No account needed" or "Sign in first" to someone who has one.
 
 Things worth keeping about the storefront:
 - The seat tile (`marketing/Chair.jsx`) is the mascot, drawn the way the
@@ -324,8 +344,8 @@ plan, and any extra buildings), kiosks, cards, readers, services and a
 support tier, with a live quote beside it; the plan is chosen there now,
 and Review shows the same quote.
 Three starting presets (library, office, blank), then everything is
-editable. The Review step emits the profile as JSON and offers it as a
-download.
+editable. Saving to the account is the order; the Review step still
+offers the profile as a JSON download, quietly, for records.
 
 **`owner` is part of the profile contract**, and it is a security
 boundary rather than a nicety. `seed.js` used to plant the SAME three
@@ -527,8 +547,18 @@ Portal lessons from building it:
   is a tab switch and deliberately does not. Early returns in `Routed`
   would skip the panel mid-animation, which is why the gate screens live
   inside `view()`.
-- `Modal` autofocus prefers `[data-autofocus]` — without it the code
-  dialog focused its Close button and the first keystroke went nowhere.
+- `Modal` autofocus prefers `[data-autofocus]`, then the first field,
+  then the first button — without that the code dialog focused its Close
+  button and the first keystroke went nowhere. **It focuses ONCE, on
+  open**: the close handler is held in a ref. When `onClose` was an
+  effect dependency, every re-render with an inline handler (pages
+  refresh on 30–60 s timers) re-ran the effect and yanked focus
+  mid-sentence — a buyer's message ended half in its Subject box, and a
+  space typed into "Record payment" pressed Close and lost the note.
+- Toasts sit under the header, never at the foot of the screen, where
+  the composers, the configurator's action bar and their small print
+  live. Message text goes through `LinkedText` (components/ui.jsx):
+  addresses become links, built from text nodes, never HTML.
 - A dialog keeps its task as its title and lets the success panel carry
   the outcome; the toast fires after the dialog closes. Title, panel and
   toast all saying "Password changed" at once read as a stutter.
@@ -632,18 +662,41 @@ so a box across an L's missing corner gives an L-shaped room. Out of scope:
 curves and diagonals (they would be staircases of cells), and the portal
 configurator, which still describes rectangular floors only.
 
+**Names — "Long Table 2 · Seat 3".** Units used to be named by type and
+unit number alone, so four long tables each had a "Long Table · 3" and
+eight solo desks were all "· 1" — in the room panel, the reservation, the
+reminder email and every screen-reader label. Every piece now has a
+number among the pieces of its type on its floor (`Resource.number`), and
+a unit is named by its piece, then the organization's noun and its own
+label; a single-unit piece is just "Solo Desk 4" (`lib/names.js`,
+byte-identical in server/ and client/, checked by the geometry suite).
+Pieces placed before numbering have no number and are numbered on read
+in reading order, after the numbers taken — nothing was migrated. Placing
+or removing a piece first stores the numbers its floor is shown with
+(`services/pieceNames.js stampNumbers`), so a neighbour is never
+renumbered under somebody's reservation; a new piece takes its type's
+smallest free number. The layout serves each piece's `name`; a
+reservation keeps the name it was made under (`targetLabel`, its
+history), and anything showing a LIVE one — /mine, the kiosk, reminders,
+staff schedules and timelines — asks `unitLabels()` for today's name.
+A multi-unit piece whose type is named for the noun itself (a two-person
+"Desk" where a desk is what people book) would read "Desk 1 · Desk 2";
+its units are "Desk 1 · Place 2" instead. Room names are drawn ABOVE the
+furniture, with a halo (a desk in the room's corner used to cover its
+name); the room's second line stays under it.
+
 SpaceMap now resolves clicks BY CELL on the `<svg>` rather than per drawn
 element. Before, a room's or zone's fill sat over the grid and swallowed the
 click, so the Place tool could not put a piece inside a room by clicking —
 reproduced against main's SpaceMap, not theorised. Pieces stop their own
 clicks so furniture is never mistaken for the cell beneath it.
 
-`npm run test:spaces` runs 52 geometry checks (`tests/cells.test.mjs`, alone
-as `npm run test:cells`), 78 day checks (`tests/day.test.mjs`, alone as
-`npm run test:day`) and then 110 named spatial checks, each in a temporary
-replica set; `npm run test:isolated` runs the system suites' 174 checks in
-another temporary database, including literal-code checks with console
-email. None reads live credentials or touches Atlas. `test:spaces --
+`npm run test:spaces` runs 61 geometry and naming checks
+(`tests/cells.test.mjs`, alone as `npm run test:cells`), 78 day checks
+(`tests/day.test.mjs`, alone as `npm run test:day`) and then 121 named
+spatial checks, each in a temporary replica set; `npm run test:isolated`
+runs the system suites' 177 checks in another temporary database,
+including literal-code checks with console email. None reads live credentials or touches Atlas. `test:spaces --
 --serve` keeps disposable fixture data on :4010 (`--port=<n>` when another
 worktree's preview holds it) for the :5175 browser preview documented there
 — the spatial suite runs last so the flag reaches it.
@@ -739,7 +792,7 @@ account menu; `#/queue` redirects to `#/staff/orders`. Provisioning is a
 button (Orders → Provision): address check, then the owner's one-time
 PIN, then `billing.onProvisioned` starts the trial. Deploying needs
 `CONTROL_PLANE_SECRET` on BOTH services and `PRODUCT_URL` on the vendor.
-Vendor suite: 330 checks (`npm run test:isolated`); the billing and
+Vendor suite: 336 checks (`npm run test:isolated`); the billing and
 pricing suites run their database-moving parts only there, because they
 drive the billing job and edit prices.
 
@@ -1003,8 +1056,9 @@ worse than an error message.
   - **Tailwind only knows its own opacity steps.** `border-line/12` is not
     one (10 and 15 are), so the class generates nothing and the border
     falls back to preflight's light grey — a white outline on a dark
-    card. Use a step, or brackets: `border-line/[0.12]`. Inspector and
-    Modal still carry a `/12`.
+    card. Use a step, or brackets: `border-line/[0.12]`. (Inspector,
+    both Modals and a few portal panels carried a `/12` until the
+    dialog-focus fix replaced them.)
   - **Motion owns a `motion.*` element's style.** The selected unit's
     outline was a changed `stroke` on the chip's `motion.rect`, and it
     never reached the screen: the chosen seat looked like every other.

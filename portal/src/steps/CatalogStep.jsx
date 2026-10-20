@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import {
   Armchair, BookOpen, Boxes, Coffee, DoorClosed, LayoutGrid, Laptop, Monitor, Phone, Plus,
   Presentation, Sofa, Square, Trash2, Users,
@@ -58,6 +59,9 @@ const positiveInt = (value) => {
   return Number.isFinite(number) && number >= 1 ? Math.floor(number) : null;
 };
 
+/** "1 unit", "3 units". */
+const units = (n) => `${n} unit${n === 1 ? "" : "s"}`;
+
 /** The footprint drawn as the cells it occupies — the constraint is easier to see than to read. */
 function FootprintDiagram({ w, h }) {
   const cols = positiveInt(w);
@@ -76,6 +80,23 @@ export default function CatalogStep({ config, update, errors }) {
   const catalog = config.catalog || [];
   const resourceNoun = config.terminology?.resourceNoun || "resource";
 
+  /*
+   * "Add type" appends below every existing card — several screens down
+   * with a full catalog — so pressing it used to look like nothing
+   * happened. The new card is brought into view and its name selected,
+   * ready to type over.
+   */
+  const added = useRef(null);
+  useEffect(() => {
+    if (added.current === null) return;
+    const field = document.querySelector(`[name="catalog-${added.current}-label"]`);
+    added.current = null;
+    if (!field) return;
+    field.scrollIntoView({ block: "center", behavior: "smooth" });
+    field.focus({ preventScroll: true });
+    field.select?.();
+  }, [catalog.length]);
+
   const changeType = (index, patch) => {
     const next = { ...catalog[index], ...patch };
 
@@ -91,6 +112,7 @@ export default function CatalogStep({ config, update, errors }) {
 
   const addType = () => {
     const taken = new Set(catalog.map((type) => type.key));
+    added.current = catalog.length;
     update({
       catalog: [
         ...catalog,
@@ -112,16 +134,14 @@ export default function CatalogStep({ config, update, errors }) {
       }
     >
       <Notice>
-        A type's footprint is a fixed block of grid cells — no free-shaping, no resizing on the map.
-        That constraint is deliberate: it is what lets the editor place a piece by clicking one cell
-        and check for overlap by counting cells, instead of shipping a drawing tool. Model a bigger
-        table as a bigger footprint here.
+        Each type takes up a fixed block of squares on the floor plan and keeps that size wherever
+        it is placed. For a bigger table, give it a bigger footprint here.
       </Notice>
 
       {catalog.length === 0 && (
         <Notice tone="error" className="mt-4">
           {errorFor(errors, "catalog") ||
-            `Nothing to place yet. Add at least one type — a floor with no ${resourceNoun} on it is not worth provisioning.`}
+            `Nothing to place yet. Add at least one type — a floor with no ${resourceNoun} on it has nothing to book.`}
         </Notice>
       )}
 
@@ -144,12 +164,9 @@ export default function CatalogStep({ config, update, errors }) {
                 <span className="w-9 h-9 rounded-md bg-bg-panel flex items-center justify-center text-ink-secondary shrink-0">
                   <Icon size={18} />
                 </span>
-                <div className="min-w-0">
-                  <div className="text-sm font-semibold text-ink-primary">{type.label || "Untitled type"}</div>
-                  <div className="text-xs text-ink-muted font-mono">{type.key}</div>
-                </div>
+                <div className="min-w-0 text-sm font-semibold text-ink-primary">{type.label || "Untitled type"}</div>
                 <div className="ml-auto flex items-center gap-2">
-                  <Badge>{seats ? `${seats} units each` : "unit count not set"}</Badge>
+                  <Badge>{seats ? `${units(seats)} each` : "unit count not set"}</Badge>
                   <Button
                     variant="danger"
                     size="sm"
@@ -170,7 +187,7 @@ export default function CatalogStep({ config, update, errors }) {
                   value={type.label || ""}
                   onChange={(e) => changeType(index, { label: e.target.value })}
                   error={labelError}
-                  hint="What staff pick from the editor's palette."
+                  hint="The name people see on the map and in their reservations."
                 />
                 <Field
                   label="Width (cells)"
@@ -248,7 +265,7 @@ export default function CatalogStep({ config, update, errors }) {
                   </div>
                   <span className="text-xs mt-2 block text-ink-muted">
                     {positiveInt(type.w) && positiveInt(type.h)
-                      ? `${type.w} × ${type.h} cells · ${seats || "?"} units`
+                      ? `${type.w} × ${type.h} cells · ${seats ? units(seats) : "? units"}`
                       : "Set a whole number of cells."}
                   </span>
                 </div>

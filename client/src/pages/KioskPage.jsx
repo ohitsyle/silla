@@ -291,7 +291,7 @@ export default function KioskPage() {
 
       {requirements && requirements.selfServiceRegistration === false && step === STEP.TAP && (
         <div className="mb-4">
-          <Notice>Self-service registration is disabled — accounts are provisioned by staff.</Notice>
+          <Notice>New cards are registered by staff. If yours isn't recognised, please ask at the desk.</Notice>
         </div>
       )}
 
@@ -648,7 +648,7 @@ function TapStep({ onTap, busy, memberNoun, ready }) {
             data-autofocus
             placeholder="04A22B9C"
             mono
-            hint="4–32 hex characters. Case and separators are ignored."
+            hint="The code printed on the card: 4 to 32 digits and letters A–F. Spaces and dashes don't matter."
           />
           <div className="mt-5 flex justify-end gap-3">
             <Button onClick={() => setManualOpen(false)}>Cancel</Button>
@@ -820,6 +820,15 @@ function VerifyStep({ registration, expiryMinutes, onVerified, onError }) {
   );
 }
 
+/** "Long Table 2 · Seat 3", or "Discussion Room A, both levels". */
+function checkedInWhere(reservation, resourceNoun) {
+  if (reservation.kind === "room") {
+    const levels = reservation.roomLevels || 1;
+    return levels > 1 ? `${reservation.resourceLabel}, all ${levels} levels` : reservation.resourceLabel;
+  }
+  return reservation.label || `${reservation.resourceLabel || resourceNoun} · ${reservation.unitLabel}`;
+}
+
 /** The outcome screens: OCC-1, OCC-3, OCC-6, ID-2 success, and see-staff. */
 function ResultStep({ result, memberNoun, resourceNoun, onReset }) {
   const kind = result?.kind;
@@ -829,10 +838,9 @@ function ResultStep({ result, memberNoun, resourceNoun, onReset }) {
       Icon: CircleCheck,
       tone: "available",
       title: result?.member?.firstName ? `You're checked in, ${result.member.firstName}.` : "You're checked in.",
-      body: result?.reservation
-        ? result.reservation.kind === "room" ? `${result.reservation.resourceLabel} · all ${result.reservation.roomLevels} room level(s)` : `${result.reservation.resourceLabel || resourceNoun} · ${resourceNoun} ${result.reservation.unitLabel}` +
-          (result.reservation.position ? ` at (${result.reservation.position.col}, ${result.reservation.position.row})` : "")
-        : null,
+      // Where to go, by the name the map beside the kiosk uses: "Long Table
+      // 2 · Seat 3", or the room (on every level, when it has more than one).
+      body: result?.reservation ? checkedInWhere(result.reservation, resourceNoun) : null,
       foot: result?.reservation?.endTime
         ? `Until ${clock(result.reservation.endTime)}. Tap again when you leave.`
         : "Tap again when you leave.",

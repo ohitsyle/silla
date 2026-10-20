@@ -45,11 +45,18 @@ export function usePollUnread(enabled, accountId) {
     }
     refreshUnread();
     const onVisible = () => document.visibilityState === "visible" && refreshUnread();
-    const timer = setInterval(onVisible, 60_000);
+    // Also on every move between pages and on returning to the window: a
+    // reply used to wait for the next minute's poll, so a buyer could land
+    // on their orders and see no badge for a reply already sent.
+    const timer = setInterval(onVisible, 30_000);
     document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("hashchange", onVisible);
+    window.addEventListener("focus", onVisible);
     return () => {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("hashchange", onVisible);
+      window.removeEventListener("focus", onVisible);
     };
   }, [enabled, accountId]);
 }

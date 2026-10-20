@@ -1,7 +1,7 @@
 import { Building2, IdCard, LifeBuoy, Lightbulb, Minus, Plus, Tablet, TriangleAlert, Wrench } from "lucide-react";
 
 import { Panel, Segmented } from "../components/ui.jsx";
-import { formatMoney, monthlyPrice, yearlyPercent, yearlySaving } from "../lib/plans.js";
+import { formatMoney, monthlyPrice, yearlyPercent } from "../lib/plans.js";
 import { groupCatalogue, iconFor, minimumTag, monthlyOf, monthlyTag, oneTimeTag, tierName, unitWord } from "../lib/catalogue.js";
 import { buildingAddOn, cardKinds, count, extraBuildingsFor, outgrows } from "../lib/extras.js";
 
@@ -34,7 +34,7 @@ function CountInput({ value, onChange, min = 1, floor = 0, label, error }) {
     <div
       className={cx(
         "inline-flex h-11 items-stretch overflow-hidden rounded-full border bg-bg-panel",
-        error ? "border-state-unavailable/60" : "border-line/12"
+        error ? "border-state-unavailable/60" : "border-line/[0.12]"
       )}
     >
       <button
@@ -125,9 +125,9 @@ export default function HardwareStep({ errors = {}, pricing }) {
   const set = (patch) => setExtras((current) => ({ ...current, ...patch }));
   const setCount = (key, value) => setExtras((current) => ({ ...current, counts: { ...current.counts, [key]: value } }));
   const setMode = (key, mode) => setExtras((current) => ({ ...current, modes: { ...current.modes, [key]: mode } }));
-  // The chosen plan's own saving: the storefront's badge shows the smallest
-  // across plans so it is never overstated, but here the plan is known.
-  const percent = yearlyPercent(chosen) ?? yearlySaving(plans);
+  // The chosen plan's own saving, worked out from its prices — the same
+  // figure its card on the storefront states.
+  const percent = yearlyPercent(chosen);
 
   return (
     <div className="space-y-4">
@@ -256,7 +256,7 @@ export default function HardwareStep({ errors = {}, pricing }) {
             value={annual ? "yearly" : "monthly"}
             onChange={(v) => setAnnual(v === "yearly")}
             options={[
-              { value: "yearly", label: percent > 0 ? `Yearly (−${percent}%)` : "Yearly" },
+              { value: "yearly", label: percent > 0 ? `Yearly (save ${percent}%)` : "Yearly" },
               { value: "monthly", label: "Monthly" },
             ]}
           />

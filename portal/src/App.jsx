@@ -297,6 +297,18 @@ function Routed() {
           setEntry(null);
           navigate(ROUTES.configure);
         }}
+        onStartNew={() => {
+          // Their existing draft is replaced, which the dialog says on
+          // the button. Without this the "new" one was the old draft.
+          try {
+            window.localStorage.removeItem("silla-portal-draft");
+          } catch {
+            // A draft we cannot remove is overwritten by the first edit.
+          }
+          if (entry?.plan) saveIntent({ plan: entry.plan, annual: entry.annual !== false });
+          setEntry(null);
+          navigate(ROUTES.configure);
+        }}
         onSignIn={() => {
           // The plan survives the round trip through sign-in, and
           // AuthScreen's redirectTo brings them back to the wizard

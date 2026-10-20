@@ -34,9 +34,13 @@ export function ToastProvider({ children }) {
   return (
     <ToastContext.Provider value={value}>
       {children}
+      {/* Under the header, not at the foot of the screen: the bottom is
+          where the composers, the configurator's action bar and their
+          small print live, and a toast there covered them (and took the
+          clicks meant for them). Nothing in a toast is clickable. */}
       <div
         aria-live="polite"
-        className="pointer-events-none fixed inset-x-0 bottom-5 z-[300] flex flex-col items-center gap-2 px-4"
+        className="pointer-events-none fixed inset-x-0 top-[84px] z-[300] flex flex-col items-center gap-2 px-4"
       >
         <AnimatePresence initial={false}>
           {toasts.map((t) => {
@@ -45,11 +49,11 @@ export function ToastProvider({ children }) {
               <motion.div
                 key={t.id}
                 layout
-                initial={{ opacity: 0, y: 16, scale: 0.96 }}
+                initial={{ opacity: 0, y: -16, scale: 0.96 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: 8, scale: 0.98 }}
+                exit={{ opacity: 0, y: -8, scale: 0.98 }}
                 transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
-                className="pointer-events-auto flex items-center gap-2.5 rounded-full border border-line/10
+                className="flex items-center gap-2.5 rounded-full border border-line/10
                            bg-bg-card px-4 py-2.5 text-sm font-semibold shadow-lg"
               >
                 <Icon size={17} style={{ color: TONE[t.tone] }} />

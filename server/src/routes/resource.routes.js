@@ -15,6 +15,8 @@ import Site from "../models/Site.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { LIVE_STATUSES } from "../services/reservations/availability.js";
 import { EntitlementError, assertWithinLimit } from "../services/entitlements.js";
+import { stampNumbers } from "../services/pieceNames.js";
+import { nextNumber, pieceName } from "../lib/names.js";
 
 const router = Router();
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -120,7 +122,7 @@ async function findOverlap({ floorId, col, row, w, h, excludeResourceId = null }
 router.post("/", asyncHandler(async (req, res) => {
   const { floorId, resourceTypeKey, col, row } = req.body || {};
   if (!mongoose.isValidObjectId(floorId) || !Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0) return res.status(400).json({ error: "Choose a floor and an integer grid position." });
-  const resource = await withSpaceTransaction(req.user.organizationId, async (session, org) => {
+  const { resource, name } = await withSpaceTransaction(req.user.organizationId, async (session, org) => {
     const floor = await floorInOrg(floorId, req.user.organizationId, session);
     if (!floor) throw refuse("Floor not found", 404);
     const type = await ResourceType.findOne({ organization: req.user.organizationId, key: resourceTypeKey, internal: { $ne: true } }).session(session);
@@ -142,10 +144,15 @@ router.post("/", asyncHandler(async (req, res) => {
     // is not bookable (a shelf) adds none and is never refused for it.
     const adding = type.reservable === false ? 0 : Math.max(1, type.seatCount ?? 1);
     if (adding) await assertWithinLimit(org, "resources", adding);
-    const [r] = await Resource.create([{ organization: req.user.organizationId, floor: floorId, resourceType: type._id, position: { col, row }, units: Array.from({ length: type.seatCount }, (_, i) => ({ label: String(i + 1) })) }], { session });
-    return r;
+    // Its name on this floor ("Long Table 5"): the type's smallest free
+    // number, after the floor's existing pieces have kept the numbers they
+    // were being shown with (services/pieceNames.js).
+    const onFloor = await stampNumbers(floorId, session);
+    const number = nextNumber(onFloor, type._id);
+    const [r] = await Resource.create([{ organization: req.user.organizationId, floor: floorId, resourceType: type._id, position: { col, row }, number, units: Array.from({ length: type.seatCount }, (_, i) => ({ label: String(i + 1) })) }], { session });
+    return { resource: r, name: pieceName(type.label, number) };
   });
-  res.status(201).json({ resource: { id: String(resource._id), resourceType: String(resource.resourceType), position: resource.position, units: resource.units.map((u) => ({ label: u.label })) } });
+  res.status(201).json({ resource: { id: String(resource._id), resourceType: String(resource.resourceType), name, position: resource.position, units: resource.units.map((u) => ({ label: u.label })) } });
 }));
 router.delete("/:id", asyncHandler(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ error: "Invalid resource id" });
@@ -156,6 +163,9 @@ router.delete("/:id", asyncHandler(async (req, res) => {
     const rooms = await Room.find({ organization: req.user.organizationId, "levels.floor": r.floor }).session(session);
     const related = rooms.filter((room) => roomHolds(room, r, type));
     if (await Reservation.exists({ resource: { $in: [r._id, ...related.map((room) => room.resource)] }, status: { $in: LIVE_STATUSES } }).session(session)) throw refuse("This item or its room has an active or upcoming reservation. Cancel it first.", 409);
+    // Its neighbours keep the names they have: numbers derived in reading
+    // order would otherwise close the gap it leaves.
+    await stampNumbers(r.floor, session);
     await r.deleteOne({ session });
   });
   res.json({ ok: true });

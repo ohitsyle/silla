@@ -6,6 +6,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { api } from "../lib/api.js";
+import { formatSpan } from "../lib/bookingWindow.js";
 import { DEFAULT_ADMIN_SECTION, sectionsFor } from "../lib/adminSections.js";
 import HourHistogram from "../components/HourHistogram.jsx";
 import PlanUsage from "../components/PlanUsage.jsx";
@@ -18,6 +19,7 @@ import {
   Badge, Button, Card, EmptyState, Field, Loading, Modal, Notice, Page, PageHeader, Panel,
   Segmented, Select, SkeletonRows, SkeletonStats, Stat, StatusDot, listContainer, pageEnter,
 } from "../components/ui/index.jsx";
+import { unitName } from "../lib/names.js";
 
 /**
  * AdminPage — the admin surface (spec §14, ADM-1..ADM-5 + RPT-1).
@@ -134,6 +136,8 @@ function Dashboard() {
   }
 
   const m = data.metrics;
+  const resourceNoun = org?.terminology?.resourceNoun || "resource";
+  const floorName = (id) => data.floors.find((f) => f.id === id)?.name || null;
   return (
     <div className="space-y-5">
       <Segmented
@@ -155,7 +159,10 @@ function Dashboard() {
       <div>
         <SectionLabel>Capacity</SectionLabel>
         <motion.div {...listContainer()} className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <Stat label="Open" value={m.open} sub={`of ${m.total}`} tone="available"
+          {/* Units in a whole-only room are said the way the map says
+              them, not counted as Unavailable. */}
+          <Stat label="Open" value={m.open}
+                sub={`of ${m.total}${m.withRoom ? ` · ${m.withRoom} come with their room` : ""}`} tone="available"
                 progress={m.total ? m.open / m.total : 0} />
           <Stat label="Occupied" value={m.occupied} tone="occupied"
                 progress={m.total ? m.occupied / m.total : 0} />
@@ -217,7 +224,8 @@ function Dashboard() {
             {data.overstays.map((o) => (
               <li key={`${o.resourceId}-${o.unitLabel}`} className="py-2 flex items-center gap-3 text-sm">
                 <span className="text-ink-primary">
-                  Unit {o.unitLabel} at ({o.position.col}, {o.position.row})
+                  {o.label || `${resourceNoun} ${o.unitLabel}`}
+                  {floorName(o.floorId) && <span className="text-ink-muted"> · {floorName(o.floorId)}</span>}
                 </span>
                 <Button size="sm" icon={MapIcon} onClick={() => navigate(`/map/${o.floorId}`)} className="ml-auto">
                   Show on map
@@ -337,6 +345,7 @@ function Resources() {
       resources: term
         ? g.resources.filter(
             (r) =>
+              (r.name || r.typeLabel).toLowerCase().includes(term) ||
               r.typeLabel.toLowerCase().includes(term) ||
               g.zoneName.toLowerCase().includes(term) ||
               `${r.position.col},${r.position.row}`.includes(term.replace(/\s/g, ""))
@@ -376,7 +385,7 @@ function Resources() {
       <div className="flex flex-wrap items-center gap-3">
         <Field
           className="flex-1 min-w-[220px]"
-          placeholder="Filter by type, zone or cell…"
+          placeholder="Filter by name, type or zone…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           aria-label="Filter resources"
@@ -454,15 +463,20 @@ function Resources() {
                                px-4 py-2.5 last:border-b-0 transition-colors duration-fast
                                hover:bg-line/[0.05]"
                   >
-                    <span className="min-w-[150px] text-sm font-medium">{r.typeLabel}</span>
-                    <span className="text-xs tabular-nums text-ink-muted">
-                      ({r.position.col}, {r.position.row})
-                    </span>
+                    {/* "Long Table 2" — the name members see on the map, not
+                        a type and a grid coordinate. */}
+                    <span className="min-w-[150px] text-sm font-medium">{r.name || r.typeLabel}</span>
                     <div className="ml-auto flex flex-wrap items-center gap-1.5">
                       {r.units.map((u) => (
                         <UnitChip
                           key={u.label}
                           unit={u}
+                          name={unitName({
+                            piece: r.name || r.typeLabel,
+                            unitLabel: u.label,
+                            units: r.units.length,
+                            noun: org?.terminology?.resourceNoun || "resource",
+                          })}
                           busy={busy === `${r.id}:${u.label}`}
                           hasServiceStatus={r.hasServiceStatus}
                           onToggleAvailability={() =>
@@ -529,7 +543,7 @@ function Resources() {
  * not togglable here: the honest action is to cancel the reservation,
  * and a control that silently did nothing would be worse than none.
  */
-function UnitChip({ unit, busy, hasServiceStatus, onToggleAvailability, onToggleService }) {
+function UnitChip({ unit, name, busy, hasServiceStatus, onToggleAvailability, onToggleService }) {
   const derived = unit.status === "occupied" || unit.status === "reserved";
   const broken = unit.serviceStatus === "out_of_service";
   const off = unit.status === "unavailable";
@@ -542,7 +556,7 @@ function UnitChip({ unit, busy, hasServiceStatus, onToggleAvailability, onToggle
         type="button"
         disabled={derived || busy}
         onClick={onToggleAvailability}
-        aria-label={`Unit ${unit.label} — ${label}${derived ? "" : off ? ", enable" : ", disable"}`}
+        aria-label={`${name} — ${label}${derived ? "" : off ? ", enable" : ", disable"}`}
         title={
           derived
             ? "Held by a reservation — cancel that instead"
@@ -578,7 +592,7 @@ function UnitChip({ unit, busy, hasServiceStatus, onToggleAvailability, onToggle
           type="button"
           disabled={busy}
           onClick={onToggleService}
-          aria-label={`Unit ${unit.label} — mark ${broken ? "working" : "out of service"}`}
+          aria-label={`${name} — mark ${broken ? "working" : "out of service"}`}
           title={broken ? "Mark working" : "Mark out of service"}
           className="ml-0.5 grid h-7 w-6 place-items-center rounded-md text-ink-muted
                      transition-colors duration-fast hover:bg-line/10 hover:text-ink-primary"
@@ -672,7 +686,7 @@ function Members({ org }) {
             mono
             value={cardUid}
             onChange={(e) => setCardUid(e.target.value)}
-            hint="4–32 hex characters. Case and separators are ignored."
+            hint="The code printed on the card: 4 to 32 digits and letters A–F. Spaces and dashes don't matter."
           />
           <div className="mt-5 flex justify-end gap-3">
             <Button onClick={() => setReissueFor(null)}>Cancel</Button>
@@ -839,8 +853,8 @@ function Staff() {
           <Button type="submit" variant="primary" size="lg">Create</Button>
         </form>
         <p className="text-xs text-ink-muted mt-2">
-          Staff are email-provisioned with no card and no kiosk tap, and must change their PIN
-          and accept the terms at first sign-in.
+          New staff get their sign-in details by email — no card needed. The first time they sign
+          in, they choose their own PIN and accept the terms.
         </p>
       </Panel>
       )}
@@ -926,7 +940,7 @@ function Settings() {
         endTime: new Date(closure.endTime).toISOString(),
         reason: closure.reason,
       });
-      setNotice("Closure scheduled. Affected reservations are cancelled and emailed by the worker.");
+      setNotice("Closure scheduled. Any reservations it covers are cancelled, and the people who held them are emailed the reason.");
       setClosure({ startTime: "", endTime: "", reason: "" });
       load();
     } catch (e2) {
@@ -1007,7 +1021,7 @@ function Settings() {
                 <div className="mr-auto">
                   <div className="text-ink-primary">{c.reason}</div>
                   <div className="text-xs text-ink-muted">
-                    {new Date(c.startTime).toLocaleString()} — {new Date(c.endTime).toLocaleString()}
+                    {formatSpan(c.startTime, c.endTime)}
                     {c.appliedAt && " · applied"}
                   </div>
                 </div>
@@ -1035,18 +1049,19 @@ function Settings() {
 
       <Branding branding={o.branding} />
 
-      <Panel title="White-label configuration">
+      <Panel title="Words and member IDs">
         <div className="grid sm:grid-cols-3 gap-3 text-sm">
-          <KV label="Resource noun" value={o.terminology.resourceNoun} />
-          <KV label="Member noun" value={o.terminology.memberNoun} />
-          <KV label="Facility label" value={o.terminology.facilityLabel} />
+          <KV label="A bookable thing is a" value={o.terminology.resourceNoun} />
+          <KV label="A person who books is a" value={o.terminology.memberNoun} />
+          <KV label="The place is called" value={o.terminology.facilityLabel} />
           <KV label="Member ID format" value={o.identity.memberIdFormat} />
-          <KV label="Check-in method" value={o.identity.checkInMethod} />
+          <KV label="Check-in" value={CHECK_IN_METHODS[o.identity.checkInMethod] || o.identity.checkInMethod} />
         </div>
+        {/* This said "Every value above came from your provisioning
+            profile… contact your provider" to the buyer's own superadmin. */}
         <p className="text-xs text-ink-muted mt-3">
-          Every value above came from your provisioning profile. To change your vocabulary or identity
-          format, contact your provider — the whole product follows from these, so they are changed
-          together rather than one at a time.
+          These were set when your system was built. Every screen, email and kiosk prompt follows
+          from them, so they are changed together: ask SILLA when you want them changed.
         </p>
       </Panel>
     </div>
@@ -1368,6 +1383,9 @@ function SectionLabel({ children }) {
     </h3>
   );
 }
+
+/** How members check in, in words — the organization stores a method key. */
+const CHECK_IN_METHODS = { rfid: "Tap an RFID card", qr: "Scan a QR code" };
 
 function KV({ label, value, swatch }) {
   return (
