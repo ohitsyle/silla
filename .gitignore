@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Real credentials — only .env.example is tracked, and it holds
+# placeholders. Never commit a filled-in .env.
+.env
+.env.local
+*.env.local
+
+# Build output
+dist/
+build/
+
+# Caches that can exceed GitHub's 100MB file limit. mongodb-memory-server
+# downloads a ~140MB mongod binary here; it is a devDependency nothing in
+# the repo imports, and committing it makes the repo unpushable.
+.cache/
+*.tsbuildinfo
+
+# Logs / OS noise
+*.log
+npm-debug.log*
+.DS_Store
+
+# Rendered email previews (npm run email:preview)
+email-preview/
+
+# AI coding assistant configuration
+CLAUDE.md
+claude.md
+AGENTS.md
+.claude/
